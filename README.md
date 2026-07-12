@@ -6,7 +6,7 @@ Pi Fabric gives the model one `fabric_exec` tool for type-checked TypeScript pro
 
 ## Status
 
-Pi Fabric is an early implementation. The core runtime, built-in tools, registered-extension tool capture, MCP provider, provider protocol, approval policies, guarded subagents, dynamic workflow helpers, persistent actors, durable mesh, council helper, and recursive query helper are implemented. Review the security notes before enabling mutating tools or external providers.
+Pi Fabric is an early implementation. The core runtime, built-in tools, registered-extension tool capture, MCP provider, provider protocol, approval policies, guarded subagents, dynamic workflow helpers, persistent actors, durable mesh, general-purpose activity TUI, council helper, and recursive query helper are implemented. Review the security notes before enabling mutating tools or external providers.
 
 ## Install
 
@@ -127,7 +127,12 @@ HTTP servers use `baseUrl` instead of `command`. Dynamic definitions live until 
 Fabric programs already keep orchestration and intermediate values in code. The workflow globals add Claude Code-style names and progress phases without introducing a second JavaScript runtime:
 
 ```ts
-await phase("Discover");
+await workflow.configure({
+  name: "Authentication audit",
+  description: "Discover relevant files, audit them in parallel, then verify findings",
+});
+
+await phase("Discover", { total: 1 });
 const inventory = await agent<{ files: string[] }>(
   "List source files relevant to authentication.",
   {
@@ -142,7 +147,7 @@ const inventory = await agent<{ files: string[] }>(
   },
 );
 
-await phase("Audit");
+await phase("Audit", { total: inventory.files.length });
 const findings = await parallel(
   inventory.files.map(
     (file) => () =>
@@ -154,14 +159,14 @@ const findings = await parallel(
   { concurrency: 8 },
 );
 
-await phase("Verify");
+await phase("Verify", { total: 1 });
 return agent(`Verify and synthesize these findings: ${JSON.stringify(findings)}`, {
   label: "verify findings",
   tools: ["read", "grep", "find", "ls"],
 });
 ```
 
-Available helpers are `workflow.agent()`, `workflow.parallel()`, `workflow.pipeline()`, `workflow.phase()`, `workflow.log()`, and `workflow.budget`. The shorter `agent()`, `parallel()`, `pipeline()`, `phase()`, `log()`, and `budget` aliases are equivalent. `fabric_exec` accepts optional `agentBudget` and `tokenBudget` limits; configuration supplies a hard per-execution agent cap.
+Available helpers are `workflow.agent()`, `workflow.parallel()`, `workflow.pipeline()`, `workflow.configure()`, `workflow.phase()`, `workflow.item()`, `workflow.event()`, `workflow.log()`, and `workflow.budget`. `configure()` names the activity surface; phase options accept `id`, `description`, and an expected `total`. `item()` lets arbitrary non-agent work report status, detail, and progress without requiring a bespoke renderer. `event()` adds a bounded milestone to the run feed. The shorter `agent()`, `parallel()`, `pipeline()`, `phase()`, `log()`, and `budget` aliases are equivalent. `fabric_exec` accepts optional `agentBudget` and `tokenBudget` limits; configuration supplies a hard per-execution agent cap.
 
 A JSON Schema on an agent request makes the worker return validated structured data through `result.value`. Workflow helpers return that value directly and otherwise return the agent's final text.
 
@@ -309,6 +314,30 @@ Supervisor and advisor are deliberately skills rather than hard-coded host servi
 
 `fabric_exec` uses the public `pi-code-previews` cooperative shell. It inherits the user's border/background mode, collapsed-result behavior, error styling, and tool-call timing without taking ownership of Pi's built-in tool renderers. Its renderer adds a numbered TypeScript preview, live phase/call activity, and compact phase/nested-call summaries. Users do not need to install `pi-code-previews` separately.
 
+Fabric also owns a general-purpose, theme-aware activity surface for any agent setup:
+
+- A compact widget below the editor follows the current phase and shows active agents, actors, tools, custom items, shared tasks, token use, and elapsed time. It disappears after ordinary runs become quiet, while persistent actors remain visible as a compact ambient row.
+- The footer status condenses the same state without replacing Pi's footer.
+- `/fabric dashboard` opens a responsive interactive overlay. Wide terminals use a Claude-workflow-style phase pane beside agents and work items; narrow terminals stack the same panels. Agent detail includes task, model, current tool, usage, result, worktree, and attach metadata. Actor mailboxes, mesh state, and recent mesh events use the same view rather than role-specific screens.
+- `↑`/`↓` or `j`/`k` select, `←`/`→` or Tab switch panes, Enter drills into details, `f` cycles status filters, `[`/`]` switches retained runs, and Esc backs out or closes.
+
+The surface is data-driven. Fabric automatically instruments nested provider calls, subagents, persistent actors, and task-shaped mesh entries. A workflow can add domain-specific labels and arbitrary progress without adding extension UI code:
+
+```ts
+await workflow.configure({ name: "Release train", description: "Build, verify, and publish" });
+await phase("Build", { total: packages.length });
+await workflow.item({
+  id: "docs",
+  label: "Documentation",
+  status: "running",
+  completed: 2,
+  total: 5,
+});
+await workflow.event({ message: "Canary passed", level: "success" });
+```
+
+External Fabric providers can emit structured `context.activity()` updates for an entity, progress message, or metrics. This keeps the TUI generic while allowing a virtual provider to expose richer live state.
+
 ## Configuration
 
 Pi Fabric reads:
@@ -366,6 +395,16 @@ Project values override global values.
     "retainRuns": false,
     "notifyOnComplete": true
   },
+  "ui": {
+    "enabled": true,
+    "status": true,
+    "widget": "auto",
+    "placement": "belowEditor",
+    "maxRows": 6,
+    "refreshMs": 500,
+    "lingerMs": 10000,
+    "eventHistory": 80
+  },
   "mesh": {
     "enabled": true,
     "maxEventBytes": 262144,
@@ -380,6 +419,8 @@ Project values override global values.
 Fabric risk classes are `read`, `write`, `execute`, `network`, and `agent`; approval policy values are `allow`, `ask`, or `deny`. Captured tools default to the conservative `execute` risk because Pi tool definitions do not declare effects. Add exact tool-name overrides under `capture.risks`. Set `capture.hideFromModel` to `false` to index tools without hiding them. `capture.keepVisible` names stay in both Fabric and Pi's direct registry; be careful when removing built-in override names because doing so exposes Pi's underlying built-in implementation. An `ask` policy is fail-closed in headless modes without interactive UI. Approval is cached by risk class for one `fabric_exec` execution.
 
 When `mcp.disableOAuth` is true, MCP calls may use cached credentials but cannot launch a new interactive OAuth flow.
+
+The UI `widget` mode is `auto`, `always`, or `hidden`. `auto` shows active work, recent completion, and live persistent actors. Set `ui.enabled` to `false` to disable both the widget and dashboard controller, or disable only `ui.status`. Widget placement is `aboveEditor` or `belowEditor`.
 
 Mesh data defaults to `<project>/.pi/fabric/mesh`. Set `mesh.root` to a relative or absolute path to relocate durable topics, shared state, and actor sessions. Add `.pi/fabric/mesh/` to the project's ignore file unless the coordination log is intentionally versioned. Set `mesh.enabled` to `false` to disable both mesh actions and ambient actor restoration.
 
@@ -423,12 +464,22 @@ export default function extension(pi: ExtensionAPI) {
 }
 ```
 
-Providers own their schemas, state, and execution semantics. Pi Fabric validates arguments, enforces the declared risk policy, records nested-call audits, and propagates cancellation.
+Providers own their schemas, state, and execution semantics. Pi Fabric validates arguments, enforces the declared risk policy, records nested-call audits, and propagates cancellation. A provider can enrich the generic activity surface without registering a TUI component:
+
+```ts
+async invoke(actionName, args, context) {
+  context.activity?.({ type: "entity", id: job.id, kind: "custom", name: job.name });
+  context.activity?.({ type: "progress", message: "Indexing package 3/12" });
+  context.activity?.({ type: "metrics", tokens: 4200, toolCalls: 9 });
+  return job.result;
+}
+```
 
 ## Commands
 
 ```text
 /fabric status
+/fabric dashboard
 /fabric reload
 /fabric providers
 /fabric captured [query]
@@ -455,6 +506,8 @@ ActionRegistry
     ├── agents.*     one-shot workers + persistent mailbox actors
     ├── mesh.*       durable topics + compare-and-swap state
     └── external     explicit pi.events providers
+
+ActivityStore → compact widget + footer status + interactive dashboard
 ```
 
 Guest code has no `process`, `require`, filesystem, network, or subprocess globals. All effects cross the host bridge, where schemas, approvals, audit records, timeouts, and cancellation apply. Each execution receives a fresh QuickJS context. Named strings passed in the `strings` tool parameter are available as `π.key`.

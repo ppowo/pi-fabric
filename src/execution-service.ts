@@ -1,9 +1,20 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { FabricActivityStore } from "./activity/store.js";
+import type {
+  FabricActivityEventInput,
+  FabricActivityItemInput,
+  FabricPhaseInput,
+  FabricRunDisplay,
+} from "./activity/types.js";
 import type { FabricConfig } from "./config.js";
-import { ActionRegistry, type FabricCallAudit } from "./core/action-registry.js";
+import {
+  ActionRegistry,
+  type FabricCallAudit,
+  type FabricRegistryActivityEvent,
+} from "./core/action-registry.js";
 import { ApprovalController } from "./core/approval-controller.js";
 import { GUEST_TYPE_DECLARATIONS } from "./runtime/guest-types.js";
-import { QuickJsRuntime } from "./runtime/quickjs-runtime.js";
+import { QuickJsRuntime, type FabricSandboxResult } from "./runtime/quickjs-runtime.js";
 import { typeCheckFabricCode, type FabricTypeError } from "./runtime/type-checker.js";
 
 export interface FabricExecutionResult {
@@ -25,6 +36,7 @@ export interface FabricExecutionOptions {
   context: ExtensionContext;
   tokenBudget?: number;
   maxAgentCalls?: number;
+  display?: FabricRunDisplay;
   update(message: string): void;
 }
 
@@ -34,12 +46,15 @@ export class FabricExecutionService {
   constructor(
     readonly registry: ActionRegistry,
     readonly config: FabricConfig,
+    readonly activity?: FabricActivityStore,
   ) {}
 
   async execute(options: FabricExecutionOptions): Promise<FabricExecutionResult> {
     const startedAt = performance.now();
+    this.activity?.start(options.parentToolCallId, options.display);
     const checked = typeCheckFabricCode(options.code, GUEST_TYPE_DECLARATIONS);
     if (checked.errors.length > 0) {
+      this.activity?.finish(options.parentToolCallId, false, "Type checking failed");
       return {
         success: false,
         value: undefined,
@@ -69,6 +84,16 @@ export class FabricExecutionService {
         throw new Error(`Fabric agent budget exhausted (${maxAgentCalls} per execution)`);
       }
     };
+    const observeInvocation = (event: FabricRegistryActivityEvent): void => {
+      if (!this.activity) return;
+      if (event.type === "call_start") {
+        this.activity.beginCall(options.parentToolCallId, event);
+      } else if (event.type === "call_update") {
+        this.activity.updateCall(options.parentToolCallId, event.callId, event.update);
+      } else {
+        this.activity.finishCall(options.parentToolCallId, event.callId, event);
+      }
+    };
     const baseContext = {
       cwd: options.context.cwd,
       signal: options.signal,
@@ -77,75 +102,112 @@ export class FabricExecutionService {
       extensionContext: options.context,
       update: options.update,
     };
-    const sandboxResult = await this.#runtime.execute(
-      options.code,
-      async (ref, args, runtimeSignal) => {
-        const callContext = { ...baseContext, signal: runtimeSignal };
-        switch (ref) {
-          case "fabric.$providers":
-            return this.registry.providers();
-          case "fabric.$list":
-            return this.registry.list(
-              {
-                ...(typeof args.provider === "string" ? { provider: args.provider } : {}),
-                ...(typeof args.namespace === "string" ? { namespace: args.namespace } : {}),
-                ...(typeof args.query === "string" ? { query: args.query } : {}),
-                ...(typeof args.limit === "number" ? { limit: args.limit } : {}),
-              },
-              callContext,
-            );
-          case "fabric.$search":
-            return this.registry.search(
-              String(args.query ?? ""),
-              callContext,
-              typeof args.limit === "number" ? args.limit : undefined,
-            );
-          case "fabric.$describe":
-            return this.registry.describe(String(args.ref ?? ""), callContext);
-          case "fabric.$call": {
-            const callArgs =
-              typeof args.args === "object" && args.args !== null && !Array.isArray(args.args)
-                ? (args.args as Record<string, unknown>)
-                : {};
-            const targetRef = String(args.ref ?? "");
-            guardAgentCall(targetRef);
-            return this.registry.invoke(targetRef, callArgs, {
-              ...callContext,
-              approve: (action) => approval.approve(action),
-              audits,
-              maxResultChars: this.config.executor.maxNestedResultChars,
-            });
+    let sandboxResult: FabricSandboxResult;
+    try {
+      sandboxResult = await this.#runtime.execute(
+        options.code,
+        async (ref, args, runtimeSignal) => {
+          const callContext = { ...baseContext, signal: runtimeSignal };
+          switch (ref) {
+            case "fabric.$providers":
+              return this.registry.providers();
+            case "fabric.$list":
+              return this.registry.list(
+                {
+                  ...(typeof args.provider === "string" ? { provider: args.provider } : {}),
+                  ...(typeof args.namespace === "string" ? { namespace: args.namespace } : {}),
+                  ...(typeof args.query === "string" ? { query: args.query } : {}),
+                  ...(typeof args.limit === "number" ? { limit: args.limit } : {}),
+                },
+                callContext,
+              );
+            case "fabric.$search":
+              return this.registry.search(
+                String(args.query ?? ""),
+                callContext,
+                typeof args.limit === "number" ? args.limit : undefined,
+              );
+            case "fabric.$describe":
+              return this.registry.describe(String(args.ref ?? ""), callContext);
+            case "fabric.$call": {
+              const callArgs =
+                typeof args.args === "object" && args.args !== null && !Array.isArray(args.args)
+                  ? (args.args as Record<string, unknown>)
+                  : {};
+              const targetRef = String(args.ref ?? "");
+              guardAgentCall(targetRef);
+              return this.registry.invoke(targetRef, callArgs, {
+                ...callContext,
+                approve: (action) => approval.approve(action),
+                audits,
+                maxResultChars: this.config.executor.maxNestedResultChars,
+                observeInvocation,
+              });
+            }
+            case "fabric.$progress":
+              options.update(String(args.message ?? "Working"));
+              return undefined;
+            case "fabric.$configure": {
+              const display: FabricRunDisplay = {
+                ...(typeof args.name === "string" ? { name: args.name } : {}),
+                ...(typeof args.description === "string" ? { description: args.description } : {}),
+              };
+              return this.activity?.configure(options.parentToolCallId, display) ?? display;
+            }
+            case "fabric.$phase": {
+              const name = String(args.name ?? "").trim();
+              if (!name) throw new Error("Workflow phase name must not be empty");
+              if (!phases.includes(name)) phases.push(name);
+              const phaseInput: FabricPhaseInput = {
+                name,
+                ...(typeof args.id === "string" ? { id: args.id } : {}),
+                ...(typeof args.description === "string" ? { description: args.description } : {}),
+                ...(typeof args.total === "number" ? { total: args.total } : {}),
+              };
+              const activityPhase = this.activity?.phase(options.parentToolCallId, phaseInput);
+              options.update(`Phase: ${name}`);
+              return {
+                name,
+                index: phases.indexOf(name),
+                ...(activityPhase ? { id: activityPhase.id } : {}),
+              };
+            }
+            case "fabric.$item": {
+              const item = args as unknown as FabricActivityItemInput;
+              return this.activity?.upsertItem(options.parentToolCallId, item) ?? item;
+            }
+            case "fabric.$event": {
+              const event = args as unknown as FabricActivityEventInput;
+              this.activity?.event(options.parentToolCallId, event);
+              return undefined;
+            }
+            default:
+              guardAgentCall(ref);
+              return this.registry.invoke(ref, args, {
+                ...callContext,
+                approve: (action) => approval.approve(action),
+                audits,
+                maxResultChars: this.config.executor.maxNestedResultChars,
+                observeInvocation,
+              });
           }
-          case "fabric.$progress":
-            options.update(String(args.message ?? "Working"));
-            return undefined;
-          case "fabric.$phase": {
-            const name = String(args.name ?? "").trim();
-            if (!name) throw new Error("Workflow phase name must not be empty");
-            if (!phases.includes(name)) phases.push(name);
-            options.update(`Phase: ${name}`);
-            return { name, index: phases.indexOf(name) };
-          }
-          default:
-            guardAgentCall(ref);
-            return this.registry.invoke(ref, args, {
-              ...callContext,
-              approve: (action) => approval.approve(action),
-              audits,
-              maxResultChars: this.config.executor.maxNestedResultChars,
-            });
-        }
-      },
-      {
-        timeoutMs: this.config.executor.timeoutMs,
-        memoryLimitBytes: this.config.executor.memoryLimitBytes,
-        maxLogChars: this.config.executor.maxOutputChars,
-        ...(options.strings ? { strings: options.strings } : {}),
-        ...(options.tokenBudget !== undefined ? { tokenBudget: options.tokenBudget } : {}),
-        ...(options.signal ? { signal: options.signal } : {}),
-      },
-    );
+        },
+        {
+          timeoutMs: this.config.executor.timeoutMs,
+          memoryLimitBytes: this.config.executor.memoryLimitBytes,
+          maxLogChars: this.config.executor.maxOutputChars,
+          ...(options.strings ? { strings: options.strings } : {}),
+          ...(options.tokenBudget !== undefined ? { tokenBudget: options.tokenBudget } : {}),
+          ...(options.signal ? { signal: options.signal } : {}),
+        },
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.activity?.finish(options.parentToolCallId, false, message);
+      throw error;
+    }
 
+    this.activity?.finish(options.parentToolCallId, !sandboxResult.error, sandboxResult.error);
     return {
       success: !sandboxResult.error,
       value: sandboxResult.value,

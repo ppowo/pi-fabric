@@ -19,6 +19,11 @@ If the pattern is omitted, infer it from the request. If a supervisor goal is om
 Pass long instructions through the `strings` parameter and reference them as `π.instructions`. Use one Fabric call shaped like this:
 
 ```ts
+await workflow.configure({
+  name: `Ambient · ${π.name}`,
+  description: "Persistent event-driven actor setup",
+});
+await phase("Start actor", { total: 1 });
 const current = await agents.actors();
 const duplicate = current.find((actor) => actor.name === π.name && actor.status !== "stopped");
 if (duplicate) return { reused: true, actor: duplicate };

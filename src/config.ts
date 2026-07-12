@@ -4,6 +4,8 @@ import type { FabricRisk } from "./protocol.js";
 
 export type FabricApprovalMode = "allow" | "ask" | "deny";
 export type FabricSubagentTransport = "auto" | "process" | "tmux" | "screen" | "localterm";
+export type FabricUiWidgetMode = "auto" | "always" | "hidden";
+export type FabricUiWidgetPlacement = "aboveEditor" | "belowEditor";
 
 export interface FabricExecutorConfig {
   timeoutMs: number;
@@ -49,6 +51,17 @@ export interface FabricToolCaptureConfig {
   risks: Record<string, FabricRisk>;
 }
 
+export interface FabricUiConfig {
+  enabled: boolean;
+  status: boolean;
+  widget: FabricUiWidgetMode;
+  placement: FabricUiWidgetPlacement;
+  maxRows: number;
+  refreshMs: number;
+  lingerMs: number;
+  eventHistory: number;
+}
+
 export interface FabricMeshConfig {
   enabled: boolean;
   root?: string;
@@ -65,6 +78,7 @@ export interface FabricConfig {
   mcp: FabricMcpConfig;
   subagents: FabricSubagentConfig;
   capture: FabricToolCaptureConfig;
+  ui: FabricUiConfig;
   mesh: FabricMeshConfig;
 }
 
@@ -114,6 +128,16 @@ export const DEFAULT_FABRIC_CONFIG: FabricConfig = {
       write: "write",
       bash: "execute",
     },
+  },
+  ui: {
+    enabled: true,
+    status: true,
+    widget: "auto",
+    placement: "belowEditor",
+    maxRows: 6,
+    refreshMs: 500,
+    lingerMs: 10_000,
+    eventHistory: 80,
   },
   mesh: {
     enabled: true,
@@ -196,6 +220,15 @@ const objectValue = (value: unknown): Record<string, unknown> =>
     ? (value as Record<string, unknown>)
     : {};
 
+const widgetModeValue = (value: unknown, fallback: FabricUiWidgetMode): FabricUiWidgetMode =>
+  value === "auto" || value === "always" || value === "hidden" ? value : fallback;
+
+const widgetPlacementValue = (
+  value: unknown,
+  fallback: FabricUiWidgetPlacement,
+): FabricUiWidgetPlacement =>
+  value === "aboveEditor" || value === "belowEditor" ? value : fallback;
+
 const riskValue = (value: unknown, fallback: FabricRisk): FabricRisk =>
   value === "read" ||
   value === "write" ||
@@ -211,6 +244,7 @@ export const normalizeFabricConfig = (input: Record<string, unknown>): FabricCon
   const mcp = objectValue(input.mcp);
   const subagents = objectValue(input.subagents);
   const capture = objectValue(input.capture);
+  const ui = objectValue(input.ui);
   const mesh = objectValue(input.mesh);
   const configuredTools = Array.isArray(subagents.defaultTools)
     ? subagents.defaultTools.filter(
@@ -322,6 +356,21 @@ export const normalizeFabricConfig = (input: Record<string, unknown>): FabricCon
       keepVisible: [...new Set(configuredVisible)],
       defaultRisk: riskValue(capture.defaultRisk, DEFAULT_FABRIC_CONFIG.capture.defaultRisk),
       risks,
+    },
+    ui: {
+      enabled: booleanValue(ui.enabled, DEFAULT_FABRIC_CONFIG.ui.enabled),
+      status: booleanValue(ui.status, DEFAULT_FABRIC_CONFIG.ui.status),
+      widget: widgetModeValue(ui.widget, DEFAULT_FABRIC_CONFIG.ui.widget),
+      placement: widgetPlacementValue(ui.placement, DEFAULT_FABRIC_CONFIG.ui.placement),
+      maxRows: boundedInteger(ui.maxRows, DEFAULT_FABRIC_CONFIG.ui.maxRows, 1, 20),
+      refreshMs: boundedInteger(ui.refreshMs, DEFAULT_FABRIC_CONFIG.ui.refreshMs, 100, 10_000),
+      lingerMs: boundedInteger(ui.lingerMs, DEFAULT_FABRIC_CONFIG.ui.lingerMs, 0, 300_000),
+      eventHistory: boundedInteger(
+        ui.eventHistory,
+        DEFAULT_FABRIC_CONFIG.ui.eventHistory,
+        1,
+        500,
+      ),
     },
     mesh: {
       enabled: booleanValue(mesh.enabled, DEFAULT_FABRIC_CONFIG.mesh.enabled),

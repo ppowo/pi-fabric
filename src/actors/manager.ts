@@ -769,6 +769,8 @@ export class ActorManager {
       delivery: actor.delivery,
       responseMode: actor.responseMode,
       triggerTurn: actor.triggerTurn,
+      ...(actor.model ? { model: actor.model } : {}),
+      ...(actor.thinking ? { thinking: actor.thinking } : {}),
       queued: actor.queue.length,
       messages: actor.messages.length,
       createdAt: actor.createdAt,

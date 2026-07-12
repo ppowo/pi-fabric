@@ -30,7 +30,14 @@ const provider = (): FabricProvider => ({
   async describe(name) {
     return name === "echo" ? (await this.list({}, context))[0] : undefined;
   },
-  async invoke(_name, args) {
+  async invoke(_name, args, invocationContext) {
+    invocationContext.activity?.({ type: "progress", message: "echoing" });
+    invocationContext.activity?.({
+      type: "entity",
+      id: "demo-entity",
+      kind: "custom",
+      name: "Echo operation",
+    });
     return args.value;
   },
 });
@@ -63,6 +70,29 @@ describe("ActionRegistry", () => {
     expect(result).toBe("hello");
     expect(approve).toHaveBeenCalledOnce();
     expect(audits).toMatchObject([{ ref: "demo.echo", success: true }]);
+  });
+
+  it("emits structured invocation activity without exposing another model tool", async () => {
+    const registry = new ActionRegistry();
+    registry.register(provider());
+    const events: unknown[] = [];
+    await registry.invoke("demo.echo", { value: "hello" }, {
+      ...context,
+      approve: async () => {},
+      audits: [],
+      maxResultChars: 10_000,
+      observeInvocation: (event) => events.push(event),
+    });
+
+    expect(events).toMatchObject([
+      { type: "call_start", ref: "demo.echo", args: { value: "hello" } },
+      { type: "call_update", update: { type: "progress", message: "echoing" } },
+      {
+        type: "call_update",
+        update: { type: "entity", id: "demo-entity", kind: "custom" },
+      },
+      { type: "call_end", success: true, result: "hello" },
+    ]);
   });
 
   it("caps nested results before crossing the sandbox bridge", async () => {

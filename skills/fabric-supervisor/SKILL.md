@@ -12,6 +12,11 @@ Derive the goal from the skill arguments. If arguments are empty, use the active
 Call `fabric_exec` once. Put the completed supervisor prompt in `strings.instructions` and the stable name `supervisor` in `strings.name`, then execute:
 
 ```ts
+await workflow.configure({
+  name: `Supervisor · ${π.name}`,
+  description: "Persistent ambient goal supervision",
+});
+await phase("Start actor", { total: 1 });
 const current = await agents.actors();
 const existing = current.find((actor) => actor.name === π.name && actor.status !== "stopped");
 if (existing) return { reused: true, actor: existing };

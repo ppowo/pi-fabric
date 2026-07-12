@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Value } from "typebox/value";
 import type {
   FabricActionDescriptor,
+  FabricInvocationActivityUpdate,
   FabricInvocationContext,
   FabricProvider,
   FabricProviderListRequest,
@@ -23,10 +24,31 @@ export interface FabricCallAudit {
   resultTruncated?: boolean;
 }
 
+export type FabricRegistryActivityEvent =
+  | {
+      type: "call_start";
+      callId: string;
+      ref: string;
+      args: Record<string, unknown>;
+    }
+  | {
+      type: "call_update";
+      callId: string;
+      update: FabricInvocationActivityUpdate;
+    }
+  | {
+      type: "call_end";
+      callId: string;
+      success: boolean;
+      result?: unknown;
+      error?: string;
+    };
+
 export interface FabricRegistryInvocationContext extends FabricInvocationContext {
   approve(action: ResolvedFabricAction): Promise<void>;
   audits: FabricCallAudit[];
   maxResultChars: number;
+  observeInvocation?(event: FabricRegistryActivityEvent): void;
 }
 
 const providerNamePattern = /^[a-z][a-z0-9_-]*$/;
@@ -197,20 +219,54 @@ export class ActionRegistry {
       startedAt: Date.now(),
     };
     context.audits.push(audit);
+    context.observeInvocation?.({
+      type: "call_start",
+      callId: nestedToolCallId,
+      ref,
+      args: preparedArgs,
+    });
     context.update(`Calling ${ref}`);
     try {
       const value = await provider.invoke(actionName, preparedArgs, {
         ...context,
         nestedToolCallId,
+        update(message) {
+          context.update(message);
+          context.observeInvocation?.({
+            type: "call_update",
+            callId: nestedToolCallId,
+            update: { type: "progress", message },
+          });
+        },
+        activity(update) {
+          context.activity?.(update);
+          context.observeInvocation?.({
+            type: "call_update",
+            callId: nestedToolCallId,
+            update,
+          });
+        },
       });
       const bounded = boundedResult(value, context.maxResultChars);
       audit.success = true;
       audit.resultChars = bounded.chars;
       audit.resultTruncated = bounded.truncated;
+      context.observeInvocation?.({
+        type: "call_end",
+        callId: nestedToolCallId,
+        success: true,
+        result: value,
+      });
       return bounded.value;
     } catch (error) {
       audit.success = false;
       audit.error = error instanceof Error ? error.message : String(error);
+      context.observeInvocation?.({
+        type: "call_end",
+        callId: nestedToolCallId,
+        success: false,
+        error: audit.error,
+      });
       throw error;
     } finally {
       audit.endedAt = Date.now();

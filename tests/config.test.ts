@@ -29,6 +29,14 @@ describe("Fabric configuration", () => {
         defaultRisk: "invalid",
         risks: { inspect: "read", mutate: "invalid" },
       },
+      ui: {
+        widget: "always",
+        placement: "aboveEditor",
+        maxRows: 100,
+        refreshMs: 1,
+        lingerMs: 5_000_000,
+        eventHistory: 0,
+      },
       mesh: { actorQueueLimit: 0, eventContextChars: 5_000_000 },
     });
     expect(config.executor.timeoutMs).toBe(1_000);
@@ -41,6 +49,14 @@ describe("Fabric configuration", () => {
     expect(config.capture.keepVisible).toEqual(["fabric_exec", "custom"]);
     expect(config.capture.defaultRisk).toBe("execute");
     expect(config.capture.risks).toMatchObject({ inspect: "read", mutate: "execute" });
+    expect(config.ui).toMatchObject({
+      widget: "always",
+      placement: "aboveEditor",
+      maxRows: 20,
+      refreshMs: 100,
+      lingerMs: 300_000,
+      eventHistory: 1,
+    });
     expect(config.mesh.actorQueueLimit).toBe(1);
     expect(config.mesh.eventContextChars).toBe(1_000_000);
   });

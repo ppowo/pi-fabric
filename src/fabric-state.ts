@@ -1,6 +1,7 @@
 import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import path from "node:path";
+import { FabricActivityStore } from "./activity/store.js";
 import { ActorManager } from "./actors/manager.js";
 import type { FabricActorHostEvent } from "./actors/types.js";
 import { CapturedToolCatalog } from "./capture/catalog.js";
@@ -35,6 +36,7 @@ export class FabricState {
   #mesh: MeshStore | undefined;
   #cwd: string | undefined;
   readonly #externalProviders = new Map<string, FabricProvider>();
+  readonly activity = new FabricActivityStore();
 
   constructor(
     readonly pi: ExtensionAPI,
@@ -81,6 +83,7 @@ export class FabricState {
 
   async initialize(context: ExtensionContext): Promise<void> {
     await this.#closeInternal();
+    this.activity.reset();
     this.#cwd = context.cwd;
     this.#config = loadFabricConfig({
       cwd: context.cwd,
@@ -175,7 +178,7 @@ export class FabricState {
     for (const provider of this.#externalProviders.values()) {
       this.#registry.register(provider);
     }
-    this.#execution = new FabricExecutionService(this.#registry, this.#config);
+    this.#execution = new FabricExecutionService(this.#registry, this.#config, this.activity);
     const discovery: FabricProviderDiscovery = {
       version: 1,
       register: (provider, options) => this.registerExternal(provider, options),
@@ -256,6 +259,7 @@ export class FabricState {
     this.#actors = undefined;
     this.#mesh = undefined;
     this.#cwd = undefined;
+    this.activity.reset();
     this.#externalProviders.clear();
   }
 

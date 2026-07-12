@@ -10,6 +10,11 @@ Start an emergent advisor using `fabric_exec`; never install or invoke an extern
 Treat skill arguments as an optional review focus. Put the completed advisor prompt in `strings.instructions` and the stable name `advisor` in `strings.name`, then call `fabric_exec` once with:
 
 ```ts
+await workflow.configure({
+  name: `Advisor · ${π.name}`,
+  description: "Persistent ambient peer review",
+});
+await phase("Start actor", { total: 1 });
 const current = await agents.actors();
 const existing = current.find((actor) => actor.name === π.name && actor.status !== "stopped");
 if (existing) return { reused: true, actor: existing };

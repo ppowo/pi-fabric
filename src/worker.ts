@@ -144,6 +144,16 @@ const parseStructuredValue = (text: string): unknown => {
 
 const main = async (): Promise<void> => {
   const options = parseOptions();
+  const thinking =
+    options.thinking === "off" ||
+    options.thinking === "minimal" ||
+    options.thinking === "low" ||
+    options.thinking === "medium" ||
+    options.thinking === "high" ||
+    options.thinking === "xhigh" ||
+    options.thinking === "max"
+      ? options.thinking
+      : undefined;
   const task = fs.readFileSync(options.taskFile, "utf8");
   const startedAt = Date.now();
   const record: SubagentRunRecord = {
@@ -153,6 +163,10 @@ const main = async (): Promise<void> => {
     status: "running",
     transport: options.transport,
     cwd: options.cwd,
+    ...(options.model ? { model: options.model } : {}),
+    ...(thinking ? { thinking } : {}),
+    ...(options.actorId ? { actorId: options.actorId } : {}),
+    ...(options.actorName ? { actorName: options.actorName } : {}),
     startedAt,
     updatedAt: startedAt,
     turns: 0,

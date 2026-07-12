@@ -34,8 +34,14 @@ Example coordinator skeleton:
 ```ts
 const run = π.run;
 const topic = `team.${run}`;
+await workflow.configure({
+  name: `Swarm · ${run}`,
+  description: "Persistent actors coordinating through durable shared tasks",
+});
 
-for (const task of JSON.parse(π.tasks) as Array<{ id: string; title: string; detail: string }>) {
+const tasks = JSON.parse(π.tasks) as Array<{ id: string; title: string; detail: string }>;
+await phase("Seed tasks", { total: tasks.length });
+for (const task of tasks of JSON.parse(π.tasks) as Array<{ id: string; title: string; detail: string }>) {
   await mesh.put({
     key: `runs/${run}/tasks/${task.id}`,
     value: { ...task, status: "ready", owner: null, progress: [], result: null },
@@ -43,6 +49,7 @@ for (const task of JSON.parse(π.tasks) as Array<{ id: string; title: string; de
   });
 }
 
+await phase("Create actors", { total: (JSON.parse(π.roles) as unknown[]).length });
 const actors = await Promise.all(
   (JSON.parse(π.roles) as Array<{ name: string; instructions: string }>).map((role) =>
     agents.create({
@@ -56,6 +63,7 @@ const actors = await Promise.all(
   ),
 );
 
+await phase("Dispatch", { total: actors.length });
 for (const actor of actors) {
   await agents.tell({
     id: actor.id,
@@ -69,6 +77,7 @@ await mesh.publish({
   data: { run, actors: actors.map(({ id, name }) => ({ id, name })) },
 });
 
+await workflow.event({ message: `${actors.length} actors dispatched`, level: "success" });
 return { run, topic, actors, taskPrefix: `runs/${run}/tasks/` };
 ```
 

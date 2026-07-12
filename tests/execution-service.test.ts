@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
+import { FabricActivityStore } from "../src/activity/store.js";
 import { DEFAULT_FABRIC_CONFIG } from "../src/config.js";
 import { ActionRegistry } from "../src/core/action-registry.js";
 import { FabricExecutionService } from "../src/execution-service.js";
@@ -32,6 +33,48 @@ describe("FabricExecutionService", () => {
       expect(result.success).toBe(true);
       expect(result.value).toBe("fabric works");
       expect(result.audits).toMatchObject([{ ref: "pi.read", success: true }]);
+    } finally {
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("publishes declarative workflow activity for the dynamic TUI", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-activity-"));
+    try {
+      fs.writeFileSync(path.join(cwd, "sample.txt"), "dashboard\n", "utf8");
+      const registry = new ActionRegistry();
+      registry.register(new PiToolsProvider(cwd));
+      const config = structuredClone(DEFAULT_FABRIC_CONFIG);
+      config.approvals.read = "allow";
+      const activity = new FabricActivityStore();
+      const service = new FabricExecutionService(registry, config, activity);
+      const context = { cwd, hasUI: false } as ExtensionContext;
+      const result = await service.execute({
+        code: `
+await workflow.configure({ name: "File audit", description: "Read one fixture" });
+await phase("Inspect", { id: "inspect", total: 1 });
+await workflow.item({ id: "fixture", label: "Read fixture", status: "running" });
+const text = await pi.read({ path: "sample.txt" });
+await workflow.item({ id: "fixture", label: "Read fixture", status: "completed", completed: 1, total: 1 });
+await workflow.event({ message: "Fixture inspected", level: "success" });
+return text.trim();
+`,
+        signal: undefined,
+        parentToolCallId: "activity-test",
+        context,
+        update() {},
+      });
+
+      expect(result.success).toBe(true);
+      expect(activity.get("activity-test")).toMatchObject({
+        name: "File audit",
+        description: "Read one fixture",
+        status: "completed",
+        phases: [{ id: "inspect", name: "Inspect", status: "completed", total: 1 }],
+        calls: [{ ref: "pi.read", status: "completed", phaseId: "inspect" }],
+        items: [{ id: "fixture", status: "completed", completed: 1, total: 1 }],
+        events: [{ message: "Fixture inspected", level: "success" }],
+      });
     } finally {
       fs.rmSync(cwd, { recursive: true, force: true });
     }

@@ -312,11 +312,27 @@ const waitWithProgress = async (
       }),
     ]);
     if (progressTimer) clearTimeout(progressTimer);
-    if (settled.done) return settled.value;
+    if (settled.done) {
+      context.activity?.({
+        type: "metrics",
+        tokens: settled.value.usage.input + settled.value.usage.output,
+        toolCalls: settled.value.toolCalls,
+        cost: settled.value.usage.cost,
+      });
+      return settled.value;
+    }
     const status = manager.status(id);
     const currentTool =
       "currentTool" in status && status.currentTool ? ` · ${status.currentTool}` : "";
     context.update(`Agent ${id.slice(0, 8)}: ${status.status}${currentTool}`);
+    if ("usage" in status) {
+      context.activity?.({
+        type: "metrics",
+        tokens: status.usage.input + status.usage.output,
+        toolCalls: status.toolCalls,
+        cost: status.usage.cost,
+      });
+    }
   }
 };
 
@@ -357,6 +373,12 @@ export class AgentsProvider implements FabricProvider {
     switch (actionName) {
       case "run": {
         const handle = await this.manager.spawn(runRequest(args, context), context.signal);
+        context.activity?.({
+          type: "entity",
+          id: handle.id,
+          kind: "agent",
+          name: handle.name,
+        });
         context.update(
           `Agent ${handle.id.slice(0, 8)} started via ${handle.transport}${handle.attachCommand ? ` · ${handle.attachCommand}` : ""}`,
         );
@@ -365,13 +387,23 @@ export class AgentsProvider implements FabricProvider {
       case "spawn": {
         const handle = await this.manager.spawn(runRequest(args, context), context.signal);
         this.manager.detachSignal(handle.id);
+        context.activity?.({
+          type: "entity",
+          id: handle.id,
+          kind: "agent",
+          name: handle.name,
+        });
         context.update(
           `Agent ${handle.id.slice(0, 8)} started via ${handle.transport}${handle.attachCommand ? ` · ${handle.attachCommand}` : ""}`,
         );
         return handle;
       }
-      case "wait":
-        return waitWithProgress(this.manager, String(args.id), context);
+      case "wait": {
+        const id = String(args.id);
+        const status = this.manager.status(id);
+        context.activity?.({ type: "entity", id, kind: "agent", name: status.name });
+        return waitWithProgress(this.manager, id, context);
+      }
       case "status":
         return this.manager.status(String(args.id));
       case "list":
@@ -380,17 +412,21 @@ export class AgentsProvider implements FabricProvider {
         return this.manager.stop(String(args.id));
       case "cleanup":
         return this.manager.cleanup(String(args.id), args.deleteBranch === true);
-      case "create":
-        return this.actorManager.create(actorRequest(args, context));
-      case "ask":
-        return this.actorManager.ask(
-          String(args.id),
-          String(args.message),
-          args.data,
-          context.signal,
-        );
-      case "tell":
-        return this.actorManager.tell(String(args.id), String(args.message), args.data);
+      case "create": {
+        const actor = await this.actorManager.create(actorRequest(args, context));
+        context.activity?.({ type: "entity", id: actor.id, kind: "actor", name: actor.name });
+        return actor;
+      }
+      case "ask": {
+        const actor = this.actorManager.status(String(args.id));
+        context.activity?.({ type: "entity", id: actor.id, kind: "actor", name: actor.name });
+        return this.actorManager.ask(actor.id, String(args.message), args.data, context.signal);
+      }
+      case "tell": {
+        const actor = this.actorManager.status(String(args.id));
+        context.activity?.({ type: "entity", id: actor.id, kind: "actor", name: actor.name });
+        return this.actorManager.tell(actor.id, String(args.message), args.data);
+      }
       case "actorStatus":
         return this.actorManager.status(String(args.id));
       case "actors":

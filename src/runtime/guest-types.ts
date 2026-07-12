@@ -32,6 +32,10 @@ interface FabricAgentHandle {
   status: string;
   transport: FabricTransport;
   cwd: string;
+  model?: string;
+  thinking?: FabricThinking;
+  actorId?: string;
+  actorName?: string;
   sessionId?: string;
   attachCommand?: string;
   branch?: string;
@@ -103,6 +107,8 @@ interface FabricActorInfo {
   delivery: FabricActorDelivery;
   responseMode: "text" | "directive";
   triggerTurn: boolean;
+  model?: string;
+  thinking?: FabricThinking;
   queued: number;
   messages: number;
   createdAt: number;
@@ -216,11 +222,37 @@ interface FabricMeshApi {
 interface FabricWorkflowAgentOptions extends Omit<FabricAgentRequest, "task"> {
   label?: string;
 }
+type FabricActivityStatus = "pending" | "running" | "completed" | "failed" | "blocked" | "stopped";
+type FabricActivityKind = "agent" | "actor" | "tool" | "extension" | "mcp" | "mesh" | "task" | "custom";
+interface FabricWorkflowDisplay {
+  name?: string;
+  description?: string;
+}
+interface FabricWorkflowPhaseOptions {
+  id?: string;
+  description?: string;
+  total?: number;
+}
+interface FabricWorkflowItem {
+  id: string;
+  label: string;
+  status?: FabricActivityStatus;
+  phase?: string;
+  detail?: string;
+  kind?: FabricActivityKind;
+  current?: string;
+  total?: number;
+  completed?: number;
+  data?: unknown;
+}
 interface FabricWorkflowApi {
   agent<T = string>(prompt: string, options?: FabricWorkflowAgentOptions): Promise<T>;
   parallel<T>(thunks: Array<() => Promise<T> | T>, options?: { concurrency?: number }): Promise<T[]>;
   pipeline<T>(items: T[], ...stages: Array<(value: unknown, original: T, index: number) => Promise<unknown> | unknown>): Promise<unknown[]>;
-  phase(name: string): Promise<{ name: string; index: number }>;
+  configure(display: FabricWorkflowDisplay): Promise<FabricWorkflowDisplay>;
+  phase(name: string, options?: FabricWorkflowPhaseOptions): Promise<{ name: string; index: number; id?: string }>;
+  item(item: FabricWorkflowItem): Promise<FabricWorkflowItem>;
+  event(event: { message: string; level?: "info" | "success" | "warning" | "error"; data?: unknown }): Promise<void>;
   log(...values: unknown[]): void;
   budget: { total: number; spent(): number; remaining(): number };
 }
@@ -235,7 +267,7 @@ declare const workflow: FabricWorkflowApi;
 declare function agent<T = string>(prompt: string, options?: FabricWorkflowAgentOptions): Promise<T>;
 declare function parallel<T>(thunks: Array<() => Promise<T> | T>, options?: { concurrency?: number }): Promise<T[]>;
 declare function pipeline<T>(items: T[], ...stages: Array<(value: unknown, original: T, index: number) => Promise<unknown> | unknown>): Promise<unknown[]>;
-declare function phase(name: string): Promise<{ name: string; index: number }>;
+declare function phase(name: string, options?: FabricWorkflowPhaseOptions): Promise<{ name: string; index: number; id?: string }>;
 declare function log(...values: unknown[]): void;
 declare const budget: FabricWorkflowApi["budget"];
 declare const rlm: { query(args: FabricAgentRequest): Promise<FabricAgentResult> };

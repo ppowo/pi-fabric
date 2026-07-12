@@ -42,6 +42,10 @@ export interface SubagentRunRecord {
   status: SubagentRunStatus;
   transport: FabricSubagentTransport;
   cwd: string;
+  model?: string;
+  thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  actorId?: string;
+  actorName?: string;
   startedAt: number;
   updatedAt: number;
   finishedAt?: number;
@@ -71,6 +75,10 @@ export interface SubagentHandleInfo {
   status: SubagentRunStatus;
   transport: FabricSubagentTransport;
   cwd: string;
+  model?: string;
+  thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  actorId?: string;
+  actorName?: string;
   sessionId?: string;
   attachCommand?: string;
   branch?: string;

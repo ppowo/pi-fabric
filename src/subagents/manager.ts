@@ -36,6 +36,10 @@ interface ManagedSubagent {
   release(): void;
   abortSignal: AbortSignal | undefined;
   abortHandler: (() => void) | undefined;
+  model?: string;
+  thinking?: SubagentRunRequest["thinking"];
+  actorId?: string;
+  actorName?: string;
   branch?: string;
   worktree?: string;
   settled: boolean;
@@ -97,6 +101,10 @@ const failedRecord = (
     text: "",
     error,
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
+    ...(managed.model ? { model: managed.model } : {}),
+    ...(managed.thinking ? { thinking: managed.thinking } : {}),
+    ...(managed.actorId ? { actorId: managed.actorId } : {}),
+    ...(managed.actorName ? { actorName: managed.actorName } : {}),
     ...(managed.transport.sessionId ? { sessionId: managed.transport.sessionId } : {}),
     ...(managed.transport.attachCommand ? { attachCommand: managed.transport.attachCommand } : {}),
     ...(managed.branch ? { branch: managed.branch } : {}),
@@ -259,6 +267,10 @@ export class SubagentManager {
         release,
         abortSignal: signal,
         abortHandler: undefined,
+        ...(request.model ? { model: request.model } : {}),
+        ...(request.thinking ? { thinking: request.thinking } : {}),
+        ...(request.actorId ? { actorId: request.actorId } : {}),
+        ...(request.actorName ? { actorName: request.actorName } : {}),
         ...(branch ? { branch } : {}),
         ...(worktree ? { worktree } : {}),
         settled: false,
@@ -451,6 +463,10 @@ export class SubagentManager {
       status,
       transport: managed.transport.kind,
       cwd: managed.cwd,
+      ...(managed.model ? { model: managed.model } : {}),
+      ...(managed.thinking ? { thinking: managed.thinking } : {}),
+      ...(managed.actorId ? { actorId: managed.actorId } : {}),
+      ...(managed.actorName ? { actorName: managed.actorName } : {}),
       ...(managed.transport.sessionId ? { sessionId: managed.transport.sessionId } : {}),
       ...(managed.transport.attachCommand
         ? { attachCommand: managed.transport.attachCommand }
@@ -463,6 +479,10 @@ export class SubagentManager {
   #withTransportMetadata(record: SubagentRunRecord, managed: ManagedSubagent): SubagentRunRecord {
     return {
       ...record,
+      ...(managed.model ? { model: managed.model } : {}),
+      ...(managed.thinking ? { thinking: managed.thinking } : {}),
+      ...(managed.actorId ? { actorId: managed.actorId } : {}),
+      ...(managed.actorName ? { actorName: managed.actorName } : {}),
       ...(managed.transport.sessionId ? { sessionId: managed.transport.sessionId } : {}),
       ...(managed.transport.attachCommand
         ? { attachCommand: managed.transport.attachCommand }

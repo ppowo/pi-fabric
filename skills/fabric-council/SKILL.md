@@ -8,9 +8,15 @@ description: Runs a bounded multi-perspective Pi Fabric council with independent
 Use one `fabric_exec` call and `council.run()`. Choose roles that disagree usefully rather than duplicating one another.
 
 ```ts
+const roles = JSON.parse(π.roles) as string[];
+await workflow.configure({
+  name: "Council review",
+  description: `${roles.length} independent perspectives with synthesis`,
+});
+await phase("Deliberate", { total: roles.length });
 const decision = await council.run({
   task: π.task,
-  roles: JSON.parse(π.roles),
+  roles,
   tools: ["read", "grep", "find", "ls"],
   synthesize: true,
 });

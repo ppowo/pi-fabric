@@ -156,7 +156,10 @@ globalThis.workflow = Object.freeze({
   agent: __workflowAgent,
   parallel: __workflowParallel,
   pipeline: __workflowPipeline,
-  phase: (name) => __call("fabric.$phase", { name }),
+  configure: (args) => __call("fabric.$configure", args),
+  phase: (name, options = {}) => __call("fabric.$phase", { ...options, name }),
+  item: (args) => __call("fabric.$item", args),
+  event: (args) => __call("fabric.$event", args),
   log: (...values) => print(...values),
   budget: Object.freeze({
     total: __workflowBudgetTotal,

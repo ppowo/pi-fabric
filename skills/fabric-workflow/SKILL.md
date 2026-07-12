@@ -12,7 +12,10 @@ Use these globals:
 - `workflow.agent(prompt, options)` or `agent(...)` for one worker. Set `label` on every call.
 - `workflow.parallel(thunks, { concurrency })` or `parallel(...)` for fan-out. Pass functions, not promises.
 - `workflow.pipeline(items, ...stages)` or `pipeline(...)` for per-item sequential stages with cross-item concurrency.
-- `workflow.phase(name)` or `phase(name)` for progress groups.
+- `workflow.configure({ name, description })` to name the general-purpose Fabric dashboard.
+- `workflow.phase(name, { id?, description?, total? })` or `phase(...)` for progress groups.
+- `workflow.item(...)` for non-agent work items whose status changes over time.
+- `workflow.event(...)` for notable milestones in the dashboard feed.
 - `workflow.log(...)` for compact progress notes.
 - `workflow.budget` for token-budget observations.
 
@@ -21,7 +24,12 @@ Use `schema` in agent options when machine-readable output will make aggregation
 A good shape is:
 
 ```ts
-await phase("Discover");
+await workflow.configure({
+  name: "Request analysis",
+  description: "Discover, analyze, and adversarially verify bounded work items",
+});
+
+await phase("Discover", { total: 1 });
 const inventory = await agent<{ items: string[] }>(
   "Discover the bounded work items for this request. Return structured output.",
   {
@@ -36,7 +44,7 @@ const inventory = await agent<{ items: string[] }>(
   },
 );
 
-await phase("Analyze");
+await phase("Analyze", { total: inventory.items.length });
 const findings = await parallel(
   inventory.items.map((item) => () =>
     agent(`Analyze this bounded item and report evidence: ${item}`, {
@@ -47,12 +55,13 @@ const findings = await parallel(
   { concurrency: 8 },
 );
 
-await phase("Verify");
+await phase("Verify", { total: 1 });
 const result = await agent(
   `Adversarially verify and synthesize these findings. Remove unsupported claims:\n${JSON.stringify(findings)}`,
   { label: "verify synthesis", tools: ["read", "grep", "find", "ls"] },
 );
 
+await workflow.event({ message: "Verification complete", level: "success" });
 return { ok: true, result };
 ```
 

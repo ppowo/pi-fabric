@@ -4,6 +4,20 @@ export const FABRIC_PROVIDER_REGISTER_EVENT = "pi-fabric:provider:register:v1";
 export const FABRIC_PROVIDER_DISCOVER_EVENT = "pi-fabric:provider:discover:v1";
 
 export type FabricRisk = "read" | "write" | "execute" | "network" | "agent";
+export type FabricActivityEntityKind =
+  | "agent"
+  | "actor"
+  | "tool"
+  | "extension"
+  | "mcp"
+  | "mesh"
+  | "task"
+  | "custom";
+
+export type FabricInvocationActivityUpdate =
+  | { type: "progress"; message: string }
+  | { type: "entity"; id: string; kind: FabricActivityEntityKind; name?: string }
+  | { type: "metrics"; tokens?: number; toolCalls?: number; cost?: number };
 
 export interface FabricActionDescriptor {
   name: string;
@@ -27,6 +41,7 @@ export interface FabricInvocationContext {
   nestedToolCallId: string;
   extensionContext: ExtensionContext;
   update(message: string): void;
+  activity?(update: FabricInvocationActivityUpdate): void;
 }
 
 export interface FabricProvider {

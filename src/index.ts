@@ -10,6 +10,7 @@ import { CapturedToolCatalog } from "./capture/catalog.js";
 import { installRegisteredToolCapture } from "./capture/interceptor.js";
 import { FabricState } from "./fabric-state.js";
 import { FABRIC_PROVIDER_REGISTER_EVENT, type FabricProviderRegistration } from "./protocol.js";
+import { FabricUiController } from "./ui/controller.js";
 
 const RESULT_FORMATS = ["auto", "json", "text"] as const;
 type ResultFormat = (typeof RESULT_FORMATS)[number];
@@ -69,6 +70,7 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
   await loadCodePreviewSettings(process.cwd());
   const capturedTools = new CapturedToolCatalog();
   const state = new FabricState(pi, capturedTools);
+  const fabricUi = new FabricUiController(state);
 
   pi.events.on(FABRIC_PROVIDER_REGISTER_EVENT, (value: unknown) => {
     const registration = registrationFrom(value);
@@ -90,7 +92,7 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
       promptGuidelines: [
         "Use fabric_exec for workflows with multiple calls, loops, filtering, aggregation, MCP tools, or subagents; use direct Pi tools for one simple operation.",
         "Inside Fabric, discover capabilities with tools.providers(), tools.search(), and tools.describe(). Call built-ins through pi.*, captured extension tools through extensions.* or tools.call(), MCP through mcp.<server>.<tool>(), child agents and persistent actors through agents.*, and coordination through mesh.*.",
-        "For scripted fan-out use workflow.agent(), workflow.parallel(), workflow.pipeline(), and workflow.phase(); the short aliases agent(), parallel(), pipeline(), and phase() are also available.",
+        "For scripted fan-out use workflow.agent(), workflow.parallel(), workflow.pipeline(), and workflow.phase(); the short aliases agent(), parallel(), pipeline(), and phase() are also available. Use workflow.configure(), workflow.item(), and workflow.event() to give a long-running setup a useful dynamic dashboard.",
         "Use agents.create() for persistent mailbox actors. Subscribe them to host events for ambient behavior or mesh topics for peer coordination; use directive response mode when silence/intervention is conditional.",
         "Return only the compact final value; intermediate results remain inside the sandbox. Use council.run() or rlm.query() only when their extra cost is justified.",
       ],
@@ -118,6 +120,19 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
             description: "Optional agent-call cap, bounded by Fabric configuration",
           }),
         ),
+        display: Type.Optional(
+          Type.Object(
+            {
+              name: Type.Optional(
+                Type.String({ description: "Human-readable name for the Fabric activity panel" }),
+              ),
+              description: Type.Optional(
+                Type.String({ description: "Compact objective shown in the Fabric dashboard" }),
+              ),
+            },
+            { additionalProperties: false },
+          ),
+        ),
       }),
       renderCall(params, theme, context) {
         const lines = safeTerminalText(params.code).split("\n");
@@ -131,7 +146,10 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
           )
           .join("\n");
         const hidden = lines.length - shown.length;
-        const title = `${theme.fg("toolTitle", theme.bold("fabric"))} ${theme.fg("dim", `TypeScript · ${countLabel(lines.length, "line")}`)}`;
+        const displayName = params.display?.name ? safeTerminalText(params.display.name) : "";
+        const title = `${theme.fg("toolTitle", theme.bold("fabric"))}${
+          displayName ? ` ${theme.fg("accent", displayName)}` : ""
+        } ${theme.fg("dim", `TypeScript · ${countLabel(lines.length, "line")}`)}`;
         return new Text(
           `${title}${preview ? `\n${preview}` : ""}${hidden > 0 ? `\n${theme.fg("dim", `… ${countLabel(hidden, "line")} hidden`)}` : ""}`,
           0,
@@ -198,6 +216,7 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
           context,
           ...(params.tokenBudget !== undefined ? { tokenBudget: params.tokenBudget } : {}),
           ...(params.agentBudget !== undefined ? { maxAgentCalls: params.agentBudget } : {}),
+          ...(params.display ? { display: params.display } : {}),
           update(message) {
             onUpdate?.({
               content: [{ type: "text", text: message }],
@@ -256,12 +275,15 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
   };
 
   pi.on("session_start", async (_event, context) => {
+    fabricUi.stop();
     await state.initialize(context);
     refreshToolCapture();
+    fabricUi.start(context);
   });
 
   pi.on("session_shutdown", async () => {
     try {
+      fabricUi.stop();
       await state.shutdown();
     } finally {
       toolCapture.dispose();
@@ -298,7 +320,7 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
   });
 
   pi.registerCommand("fabric", {
-    description: "Inspect or reload Pi Fabric; manage captured tools, actors, and subagents",
+    description: "Open the Fabric dashboard; inspect, reload, or manage agents and actors",
     async handler(argumentsText, context) {
       await state.ensure(context);
       const [command = "status", ...argumentsList] = argumentsText
@@ -306,9 +328,15 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
         .split(/\s+/)
         .filter(Boolean);
       if (command === "reload") {
+        fabricUi.stop();
         await state.initialize(context);
         refreshToolCapture();
+        fabricUi.start(context);
         context.ui.notify("Pi Fabric reloaded", "info");
+        return;
+      }
+      if (command === "dashboard" || command === "ui") {
+        await fabricUi.openDashboard(context);
         return;
       }
       if (command === "providers") {
@@ -439,7 +467,7 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
       }
       if (command !== "status") {
         context.ui.notify(
-          "Usage: /fabric [status|reload|providers|agents|actors|messages <id>|attach <id>|stop <id>]",
+          "Usage: /fabric [status|dashboard|reload|providers|agents|actors|messages <id>|attach <id>|stop <id>]",
           "warning",
         );
         return;
@@ -459,6 +487,7 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
             : "captured tools: disabled",
           `actors: ${state.actors.list().length} · mesh: ${config.mesh.enabled ? state.mesh.root : "disabled"}`,
           `MCP: ${config.mcp.enabled ? "enabled" : "disabled"}`,
+          `UI: ${config.ui.enabled ? `${config.ui.widget} widget · ${config.ui.placement}` : "disabled"}`,
         ].join("\n"),
         "info",
       );
