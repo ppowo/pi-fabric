@@ -1,6 +1,7 @@
 ---
 name: fabric-swarm
 description: Creates a self-organizing team of persistent Pi Fabric actors with durable topics, direct mailboxes, and compare-and-swap shared tasks. Use for messenger-like multi-agent collaboration and long-lived delegated work.
+disable-model-invocation: true
 ---
 
 # Fabric Swarm

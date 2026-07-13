@@ -1,6 +1,7 @@
 ---
 name: fabric-workflow
 description: Runs a Claude Code-style dynamic workflow in Pi Fabric using code-held phases, fan-out, pipelines, structured agents, and synthesis. Use for large audits, migrations, parallel research, or explicit workflow requests.
+disable-model-invocation: true
 ---
 
 # Fabric Dynamic Workflow

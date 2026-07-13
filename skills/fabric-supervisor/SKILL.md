@@ -1,6 +1,7 @@
 ---
 name: fabric-supervisor
 description: Starts a persistent, event-driven Pi Fabric supervisor that watches the main session toward a concrete goal and steers only when needed. Use for long-running goal supervision without another extension.
+disable-model-invocation: true
 ---
 
 # Fabric Supervisor

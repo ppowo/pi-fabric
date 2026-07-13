@@ -1,6 +1,7 @@
 ---
 name: fabric-ambient
 description: Creates an emergent supervisor or advisor as a persistent Pi Fabric actor. Use when the user asks for ambient supervision, ongoing peer review, an advisor, or a goal watcher without installing a separate extension.
+disable-model-invocation: true
 ---
 
 # Fabric Ambient Actors
