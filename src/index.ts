@@ -259,6 +259,14 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
                 }
               }
               if (bodyLines) {
+                while (bodyLines.length > 0) {
+                  const last = bodyLines[bodyLines.length - 1];
+                  if (last === undefined || last.trim() === "") bodyLines.pop();
+                  else break;
+                }
+                if (bodyLines.length === 0) bodyLines = null;
+              }
+              if (bodyLines) {
                 const bodyShown = bodyLines.slice(0, bodyLimit);
                 text += `\n${bodyShown
                   .map((line, index) => {
