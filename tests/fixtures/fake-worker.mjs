@@ -7,6 +7,8 @@ for (let index = 2; index < process.argv.length; index += 2) {
 }
 const statusFile = args.get("status-file");
 const taskFile = args.get("task-file");
+const logFile = args.get("log-file");
+const sessionFile = args.get("session-file");
 const schemaFile = args.get("schema-file");
 const schema = schemaFile ? JSON.parse(fs.readFileSync(schemaFile, "utf8")) : undefined;
 const task = fs.readFileSync(taskFile, "utf8");
@@ -15,6 +17,7 @@ const directive = schema?.properties?.action
   ? { action: "message", message: "fake actor advice" }
   : undefined;
 const now = Date.now();
+const text = directive && !fail ? JSON.stringify(directive) : "fake worker complete";
 const record = {
   id: args.get("id"),
   name: args.get("name"),
@@ -30,7 +33,7 @@ const record = {
   finishedAt: now,
   turns: 1,
   toolCalls: 0,
-  text: directive && !fail ? JSON.stringify(directive) : "fake worker complete",
+  text,
   ...(directive && !fail ? { value: directive } : {}),
   ...(fail ? { error: "Structured agent output was invalid: Unexpected token (output: not json)" } : {}),
   exitCode: 0,
@@ -38,3 +41,31 @@ const record = {
 };
 fs.mkdirSync(path.dirname(statusFile), { recursive: true });
 fs.writeFileSync(statusFile, JSON.stringify(record));
+
+// Emit a per-run event stream so agents.log / readLog can inspect the run.
+if (logFile) {
+  fs.mkdirSync(path.dirname(logFile), { recursive: true });
+  const events = [
+    { type: "agent_start" },
+    { type: "tool_execution_start", toolName: "read" },
+    { type: "tool_execution_end", toolName: "read" },
+    { type: "turn_end" },
+    {
+      type: "message_end",
+      message: { role: "assistant", content: text, usage: { input: 1, output: 2 } },
+    },
+    { type: "agent_end", willRetry: false },
+    { type: "agent_settled" },
+  ];
+  fs.writeFileSync(logFile, events.map((event) => JSON.stringify(event)).join("\n") + "\n");
+}
+
+// Append a session transcript so the actor's readLog(type: "session") works.
+if (sessionFile) {
+  fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
+  const turns = [
+    { role: "user", content: task },
+    { role: "assistant", content: text },
+  ];
+  fs.appendFileSync(sessionFile, turns.map((turn) => JSON.stringify(turn)).join("\n") + "\n");
+}

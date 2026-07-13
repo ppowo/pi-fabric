@@ -1,5 +1,5 @@
 import type { FabricSubagentTransport } from "../config.js";
-import type { SubagentUsage } from "../subagents/types.js";
+import type { FabricLogLine, SubagentRunRecord, SubagentUsage } from "../subagents/types.js";
 
 export type FabricActorHostEvent =
   | "input"
@@ -47,6 +47,23 @@ export interface FabricActorInfo {
   updatedAt: number;
   lastRunId?: string;
   lastError?: string;
+  sessionFile?: string;
+  logDir?: string;
+}
+
+export interface FabricActorLog {
+  actorId: string;
+  actorName: string;
+  sessionFile: string;
+  logDir: string;
+  session: FabricLogLine[];
+  run?: {
+    runId: string;
+    eventsFile: string;
+    status?: SubagentRunRecord;
+    events: FabricLogLine[];
+  };
+  retainedRuns: string[];
 }
 
 export interface FabricActorMessage {

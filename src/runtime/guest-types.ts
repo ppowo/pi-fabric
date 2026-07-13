@@ -62,6 +62,32 @@ interface FabricModelInfo {
   name: string;
   key: string;
 }
+interface FabricLogLine {
+  index: number;
+  raw: string;
+  parsed?: unknown;
+}
+interface FabricSubagentLog {
+  id: string;
+  runDirectory: string;
+  logFile: string;
+  status?: FabricAgentResult;
+  events: FabricLogLine[];
+}
+interface FabricActorLog {
+  actorId: string;
+  actorName: string;
+  sessionFile: string;
+  logDir: string;
+  session: FabricLogLine[];
+  run?: {
+    runId: string;
+    eventsFile: string;
+    status?: FabricAgentResult;
+    events: FabricLogLine[];
+  };
+  retainedRuns: string[];
+}
 interface FabricToolsApi {
   providers(): Promise<Array<{ name: string; description: string }>>;
   list(args?: { provider?: string; namespace?: string; query?: string; limit?: number }): Promise<FabricAction[]>;
@@ -137,6 +163,8 @@ interface FabricActorInfo {
   updatedAt: number;
   lastRunId?: string;
   lastError?: string;
+  sessionFile?: string;
+  logDir?: string;
 }
 interface FabricActorMessage {
   id: string;
@@ -166,6 +194,12 @@ interface FabricAgentsApi {
   actors(): Promise<FabricActorInfo[]>;
   messages(args: { id: string; limit?: number }): Promise<FabricActorMessage[]>;
   remove(args: { id: string }): Promise<{ removed: boolean }>;
+  log(args: {
+    id: string;
+    type?: "session" | "run" | "all";
+    lines?: number;
+    runId?: string;
+  }): Promise<FabricActorLog | FabricSubagentLog>;
 }
 interface FabricMcpResult {
   text: string;

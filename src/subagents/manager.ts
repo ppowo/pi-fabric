@@ -11,6 +11,8 @@ import { ScreenTransport } from "./transports/screen-transport.js";
 import { TmuxTransport } from "./transports/tmux-transport.js";
 import type {
   FabricBudgetSummary,
+  FabricLogLine,
+  FabricSubagentLog,
   SubagentHandleInfo,
   SubagentRunRecord,
   SubagentRunRequest,
@@ -90,6 +92,27 @@ const readNestedAgents = (runDirectory: string): SubagentRunRecord[] => {
     if (record) agents.push(record);
   }
   return agents;
+};
+
+const readJsonlTail = (filePath: string, lines: number): FabricLogLine[] => {
+  let content: string;
+  try {
+    content = fs.readFileSync(filePath, "utf8");
+  } catch {
+    return [];
+  }
+  const all = content.split("\n").filter((line) => line.length > 0);
+  const tail = all.slice(-lines);
+  const offset = all.length - tail.length;
+  return tail.map((raw, index) => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      /* keep raw only */
+    }
+    return { index: offset + index, raw, ...(parsed !== undefined ? { parsed } : {}) };
+  });
 };
 
 const writeRecord = (filePath: string, record: SubagentRunRecord): void => {
@@ -374,6 +397,10 @@ export class SubagentManager {
     return [...this.#runs.keys()].map((id) => this.status(id));
   }
 
+  runDirectory(id: string): string | undefined {
+    return this.#runs.get(id)?.runDirectory;
+  }
+
   async stop(id: string): Promise<SubagentRunResult> {
     const managed = this.#requireRun(id);
     if (managed.settled) return managed.result;
@@ -400,6 +427,16 @@ export class SubagentManager {
     }
     this.#runs.delete(id);
     return { cleaned: cleaned || !fs.existsSync(managed.runDirectory) };
+  }
+
+  readLog(id: string, opts: { lines?: number } = {}): FabricSubagentLog {
+    const managed = this.#requireRun(id);
+    const runDirectory = managed.runDirectory;
+    const logFile = path.join(runDirectory, "events.jsonl");
+    const lines = Math.max(1, Math.min(opts.lines ?? 200, 5000));
+    const events = readJsonlTail(logFile, lines);
+    const statusRecord = readRecord(path.join(runDirectory, "status.json"));
+    return { id, runDirectory, logFile, events, ...(statusRecord ? { status: statusRecord } : {}) };
   }
 
   async close(): Promise<void> {

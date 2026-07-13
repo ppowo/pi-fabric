@@ -5,6 +5,8 @@ import type { FabricState } from "../fabric-state.js";
 import { truncateMiddle } from "../util.js";
 import type { FabricUiController } from "../ui/controller.js";
 import { openFabricSettings } from "../ui/settings.js";
+import fs from "node:fs";
+import path from "node:path";
 
 interface FabricCommandDeps {
   state: FabricState;
@@ -13,6 +15,48 @@ interface FabricCommandDeps {
   applyFabricMode: () => void;
   suspendToolCapture: () => void;
 }
+
+const extractContentText = (content: unknown): string => {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part !== "object" || part === null) return "";
+        const p = part as Record<string, unknown>;
+        return typeof p.text === "string" ? p.text : typeof p.type === "string" ? p.type : "";
+      })
+      .filter(Boolean)
+      .join(" ");
+  }
+  return "";
+};
+
+const summarizeLogLine = (entry: unknown): string => {
+  if (typeof entry !== "object" || entry === null) return truncateMiddle(String(entry), 200);
+  const record = entry as Record<string, unknown>;
+  const type = typeof record.type === "string" ? record.type : undefined;
+  const tool = typeof record.toolName === "string" ? record.toolName : undefined;
+  // Pi session lines and worker message_end both wrap a { role, content } message.
+  const msg = record.message;
+  if (typeof msg === "object" && msg !== null && !Array.isArray(msg)) {
+    const m = msg as Record<string, unknown>;
+    const role = typeof m.role === "string" ? m.role : "message";
+    const model = typeof m.model === "string" ? m.model : undefined;
+    const text = extractContentText(m.content);
+    const body = (text || JSON.stringify(m)).replace(/\s+/g, " ");
+    return `${role}${model ? ` [${model}]` : ""}: ${truncateMiddle(body, 160)}`;
+  }
+  if (type) {
+    const bits = [type];
+    if (tool) bits.push(tool);
+    const model = typeof record.modelId === "string" ? record.modelId : undefined;
+    const provider = typeof record.provider === "string" && !model ? record.provider : undefined;
+    if (provider) bits.push(provider);
+    if (model) bits.push(model);
+    return bits.join(" ");
+  }
+  return truncateMiddle(JSON.stringify(record), 160);
+};
 
 export function registerFabricCommand(pi: ExtensionAPI, deps: FabricCommandDeps): void {
   const { state, fabricUi, capturedTools, applyFabricMode, suspendToolCapture } = deps;
@@ -28,12 +72,22 @@ export function registerFabricCommand(pi: ExtensionAPI, deps: FabricCommandDeps)
         "agents",
         "actors",
         "messages",
+        "log",
+        "export-log",
         "attach",
         "stop",
         "remove",
         "kill",
       ];
-      const idCommands = new Set(["messages", "attach", "stop", "remove", "kill"]);
+      const idCommands = new Set([
+        "messages",
+        "log",
+        "export-log",
+        "attach",
+        "stop",
+        "remove",
+        "kill",
+      ]);
       const firstSpace = argumentPrefix.indexOf(" ");
       if (firstSpace < 0) {
         const matches = subcommands.filter((name) => name.startsWith(argumentPrefix));
@@ -167,18 +221,120 @@ export function registerFabricCommand(pi: ExtensionAPI, deps: FabricCommandDeps)
         try {
           const actor = state.actors.status(id);
           const messages = state.actors.messages(actor.id, 20);
-          context.ui.notify(
+          const shortId = actor.id.slice(0, 8);
+          const body =
             messages.length > 0
               ? messages
                   .map((message) => {
                     const value = message.text ?? message.action ?? message.error ?? "data";
                     const summary = truncateMiddle(value.replace(/\s+/g, " "), 500);
-                    return `${message.direction === "in" ? "→" : "←"} ${message.source}: ${summary}`;
+                    const runTag = message.runId ? ` [${message.runId.slice(0, 8)}]` : "";
+                    const usageTag = message.usage
+                      ? ` · ${message.usage.input + message.usage.output} tok`
+                      : "";
+                    return `${message.direction === "in" ? "→" : "←"} ${message.source}${runTag}: ${summary}${usageTag}`;
                   })
                   .join("\n")
-              : `No messages for ${actor.name}`,
+              : `No messages for ${actor.name}`;
+          const footer = `\nInspect LLM I/O: /fabric log ${shortId} · Export: /fabric export-log ${actor.name}`;
+          context.ui.notify(`${body}${footer}`, "info");
+        } catch (error) {
+          context.ui.notify(error instanceof Error ? error.message : String(error), "error");
+        }
+        return;
+      }
+      if (command === "log") {
+        const id = argumentsList[0];
+        if (!id) {
+          context.ui.notify(
+            "Usage: /fabric log <id> [session|run|all] [--lines N] [--run <runId>]",
+            "warning",
+          );
+          return;
+        }
+        let type: "session" | "run" | "all" = "session";
+        let lines = 40;
+        let runId: string | undefined;
+        for (let i = 1; i < argumentsList.length; i++) {
+          const arg = argumentsList[i]!;
+          if (arg === "session" || arg === "run" || arg === "all") type = arg;
+          else if ((arg === "--lines" || arg === "-n") && i + 1 < argumentsList.length) {
+            const n = Number(argumentsList[++i]);
+            if (n > 0) lines = Math.min(n, 5000);
+          } else if (arg === "--run" && i + 1 < argumentsList.length) {
+            runId = argumentsList[++i];
+          }
+        }
+        try {
+          const actor = state.actors.status(id);
+          const log = state.actors.readLog(actor.id, { type, lines, ...(runId ? { runId } : {}) });
+          const parts: string[] = [`Actor ${actor.name} · ${log.sessionFile}`];
+          if (log.session.length > 0) {
+            parts.push(`── session (last ${log.session.length} lines) ──`);
+            for (const line of log.session) parts.push(summarizeLogLine(line.parsed ?? line.raw));
+          }
+          if (log.run) {
+            parts.push(
+              `── run ${log.run.runId.slice(0, 8)} (${log.run.status?.status ?? "?"}) ──`,
+            );
+            for (const line of log.run.events) parts.push(summarizeLogLine(line.parsed ?? line.raw));
+          }
+          if (log.retainedRuns.length > 0) {
+            parts.push(
+              `retained runs: ${log.retainedRuns.map((r) => r.slice(0, 8)).join(" ")}`,
+            );
+          }
+          context.ui.notify(
+            parts.length > 1 ? truncateMiddle(parts.join("\n"), 8000) : `No log found for ${actor.name}`,
             "info",
           );
+        } catch (error) {
+          context.ui.notify(error instanceof Error ? error.message : String(error), "error");
+        }
+        return;
+      }
+      if (command === "export-log") {
+        const id = argumentsList[0];
+        const destArg = argumentsList.slice(1).join(" ");
+        if (!id) {
+          context.ui.notify("Usage: /fabric export-log <id> [path]", "warning");
+          return;
+        }
+        try {
+          const dest = path.resolve(
+            destArg || path.join("fabric-logs", `export-${Date.now()}`),
+          );
+          fs.mkdirSync(dest, { recursive: true });
+          const actor = state.actors
+            .list()
+            .find((candidate) => candidate.id.startsWith(id) || candidate.name === id);
+          let label: string;
+          let copied: string[] = [];
+          if (actor) {
+            const full = state.actors.status(actor.id);
+            label = actor.name;
+            if (full.sessionFile && fs.existsSync(full.sessionFile)) {
+              fs.copyFileSync(full.sessionFile, path.join(dest, "session.jsonl"));
+              copied.push("session.jsonl");
+            }
+            if (full.logDir && fs.existsSync(full.logDir)) {
+              fs.cpSync(full.logDir, path.join(dest, "runs"), { recursive: true });
+              copied.push("runs/");
+            }
+          } else {
+            const runDir = state.subagents.runDirectory(id);
+            const status = state.subagents.status(id);
+            label = status.name;
+            if (runDir && fs.existsSync(runDir)) {
+              fs.cpSync(runDir, dest, { recursive: true });
+              copied.push("run/");
+            }
+          }
+          if (copied.length === 0) {
+            context.ui.notify(`No log files found for ${label}`, "warning");
+            return;
+          }
+          context.ui.notify(`Exported ${label} log → ${dest} (${copied.join(", ")})`, "info");
         } catch (error) {
           context.ui.notify(error instanceof Error ? error.message : String(error), "error");
         }
@@ -245,7 +401,7 @@ export function registerFabricCommand(pi: ExtensionAPI, deps: FabricCommandDeps)
       }
       if (command !== "status") {
         context.ui.notify(
-          "Usage: /fabric [status|dashboard|reload|providers|agents|actors|messages <id>|attach <id>|stop <id>|remove <id>|kill <id>]",
+          "Usage: /fabric [status|dashboard|reload|providers|agents|actors|messages <id>|log <id>|export-log <id>|attach <id>|stop <id>|remove <id>|kill <id>]",
           "warning",
         );
         return;

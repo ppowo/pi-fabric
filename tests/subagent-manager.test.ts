@@ -32,6 +32,28 @@ describe("SubagentManager", () => {
     expect(manager.list()).toHaveLength(1);
   });
 
+  it("readLog returns the run's event stream and status", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-manager-"));
+    roots.push(root);
+    const manager = new SubagentManager(process.cwd(), DEFAULT_FABRIC_CONFIG.subagents, {
+      workerPath: path.resolve("tests/fixtures/fake-worker.mjs"),
+      runRoot: root,
+      fullCodeMode: false,
+    });
+    managers.push(manager);
+    const result = await manager.run({ task: "Inspect this repository", transport: "process" });
+    expect(manager.runDirectory(result.id)).toBeDefined();
+    const log = manager.readLog(result.id);
+    expect(log.id).toBe(result.id);
+    expect(log.logFile).toContain("events.jsonl");
+    expect(log.runDirectory).toContain(path.basename(root));
+    expect(log.status?.status).toBe("completed");
+    const types = log.events.map((line) => (line.parsed as { type?: string } | undefined)?.type);
+    expect(types).toContain("agent_start");
+    expect(types).toContain("message_end");
+    expect(types).toContain("agent_settled");
+  });
+
   it("keeps direct tools native for ordinary children and full code mode for recursion", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-manager-"));
     roots.push(root);

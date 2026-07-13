@@ -135,6 +135,7 @@ globalThis.agents = Object.freeze({
   actors: () => __call("agents.actors", {}),
   messages: (args) => __call("agents.messages", args),
   remove: (args) => __call("agents.remove", args),
+  log: (args) => __call("agents.log", args),
 });
 globalThis.mesh = Object.freeze({
   self: () => __call("mesh.self", {}),

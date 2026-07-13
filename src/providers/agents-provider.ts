@@ -182,6 +182,28 @@ const descriptors: FabricActionDescriptor[] = [
     inputSchema: idSchema,
     risk: "agent",
   },
+  {
+    name: "log",
+    description:
+      "Read an actor or subagent run's LLM/agent log: the actor's session transcript (session.jsonl) and/or a retained run's event stream (events.jsonl: tool calls, model responses, usage). Actors retain their last runs so logs survive after success.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Actor ID/name or subagent run ID" },
+        type: {
+          type: "string",
+          enum: ["session", "run", "all"],
+          description:
+            "session = actor session transcript (default for actors); run = last retained run's events; all = both",
+        },
+        lines: { type: "number", minimum: 1, description: "Tail line limit (default 200)" },
+        runId: { type: "string", description: "Specific retained run (default: actor's last run)" },
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+    risk: "read",
+  },
 ];
 
 const stringArray = (value: unknown): string[] | undefined =>
@@ -438,6 +460,19 @@ export class AgentsProvider implements FabricProvider {
         );
       case "remove":
         return this.actorManager.remove(String(args.id));
+      case "log": {
+        const id = String(args.id);
+        const type = args.type === "run" || args.type === "all" ? args.type : "session";
+        const lines = typeof args.lines === "number" ? args.lines : 200;
+        const runId = typeof args.runId === "string" ? args.runId : undefined;
+        try {
+          const actor = this.actorManager.status(id);
+          return this.actorManager.readLog(actor.id, { type, lines, ...(runId ? { runId } : {}) });
+        } catch {
+          /* not an actor — fall through to subagent */
+        }
+        return this.manager.readLog(id, { lines });
+      }
       default:
         throw new Error(`Unknown agents action: ${actionName}`);
     }

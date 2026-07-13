@@ -5,13 +5,14 @@ import path from "node:path";
 import type { FabricMeshConfig, FabricSubagentTransport } from "../config.js";
 import { MeshStore, type MeshEvent, type MeshIdentity } from "../mesh/store.js";
 import { SubagentManager } from "../subagents/manager.js";
-import type { SubagentRunRequest, SubagentRunResult } from "../subagents/types.js";
+import type { FabricLogLine, SubagentRunRecord, SubagentRunRequest, SubagentRunResult } from "../subagents/types.js";
 import type {
   FabricActorDelivery,
   FabricActorDeliveryRequest,
   FabricActorDirective,
   FabricActorHostEvent,
   FabricActorInfo,
+  FabricActorLog,
   FabricActorMessage,
   FabricActorRequest,
   FabricActorResponseMode,
@@ -74,6 +75,39 @@ const atomicWrite = (filePath: string, value: unknown): void => {
     mode: 0o600,
   });
   fs.renameSync(temporaryPath, filePath);
+};
+
+const MAX_RETAINED_RUNS = 10;
+
+const readRunRecord = (filePath: string): SubagentRunRecord | undefined => {
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+    return parsed as SubagentRunRecord;
+  } catch {
+    return undefined;
+  }
+};
+
+const readJsonlTail = (filePath: string, lines: number): FabricLogLine[] => {
+  let content: string;
+  try {
+    content = fs.readFileSync(filePath, "utf8");
+  } catch {
+    return [];
+  }
+  const all = content.split("\n").filter((line) => line.length > 0);
+  const tail = all.slice(-lines);
+  const offset = all.length - tail.length;
+  return tail.map((raw, index) => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      /* keep raw only */
+    }
+    return { index: offset + index, raw, ...(parsed !== undefined ? { parsed } : {}) };
+  });
 };
 
 const directiveSchema: Record<string, unknown> = {
@@ -283,6 +317,43 @@ export class ActorManager {
     const actor = this.#requireActor(id);
     const bounded = Math.max(1, Math.min(Math.floor(limit), MESSAGE_HISTORY_LIMIT));
     return actor.messages.slice(-bounded).map((message) => structuredClone(message));
+  }
+
+  readLog(
+    id: string,
+    opts: { type?: "session" | "run" | "all"; lines?: number; runId?: string } = {},
+  ): FabricActorLog {
+    const actor = this.#requireActor(id);
+    const type = opts.type ?? "session";
+    const lines = Math.max(1, Math.min(opts.lines ?? 200, 5000));
+    const sessionFile = actor.sessionFile;
+    const logDir = path.join(path.dirname(sessionFile), "runs");
+    const session = type === "run" ? [] : readJsonlTail(sessionFile, lines);
+    let run: FabricActorLog["run"];
+    if (type !== "session") {
+      const targetRunId = opts.runId ?? actor.lastRunId;
+      if (targetRunId) {
+        const runPath = path.join(logDir, targetRunId);
+        if (fs.existsSync(runPath)) {
+          const statusRecord = readRunRecord(path.join(runPath, "status.json"));
+          run = {
+            runId: targetRunId,
+            eventsFile: path.join(runPath, "events.jsonl"),
+            ...(statusRecord ? { status: statusRecord } : {}),
+            events: readJsonlTail(path.join(runPath, "events.jsonl"), lines),
+          };
+        }
+      }
+    }
+    return {
+      actorId: actor.id,
+      actorName: actor.name,
+      sessionFile,
+      logDir,
+      session,
+      ...(run ? { run } : {}),
+      retainedRuns: this.#retainedRunIds(actor),
+    };
   }
 
   dispatchHostEvent(event: FabricActorHostEvent, payload: unknown): number {
@@ -507,9 +578,16 @@ export class ActorManager {
         this.#recordMessage(actor, failed);
         item.reject?.(new Error(message));
       } finally {
-        // Retain failed runs for debugging (agents.status(actor.lastRunId)
-        // inspects the full agent output and log); release completed runs and
-        // any previously retained run to avoid unbounded growth.
+        // Retain a durable copy of the run's event log + status in the
+        // actor's directory so agents.log / /fabric log can inspect what the
+        // actor sent to and received from its model, even after a successful
+        // run cleans up the in-memory handle and tmp run directory. Failed
+        // runs stay in the subagent registry for agents.status(lastRunId).
+        if (runId) {
+          await this.#retainRunLog(actor, runId).catch(() => undefined);
+        }
+        // Release the in-memory handle and tmp run dir for completed runs;
+        // failed runs are retained for agents.status(actor.lastRunId).
         if (previousRunId && previousRunId !== runId) {
           await this.subagents.cleanup(previousRunId).catch(() => ({ cleaned: false }));
         }
@@ -625,6 +703,57 @@ export class ActorManager {
       try {
         this.#enqueue(actor, `mesh:${event.topic}`, event);
       } catch { /* skip event for a full or stopped actor */ }
+    }
+  }
+
+  async #retainRunLog(actor: ManagedActor, runId: string): Promise<void> {
+    const runDirectory = this.subagents.runDirectory(runId);
+    if (!runDirectory || !fs.existsSync(runDirectory)) return;
+    const dest = path.join(path.dirname(actor.sessionFile), "runs", runId);
+    fs.mkdirSync(dest, { recursive: true, mode: 0o700 });
+    for (const file of ["events.jsonl", "status.json", "task.txt"]) {
+      const src = path.join(runDirectory, file);
+      if (fs.existsSync(src)) fs.copyFileSync(src, path.join(dest, file));
+    }
+    const nested = path.join(runDirectory, "nested");
+    if (fs.existsSync(nested)) {
+      try {
+        fs.cpSync(nested, path.join(dest, "nested"), { recursive: true });
+      } catch {
+        /* best-effort recursive run retention */
+      }
+    }
+    this.#pruneRetainedRuns(actor);
+  }
+
+  #pruneRetainedRuns(actor: ManagedActor): void {
+    const runsDir = path.join(path.dirname(actor.sessionFile), "runs");
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(runsDir);
+    } catch {
+      return;
+    }
+    const ranked = entries
+      .map((name) => {
+        try {
+          return { name, mtime: fs.statSync(path.join(runsDir, name)).mtimeMs };
+        } catch {
+          return { name, mtime: 0 };
+        }
+      })
+      .sort((a, b) => b.mtime - a.mtime);
+    for (const entry of ranked.slice(MAX_RETAINED_RUNS)) {
+      fs.rmSync(path.join(runsDir, entry.name), { recursive: true, force: true });
+    }
+  }
+
+  #retainedRunIds(actor: ManagedActor): string[] {
+    const runsDir = path.join(path.dirname(actor.sessionFile), "runs");
+    try {
+      return fs.readdirSync(runsDir).sort();
+    } catch {
+      return [];
     }
   }
 
@@ -811,6 +940,8 @@ export class ActorManager {
       updatedAt: actor.updatedAt,
       ...(actor.lastRunId ? { lastRunId: actor.lastRunId } : {}),
       ...(actor.lastError ? { lastError: actor.lastError } : {}),
+      sessionFile: actor.sessionFile,
+      logDir: path.join(path.dirname(actor.sessionFile), "runs"),
     };
   }
 

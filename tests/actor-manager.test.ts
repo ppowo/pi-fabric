@@ -185,4 +185,59 @@ describe("ActorManager", () => {
       .map((message) => message.source);
     expect(sources).toEqual(["host:agent_settled", "mesh:team.auth"]);
   });
+
+  it("retains completed-run logs and exposes them via readLog", async () => {
+    const { actors, subagents } = setup();
+    const actor = await actors.create({
+      name: "reviewer",
+      instructions: "Review messages and reply concisely.",
+      responseMode: "text",
+    });
+    await actors.ask(actor.id, "Inspect auth");
+    await waitFor(() => actors.status(actor.id).status === "idle");
+
+    const status = actors.status(actor.id);
+    expect(status.sessionFile).toContain("session.jsonl");
+    expect(status.logDir).toContain("runs");
+
+    const log = actors.readLog(actor.id, { type: "all" });
+    expect(log.actorName).toBe("reviewer");
+    expect(log.sessionFile).toContain("session.jsonl");
+    const sessionRoles = log.session.map(
+      (line) => (line.parsed as { role?: string } | undefined)?.role,
+    );
+    expect(sessionRoles).toContain("user");
+    expect(sessionRoles).toContain("assistant");
+    expect(log.run).toBeDefined();
+    const eventTypes = log.run!.events.map(
+      (line) => (line.parsed as { type?: string } | undefined)?.type,
+    );
+    expect(eventTypes).toContain("agent_start");
+    expect(eventTypes).toContain("message_end");
+    expect(log.run!.status?.status).toBe("completed");
+    expect(log.retainedRuns).toHaveLength(1);
+    // Completed runs are released from the in-memory registry, but the log
+    // copy in the actor directory survives.
+    expect(subagents.list()).toEqual([]);
+  });
+
+  it("retains failed-run logs too so readLog can inspect them", async () => {
+    const { actors } = setup();
+    const actor = await actors.create({
+      name: "advisor",
+      instructions: "Advise only when useful.",
+      responseMode: "directive",
+      delivery: "steer",
+    });
+    await actors.ask(actor.id, "FAIL_DIRECTIVE");
+    await waitFor(() => actors.status(actor.id).status === "idle");
+    const log = actors.readLog(actor.id, { type: "run" });
+    expect(log.session).toEqual([]);
+    expect(log.run).toBeDefined();
+    expect(log.run!.status?.status).toBe("failed");
+    const eventTypes = log.run!.events.map(
+      (line) => (line.parsed as { type?: string } | undefined)?.type,
+    );
+    expect(eventTypes).toContain("agent_start");
+  });
 });

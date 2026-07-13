@@ -146,3 +146,17 @@ export interface SubagentTransportAdapter {
   available(): Promise<boolean>;
   launch(request: SubagentTransportLaunch): Promise<SubagentTransportHandle>;
 }
+
+export interface FabricLogLine {
+  index: number;
+  raw: string;
+  parsed?: unknown;
+}
+
+export interface FabricSubagentLog {
+  id: string;
+  runDirectory: string;
+  logFile: string;
+  status?: SubagentRunRecord;
+  events: FabricLogLine[];
+}
