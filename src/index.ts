@@ -110,7 +110,7 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
         "Inside fabric_exec, route by surface: MCP is mcp.<server>.<tool>(args); subagents and persistent actors are agents.*; mesh coordination is mesh.*; scripted fan-out is workflow.agent()/parallel()/pipeline()/phase() (aliases agent/parallel/pipeline/phase), with workflow.configure()/item()/event() for a live dashboard on long setups.",
         "`pi.*` tools take a single options object, never positional args. The `fabric-exec` skill has the full reference (exact signatures, `tools` discovery, `π` strings, validate/describe/retry) plus reference files for MCP, agents/rlm, and mesh.",
         "Use agents.create() for persistent mailbox actors; subscribe to host events for ambient behavior or mesh topics for peer coordination; directive response mode when silence/intervention is conditional.",
-        "Return only the compact final value; intermediate results stay in the sandbox. Use council.run()/rlm.query() only when their cost is justified.",
+        "Batch independent operations in one `fabric_exec` program (`Promise.all` for parallel, sequential `await` for ordered), not one call per tool; keep dependent/conditional steps sequential. Return only the compact final value; intermediate results stay in the sandbox. Use council.run()/rlm.query() only when their cost is justified.",
         "workflow.parallel accepts (items, mapper, concurrency?) to map over items or (thunks, concurrency?) to run zero-arg functions; concurrency may be a bare number.",
       ],
       // The model-facing schema is intentionally flat: one large `code` string

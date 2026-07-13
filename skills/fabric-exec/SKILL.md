@@ -21,6 +21,28 @@ description: >-
 - Parallelize independent calls with `Promise.all`.
 - `π.<key>` exposes named strings passed via the `strings` parameter. Use it for content that is awkward to quote (shell commands, grep regex, large file text). Accessing a key you did not provide throws with the list of provided keys. `π` is not a tool: `π.read` throws and tells you to call `pi.read(args)`.
 
+## Efficiency — batch, do not iterate
+
+Every `fabric_exec` call is a full tool round-trip: request, sandbox, result. Using it as a thin one-call-per-`pi.*` wrapper forfeits the reason it exists. Compose many operations into one program and return a single compact value. Two patterns:
+
+- **Independent operations → `Promise.all`.** Read several files or run related greps in one call.
+  ```ts
+  return await Promise.all([
+    pi.read({ path: "a.ts" }),
+    pi.read({ path: "b.ts" }),
+    pi.grep({ pattern: "TODO" }),
+  ]);
+  ```
+
+- **Ordered or dependent operations → sequential `await`.** When a later step needs an earlier result, keep them in the same program; do not split them into separate calls.
+  ```ts
+  const pkg = await pi.read({ path: "package.json" });
+  const name = JSON.parse(pkg).name;
+  return await pi.grep({ pattern: name, path: "src" });
+  ```
+
+Keep one compact `return`; use `print(...)` for debug traces. The anti-pattern is issuing one `fabric_exec` per `pi.read` or `pi.bash` and chaining turns — that multiplies round-trips and rarely beats calling core tools directly.
+
 ## The `pi` core tools (full code mode only)
 
 `pi.<tool>(args)` takes a single argument. `read`, `bash`, `grep`, `find`, and `ls` accept a bare string (the primary field) or an options object; `edit` and `write` require an options object. No tool takes multiple positional arguments: `pi.grep(pattern, path)` is a type error; use `pi.grep({ pattern, path })`.
