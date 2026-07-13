@@ -528,7 +528,7 @@ export class ActorManager {
     return {
       task: [
         `Fabric actor message from ${item.source}:`,
-        JSON.stringify({ id: item.id, source: item.source, payload: item.payload }, null, 2),
+        JSON.stringify({ source: item.source, payload: item.payload, id: item.id }, null, 2),
       ].join("\n\n"),
       name: actor.name,
       recursive: true,

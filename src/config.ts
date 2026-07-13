@@ -67,6 +67,7 @@ export interface FabricMeshConfig {
   actorPollMs: number;
   actorQueueLimit: number;
   eventContextChars: number;
+  actorContextEntries: number;
 }
 
 export interface FabricConfig {
@@ -142,6 +143,7 @@ export const DEFAULT_FABRIC_CONFIG: FabricConfig = {
     actorPollMs: 250,
     actorQueueLimit: 32,
     eventContextChars: 40_000,
+    actorContextEntries: 14,
   },
 };
 
@@ -392,6 +394,12 @@ export const normalizeFabricConfig = (input: Record<string, unknown>): FabricCon
         DEFAULT_FABRIC_CONFIG.mesh.eventContextChars,
         1_000,
         1_000_000,
+      ),
+      actorContextEntries: boundedInteger(
+        mesh.actorContextEntries,
+        DEFAULT_FABRIC_CONFIG.mesh.actorContextEntries,
+        1,
+        100,
       ),
     },
   };

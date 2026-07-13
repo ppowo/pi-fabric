@@ -3,6 +3,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import path from "node:path";
 import { FabricActivityStore } from "./activity/store.js";
 import { ActorManager } from "./actors/manager.js";
+import { buildActorContext } from "./actors/context.js";
 import type { FabricActorHostEvent } from "./actors/types.js";
 import { CapturedToolCatalog } from "./capture/catalog.js";
 import { loadFabricConfig, type FabricConfig } from "./config.js";
@@ -238,17 +239,18 @@ export class FabricState {
         return json;
       }
     };
-    const branch = context.sessionManager.getBranch().slice(-40);
+    const branch = context.sessionManager.getBranch();
+    const { digest, transcript } = buildActorContext(
+      branch as unknown[],
+      this.#config.mesh.actorContextEntries,
+      this.#config.mesh.eventContextChars,
+    );
     return this.#actors.dispatchHostEvent(event, {
       event,
-      payload: bounded(payload),
-      session: {
-        id: context.sessionManager.getSessionId(),
-        cwd: context.cwd,
-        idle: context.isIdle(),
-        recentEntries: bounded(branch),
-      },
-      observedAt: Date.now(),
+      session: { id: context.sessionManager.getSessionId(), cwd: context.cwd },
+      digest,
+      transcript,
+      signal: { payload: bounded(payload), idle: context.isIdle(), observedAt: Date.now() },
     });
   }
 
