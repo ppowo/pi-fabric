@@ -29,6 +29,13 @@ import { truncateMiddle } from "./util.js";
 const RESULT_FORMATS = ["auto", "json", "text"] as const;
 type ResultFormat = (typeof RESULT_FORMATS)[number];
 
+// Appended to the system prompt each agent run. Lives in the system prompt
+// (the most cache-stable prefix), not the tool schema — applyFabricMode()
+// re-registers the tool on several lifecycle events, so the system prompt is
+// the more reliable cached surface for persistent guidance.
+const FABRIC_TEMPLATE_LITERAL_CAVEAT =
+  "Caveat: when a fabric_exec program builds a string containing literal `${...}` (shell snippets, MCP/agent args, grep patterns), avoid TS template literals — TS interpolates `${var}` into a 'Cannot find name' type error, or substitutes silently if a same-named variable exists. Use a plain quoted string or pass the content via the `strings` param and reference it as `π.key`.";
+
 const safeTerminalText = (value: string): string =>
   value.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, (character) => {
     const code = character.codePointAt(0)?.toString(16).padStart(2, "0") ?? "00";
@@ -557,9 +564,10 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
     toolOwnership.apply(fullCodeMode);
     state.widgetDismissedAt = Date.now();
     if (!pi.getActiveTools().includes("fabric_exec")) return;
-    const guidance = fullCodeMode
+    const guidance = (fullCodeMode
       ? "Pi Fabric full code mode is on: fabric_exec is the only path to Pi core tools — call them as `pi.<tool>(args)` (read, bash, edit, write, grep, find, ls); direct core tools are unavailable. `π.<key>` is only for named strings from the `strings` parameter. Hidden extension tools are discoverable via `tools.search({ query })`/`tools.describe({ ref })` and callable via `extensions.<tool>(args)` or `tools.call({ ref, args })`."
-      : "Pi Fabric is in orchestration-only mode. Keep Pi core and registered extension tools on their native direct execution path. Inside fabric_exec, use only MCP, agents, actors, workflows, mesh coordination, councils, recursive queries, and explicit Fabric providers; pi.* and extensions.* are unavailable.";
+      : "Pi Fabric is in orchestration-only mode. Keep Pi core and registered extension tools on their native direct execution path. Inside fabric_exec, use only MCP, agents, actors, workflows, mesh coordination, councils, recursive queries, and explicit Fabric providers; pi.* and extensions.* are unavailable.")
+      + "\n\n" + FABRIC_TEMPLATE_LITERAL_CAVEAT;
     return {
       systemPrompt: `${event.systemPrompt}\n\n${guidance}`,
     };
