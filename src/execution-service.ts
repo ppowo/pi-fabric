@@ -28,6 +28,11 @@ export interface FabricExecutionResult {
   error?: string;
 }
 
+interface FabricExecutionPartial {
+  audits: FabricCallAudit[];
+  progress?: string | undefined;
+}
+
 export interface FabricExecutionOptions {
   code: string;
   strings?: Record<string, string>;
@@ -37,7 +42,7 @@ export interface FabricExecutionOptions {
   tokenBudget?: number;
   maxAgentCalls?: number;
   display?: FabricRunDisplay;
-  update(message: string): void;
+  onPartial(snapshot: FabricExecutionPartial): void;
 }
 
 export class FabricExecutionService {
@@ -100,15 +105,25 @@ export class FabricExecutionService {
         `Fabric full code mode is disabled; call ${provider === "pi" ? "Pi core" : "registered extension"} tools directly outside fabric_exec`,
       );
     };
+    let currentProgress: string | undefined;
+    const emit = (): void => {
+      options.onPartial({ audits: audits.slice(), progress: currentProgress });
+    };
+    const update = (message: string): void => {
+      currentProgress = message;
+      emit();
+    };
     const observeInvocation = (event: FabricRegistryActivityEvent): void => {
-      if (!this.activity) return;
-      if (event.type === "call_start") {
-        this.activity.beginCall(options.parentToolCallId, event);
-      } else if (event.type === "call_update") {
-        this.activity.updateCall(options.parentToolCallId, event.callId, event.update);
-      } else {
-        this.activity.finishCall(options.parentToolCallId, event.callId, event);
+      if (this.activity) {
+        if (event.type === "call_start") {
+          this.activity.beginCall(options.parentToolCallId, event);
+        } else if (event.type === "call_update") {
+          this.activity.updateCall(options.parentToolCallId, event.callId, event.update);
+        } else {
+          this.activity.finishCall(options.parentToolCallId, event.callId, event);
+        }
       }
+      if (event.type === "call_end") emit();
     };
     const baseContext = {
       cwd: options.context.cwd,
@@ -116,7 +131,7 @@ export class FabricExecutionService {
       parentToolCallId: options.parentToolCallId,
       nestedToolCallId: `${options.parentToolCallId}_metadata`,
       extensionContext: options.context,
-      update: options.update,
+      update,
     };
     let sandboxResult: FabricSandboxResult;
     try {
@@ -178,7 +193,7 @@ export class FabricExecutionService {
               });
             }
             case "fabric.$progress":
-              options.update(String(args.message ?? "Working"));
+              update(String(args.message ?? "Working"));
               return undefined;
             case "fabric.$configure": {
               const display: FabricRunDisplay = {
@@ -198,7 +213,7 @@ export class FabricExecutionService {
                 ...(typeof args.total === "number" ? { total: args.total } : {}),
               };
               const activityPhase = this.activity?.phase(options.parentToolCallId, phaseInput);
-              options.update(`Phase: ${name}`);
+              update(`Phase: ${name}`);
               return {
                 name,
                 index: phases.indexOf(name),

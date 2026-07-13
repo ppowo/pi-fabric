@@ -185,124 +185,230 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
               phases?: string[];
             }
           | undefined;
-        if (isPartial) {
-          return new Text(
-            theme.fg(
-              "warning",
-              `◆ ${safeTerminalText(details?.progress ?? "Running Fabric program…")}`,
-            ),
-            0,
-            0,
-          );
-        }
         const audits = details?.audits ?? [];
         const phases = details?.phases ?? [];
-        const failedCalls = audits.filter((audit) => audit.success === false).length;
-        const status = details?.success === false ? "failed" : "complete";
-        const statusColor = details?.success === false ? "error" : "success";
-        const metadata = [
-          audits.length > 0 ? countLabel(audits.length, "nested call") : undefined,
-          failedCalls > 0 ? `${failedCalls} failed` : undefined,
-          phases.length > 0 ? countLabel(phases.length, "phase") : undefined,
-        ].filter((value): value is string => Boolean(value));
-        let text = theme.fg(
-          statusColor,
-          `${details?.success === false ? "✗" : "✓"} Fabric ${status}`,
-        );
-        if (metadata.length > 0) text += theme.fg("dim", ` · ${metadata.join(" · ")}`);
-        if (phases.length > 0)
-          text += `\n${theme.fg("dim", phases.map((phase) => `◆ ${phase}`).join("  "))}`;
+        const nl = "\n";
 
-        const hasNested = audits.length > 0;
-        if (hasNested) {
-          const callLimit = expanded ? 30 : 8;
-          const callsShown = audits.slice(0, callLimit);
-          const callsHidden = audits.length - callsShown.length;
-          let firstNested = true;
-          for (const audit of callsShown) {
-            if (expanded && !firstNested) text += "\n";
-            firstNested = false;
-            const glyph =
-              audit.success === false ? theme.fg("error", "✗") : theme.fg("dim", "›");
-            text += `\n${glyph} ${nestedCallTitle(audit, theme, context?.invalidate)}`;
-            if (audit.success === false && audit.error) {
-              text += `\n  ${theme.fg("error", safeTerminalText(audit.error))}`;
-            } else if (expanded) {
-              const bodyLimit = 40;
-              let bodyLines: string[] | null = null;
-              let numbered = false;
-              let raw = false;
-              const editDiff = nestedEditDiff(audit, theme, context?.invalidate);
-              if (editDiff) {
-                bodyLines = editDiff;
+        const renderBody = (
+          audit: FabricRenderAudit,
+          limit: number,
+        ): { body: string; hidden: number } | null => {
+          let bodyLines: string[] | null = null;
+          let numbered = false;
+          let raw = false;
+          const editDiff = nestedEditDiff(audit, theme, context?.invalidate);
+          if (editDiff) {
+            bodyLines = editDiff;
+            raw = true;
+          } else {
+            const codeInfo = nestedCallCode(audit);
+            if (codeInfo) {
+              const highlighted = highlightCode(
+                codeInfo.code,
+                codeInfo.lang,
+                context?.invalidate,
+              );
+              if (highlighted) {
+                bodyLines = highlighted.map((line) => line || " ");
+                numbered = true;
                 raw = true;
-              } else {
-                const codeInfo = nestedCallCode(audit);
-                if (codeInfo) {
-                  const highlighted = highlightCode(
-                    codeInfo.code,
-                    codeInfo.lang,
-                    context?.invalidate,
-                  );
-                  if (highlighted) {
-                    bodyLines = highlighted.map((line) => line || " ");
-                    numbered = true;
-                    raw = true;
-                  }
-                }
-                if (!bodyLines) {
-                  const body = nestedCallBody(audit);
-                  if (body) {
-                    bodyLines = safeTerminalText(body).split("\n");
-                    numbered = isNumberedTool(audit);
-                  }
-                }
               }
-              if (bodyLines) {
-                while (bodyLines.length > 0) {
-                  const last = bodyLines[bodyLines.length - 1];
-                  if (last === undefined || last.trim() === "") bodyLines.pop();
-                  else break;
-                }
-                if (bodyLines.length === 0) bodyLines = null;
-              }
-              if (bodyLines) {
-                const bodyShown = bodyLines.slice(0, bodyLimit);
-                text += `\n${bodyShown
-                  .map((line, index) => {
-                    const content = raw ? line : theme.fg("toolOutput", line || " ");
-                    return numbered
-                      ? `${theme.fg("dim", String(index + 1).padStart(3, " "))} ${content}`
-                      : content;
-                  })
-                  .join("\n")}`;
-                if (bodyLines.length > bodyShown.length) {
-                  text += `\n${theme.fg("dim", `… ${countLabel(bodyLines.length - bodyShown.length, "line")}`)}`;
-                }
+            }
+            if (!bodyLines) {
+              const body = nestedCallBody(audit);
+              if (body) {
+                bodyLines = safeTerminalText(body).split(nl);
+                numbered = isNumberedTool(audit);
               }
             }
           }
-          if (callsHidden > 0) {
-            text += `\n${theme.fg("dim", `… ${countLabel(callsHidden, "nested call")} hidden`)}`;
-            if (!expanded) text += `${theme.fg("dim", " · ")}${expandHint(theme)}`;
+          if (bodyLines) {
+            while (bodyLines.length > 0) {
+              const last = bodyLines[bodyLines.length - 1];
+              if (last === undefined || last.trim() === "") bodyLines.pop();
+              else break;
+            }
+            if (bodyLines.length === 0) bodyLines = null;
           }
+          if (!bodyLines) return null;
+          const shown = bodyLines.slice(0, limit);
+          const body = shown
+            .map((line, index) => {
+              const content = raw ? line : theme.fg("toolOutput", line || " ");
+              return numbered
+                ? `${theme.fg("dim", String(index + 1).padStart(3, " "))} ${content}`
+                : content;
+            })
+            .join(nl);
+          return { body, hidden: bodyLines.length - shown.length };
+        };
+
+        if (isPartial) {
+          const progress = details?.progress;
+          if (audits.length === 0) {
+            return new Text(
+              theme.fg(
+                "warning",
+                `◆ ${safeTerminalText(progress ?? "Running Fabric program…")}`,
+              ),
+              0,
+              0,
+            );
+          }
+          if (audits.length === 1) {
+            const audit = audits[0]!;
+            const glyph =
+              audit.success === undefined
+                ? theme.fg("warning", "◐")
+                : audit.success === false
+                  ? theme.fg("error", "✗")
+                  : theme.fg("dim", "›");
+            let text = `${glyph} ${nestedCallTitle(audit, theme, context?.invalidate)}`;
+            if (audit.success === false && audit.error) {
+              text += nl + `  ${theme.fg("error", safeTerminalText(audit.error))}`;
+            }
+            if (progress) text += nl + theme.fg("dim", safeTerminalText(progress));
+            return new Text(text, 0, 0);
+          }
+          const done = audits.filter(
+            (audit) => audit.success !== undefined,
+          ).length;
+          let text = theme.fg(
+            "warning",
+            `◆ Fabric running · ${done}/${audits.length} calls`,
+          );
+          for (const audit of audits) {
+            const glyph =
+              audit.success === undefined
+                ? theme.fg("warning", "◐")
+                : audit.success === false
+                  ? theme.fg("error", "✗")
+                  : theme.fg("dim", "›");
+            text += nl + `${glyph} ${nestedCallTitle(audit, theme, context?.invalidate)}`;
+            if (audit.success === false && audit.error) {
+              text += nl + `  ${theme.fg("error", safeTerminalText(audit.error))}`;
+            }
+          }
+          if (progress) text += nl + theme.fg("dim", safeTerminalText(progress));
+          return new Text(text, 0, 0);
         }
 
         const output = result.content
           .filter((part): part is { type: "text"; text: string } => part.type === "text")
           .map((part) => part.text)
-          .join("\n");
-        const showOutput = !hasNested || expanded || details?.success === false;
+          .join(nl);
+        const failed = details?.success === false;
+
+        if (audits.length === 0) {
+          if (failed && details?.error) {
+            return new Text(
+              theme.fg("error", `✗ ${safeTerminalText(details.error)}`),
+              0,
+              0,
+            );
+          }
+          if (!output) return new Text(theme.fg("dim", "✓ Fabric"), 0, 0);
+          const lines = safeTerminalText(output).split(nl);
+          const limit = expanded ? Math.min(lines.length, 200) : 12;
+          const shown = lines.slice(0, limit);
+          let text = shown
+            .map((line) => theme.fg("toolOutput", line || " "))
+            .join(nl);
+          if (lines.length > shown.length) {
+            text += nl + theme.fg("dim", `… ${countLabel(lines.length - shown.length, "line")}`);
+            if (!expanded) text += theme.fg("dim", " · ") + expandHint(theme);
+          }
+          return new Text(text, 0, 0);
+        }
+
+        if (audits.length === 1) {
+          const audit = audits[0]!;
+          let text = nestedCallTitle(audit, theme, context?.invalidate);
+          if (audit.success === false) {
+            if (audit.error) {
+              text += nl + theme.fg("error", safeTerminalText(audit.error));
+            }
+            return new Text(text, 0, 0);
+          }
+          const limit = expanded ? 200 : 12;
+          const rendered = renderBody(audit, limit);
+          if (rendered) {
+            text += nl + rendered.body;
+            if (rendered.hidden > 0) {
+              text += nl + theme.fg("dim", `… ${countLabel(rendered.hidden, "line")}`);
+              if (!expanded) text += theme.fg("dim", " · ") + expandHint(theme);
+            }
+          } else if (output) {
+            const lines = safeTerminalText(output).split(nl);
+            const outLimit = expanded ? Math.min(lines.length, 200) : 12;
+            const outShown = lines.slice(0, outLimit);
+            text += nl + outShown
+              .map((line) => theme.fg("toolOutput", line || " "))
+              .join(nl);
+            if (lines.length > outShown.length) {
+              text += nl + theme.fg("dim", `… ${countLabel(lines.length - outShown.length, "line")}`);
+              if (!expanded) text += theme.fg("dim", " · ") + expandHint(theme);
+            }
+          }
+          return new Text(text, 0, 0);
+        }
+
+        const failedCalls = audits.filter(
+          (audit) => audit.success === false,
+        ).length;
+        const status = failed ? "failed" : "complete";
+        const statusColor = failed ? "error" : "success";
+        const metadata = [
+          countLabel(audits.length, "nested call"),
+          failedCalls > 0 ? `${failedCalls} failed` : undefined,
+          phases.length > 0 ? countLabel(phases.length, "phase") : undefined,
+        ].filter((value): value is string => Boolean(value));
+        let text = theme.fg(
+          statusColor,
+          `${failed ? "✗" : "✓"} Fabric ${status}`,
+        );
+        if (metadata.length > 0) text += theme.fg("dim", ` · ${metadata.join(" · ")}`);
+        if (phases.length > 0)
+          text += nl + theme.fg("dim", phases.map((phase) => `◆ ${phase}`).join("  "));
+
+        const callLimit = expanded ? 30 : 8;
+        const callsShown = audits.slice(0, callLimit);
+        const callsHidden = audits.length - callsShown.length;
+        let firstNested = true;
+        for (const audit of callsShown) {
+          if (expanded && !firstNested) text += nl;
+          firstNested = false;
+          const glyph =
+            audit.success === false ? theme.fg("error", "✗") : theme.fg("dim", "›");
+          text += nl + `${glyph} ${nestedCallTitle(audit, theme, context?.invalidate)}`;
+          if (audit.success === false && audit.error) {
+            text += nl + `  ${theme.fg("error", safeTerminalText(audit.error))}`;
+          } else if (expanded) {
+            const rendered = renderBody(audit, 40);
+            if (rendered) {
+              text += nl + rendered.body;
+              if (rendered.hidden > 0) {
+                text += nl + theme.fg("dim", `… ${countLabel(rendered.hidden, "line")}`);
+              }
+            }
+          }
+        }
+        if (callsHidden > 0) {
+          text += nl + theme.fg("dim", `… ${countLabel(callsHidden, "nested call")} hidden`);
+          if (!expanded) text += theme.fg("dim", " · ") + expandHint(theme);
+        }
+
+        const showOutput = failed || expanded;
         if (showOutput && output) {
-          const lines = safeTerminalText(output).split("\n");
-          const limit = expanded ? Math.min(lines.length, 200) : hasNested ? 6 : 12;
+          const lines = safeTerminalText(output).split(nl);
+          const limit = expanded ? Math.min(lines.length, 200) : 6;
           const shown = lines.slice(0, limit);
           if (shown.length > 0) {
-            if (hasNested && expanded) text += `\n${theme.fg("dim", "↩ return")}`;
-            text += `\n${shown.map((line) => theme.fg("toolOutput", line || " ")).join("\n")}`;
+            if (expanded) text += nl + theme.fg("dim", "↩ return");
+            text += nl + shown.map((line) => theme.fg("toolOutput", line || " ")).join(nl);
             if (lines.length > shown.length) {
-              text += `\n${theme.fg("dim", `… ${countLabel(lines.length - shown.length, "line")} hidden`)}`;
-              if (!expanded) text += `${theme.fg("dim", " · ")}${expandHint(theme)}`;
+              text += nl + theme.fg("dim", `… ${countLabel(lines.length - shown.length, "line")} hidden`);
+              if (!expanded) text += theme.fg("dim", " · ") + expandHint(theme);
             }
           }
         }
@@ -326,10 +432,13 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
                 },
               }
             : {}),
-          update(message) {
+          onPartial(snapshot) {
             onUpdate?.({
-              content: [{ type: "text", text: message }],
-              details: { progress: message },
+              content: [{ type: "text", text: snapshot.progress ?? "" }],
+              details: {
+                progress: snapshot.progress,
+                audits: snapshot.audits,
+              },
             });
           },
         });

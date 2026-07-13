@@ -28,7 +28,7 @@ describe("FabricExecutionService", () => {
         signal: undefined,
         parentToolCallId: "test",
         context,
-        update() {},
+        onPartial() {},
       });
       expect(result.success).toBe(true);
       expect(result.value).toBe("fabric works");
@@ -64,7 +64,7 @@ return {
         signal: undefined,
         parentToolCallId: "native-metadata",
         context,
-        update() {},
+        onPartial() {},
       });
       expect(metadata.success).toBe(true);
       expect(metadata.value).toEqual({ providers: [], search: [] });
@@ -74,7 +74,7 @@ return {
         signal: undefined,
         parentToolCallId: "native-direct",
         context,
-        update() {},
+        onPartial() {},
       });
       expect(direct.typeErrors?.map((error) => error.message).join(" ")).toContain(
         "Cannot find name 'pi'",
@@ -85,7 +85,7 @@ return {
         signal: undefined,
         parentToolCallId: "native-indirect",
         context,
-        update() {},
+        onPartial() {},
       });
       expect(indirect.success).toBe(false);
       expect(indirect.error).toContain("full code mode is disabled");
@@ -96,7 +96,7 @@ return {
         signal: undefined,
         parentToolCallId: "native-extension",
         context,
-        update() {},
+        onPartial() {},
       });
       expect(extension.success).toBe(false);
       expect(extension.error).toContain("registered extension tools directly outside fabric_exec");
@@ -130,7 +130,7 @@ return text.trim();
         signal: undefined,
         parentToolCallId: "activity-test",
         context,
-        update() {},
+        onPartial() {},
       });
 
       expect(result.success).toBe(true);
@@ -195,7 +195,7 @@ return "unreachable";
       parentToolCallId: "budget-test",
       context,
       maxAgentCalls: 1,
-      update() {},
+      onPartial() {},
     });
     expect(result.success).toBe(false);
     expect(result.error).toContain("agent budget exhausted (1 per execution)");
