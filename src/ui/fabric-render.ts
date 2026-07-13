@@ -36,15 +36,94 @@ const truncateOneLine = (value: string, max: number): string => {
 const argString = (args: Record<string, unknown>, key: string): string | undefined =>
   typeof args[key] === "string" ? (args[key] as string) : undefined;
 
+const shortIdOf = (value: unknown): string | undefined =>
+  typeof value === "string" ? value.slice(0, 8) : undefined;
+
+const countOf = (result: unknown): string =>
+  Array.isArray(result) ? String(result.length) : "";
+
+const providerCallDetail = (
+  provider: string,
+  tool: string,
+  args: Record<string, unknown>,
+  result: unknown,
+): string => {
+  if (provider === "agents") {
+    const name = argString(args, "name");
+    const id = shortIdOf(args.id);
+    const message = argString(args, "message");
+    const task = argString(args, "task");
+    switch (tool) {
+      case "create":
+        return name ?? "";
+      case "remove":
+      case "stop":
+      case "cleanup":
+      case "wait":
+      case "status":
+      case "actorStatus":
+      case "messages":
+        return id ?? name ?? "";
+      case "ask":
+      case "tell":
+        return [id ?? name, message ? truncateOneLine(message, 48) : ""]
+          .filter(Boolean)
+          .join(" ");
+      case "run":
+      case "spawn":
+        return name ?? (task ? truncateOneLine(task, 64) : "");
+      case "actors":
+      case "list":
+        return countOf(result);
+      default:
+        return "";
+    }
+  }
+  if (provider === "mesh") {
+    switch (tool) {
+      case "publish":
+      case "read":
+        return argString(args, "topic") ?? "";
+      case "get":
+      case "put":
+      case "delete":
+        return argString(args, "key") ?? "";
+      case "list":
+        return argString(args, "prefix") ?? "";
+      case "members":
+        return countOf(result);
+      default:
+        return "";
+    }
+  }
+  if (provider === "mcp") {
+    switch (tool) {
+      case "$call":
+        return [argString(args, "server"), argString(args, "tool")].filter(Boolean).join(".");
+      case "$register":
+        return argString(args, "name") ?? "";
+      case "$servers":
+        return countOf(result);
+      default:
+        return "";
+    }
+  }
+  return "";
+};
+
 /** Compact one-line title for a nested Fabric call, e.g. `read src/index.ts` or `$ ls -la`. */
 export function nestedCallTitle(
   audit: FabricRenderAudit,
   theme: Theme,
   invalidate?: () => void,
 ): string {
-  const tool = audit.tool ?? audit.ref.split(".")[1] ?? audit.ref;
+  const ref = audit.ref;
+  const provider = audit.provider ?? ref.split(".")[0] ?? ref;
+  const tool = audit.tool ?? ref.split(".")[1] ?? ref;
   const title = theme.fg("toolTitle", theme.bold(tool));
   const args = audit.args ?? {};
+  const providerDetail = providerCallDetail(provider, tool, args, audit.result);
+  if (providerDetail) return `${title} ${theme.fg("accent", providerDetail)}`;
   const command = argString(args, "command");
   if (command) {
     const firstLine = command.split("\n")[0] ?? "";

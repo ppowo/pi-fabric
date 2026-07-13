@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import type { CapturedToolCatalog } from "../capture/catalog.js";
 import type { FabricState } from "../fabric-state.js";
 import { truncateMiddle } from "../util.js";
@@ -16,6 +17,57 @@ export function registerFabricCommand(pi: ExtensionAPI, deps: FabricCommandDeps)
   const { state, fabricUi, capturedTools, applyFabricMode, suspendToolCapture } = deps;
   pi.registerCommand("fabric", {
     description: "Open the Fabric dashboard; inspect, reload, or manage agents and actors",
+    getArgumentCompletions: (argumentPrefix: string): AutocompleteItem[] | null => {
+      const subcommands = [
+        "status",
+        "dashboard",
+        "reload",
+        "providers",
+        "agents",
+        "actors",
+        "messages",
+        "attach",
+        "stop",
+        "remove",
+        "kill",
+      ];
+      const idCommands = new Set(["messages", "attach", "stop", "remove", "kill"]);
+      const firstSpace = argumentPrefix.indexOf(" ");
+      if (firstSpace < 0) {
+        const matches = subcommands.filter((name) => name.startsWith(argumentPrefix));
+        return matches.length > 0 ? matches.map((name) => ({ value: name, label: name })) : null;
+      }
+      const subcommand = argumentPrefix.slice(0, firstSpace);
+      if (!idCommands.has(subcommand)) return null;
+      const idPrefix = argumentPrefix.slice(firstSpace + 1);
+      if (!state.initialized) return null;
+      const items: AutocompleteItem[] = [];
+      try {
+        for (const actor of state.actors.list()) {
+          items.push({
+            value: actor.name,
+            label: actor.name,
+            description: `${actor.status} actor · ${actor.id.slice(0, 8)}`,
+          });
+        }
+      } catch {
+        /* actors not initialized */
+      }
+      try {
+        for (const agent of state.subagents.list()) {
+          const short = agent.id.slice(0, 8);
+          items.push({
+            value: short,
+            label: short,
+            description: `${agent.status} subagent · ${agent.name}`,
+          });
+        }
+      } catch {
+        /* subagents not initialized */
+      }
+      const filtered = items.filter((item) => item.value.startsWith(idPrefix));
+      return filtered.length > 0 ? filtered : null;
+    },
     async handler(argumentsText, context) {
       await state.ensure(context);
       const [command = "status", ...argumentsList] = argumentsText
@@ -149,6 +201,30 @@ export function registerFabricCommand(pi: ExtensionAPI, deps: FabricCommandDeps)
         context.ui.notify(`Stopped Fabric subagent ${agent.id.slice(0, 8)}`, "info");
         return;
       }
+      if (command === "remove" || command === "kill") {
+        const id = argumentsList[0];
+        if (!id) {
+          context.ui.notify("Usage: /fabric remove <id>", "warning");
+          return;
+        }
+        const actor = state.actors
+          .list()
+          .find((candidate) => candidate.id.startsWith(id) || candidate.name === id);
+        if (actor) {
+          await state.actors.remove(actor.id);
+          context.ui.notify(`Removed Fabric actor ${actor.id.slice(0, 8)} (${actor.name})`, "info");
+          return;
+        }
+        const agent = state.subagents.list().find((candidate) => candidate.id.startsWith(id));
+        if (!agent) {
+          context.ui.notify(`Unknown Fabric actor or subagent: ${id}`, "error");
+          return;
+        }
+        await state.subagents.stop(agent.id);
+        await state.subagents.cleanup(agent.id);
+        context.ui.notify(`Removed Fabric subagent ${agent.id.slice(0, 8)}`, "info");
+        return;
+      }
       if (command === "attach") {
         const id = argumentsList[0];
         const agent = id
@@ -163,7 +239,7 @@ export function registerFabricCommand(pi: ExtensionAPI, deps: FabricCommandDeps)
       }
       if (command !== "status") {
         context.ui.notify(
-          "Usage: /fabric [status|dashboard|reload|providers|agents|actors|messages <id>|attach <id>|stop <id>]",
+          "Usage: /fabric [status|dashboard|reload|providers|agents|actors|messages <id>|attach <id>|stop <id>|remove <id>|kill <id>]",
           "warning",
         );
         return;

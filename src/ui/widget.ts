@@ -71,6 +71,18 @@ const agentLine = (theme: Theme, agent: FabricUiAgent, now: number): string => {
   }`;
 };
 
+const actorStream = (actor: FabricUiActor): string => {
+  const last = actor.recentMessages[actor.recentMessages.length - 1];
+  if (!last) return "";
+  if (last.direction === "out") {
+    if (last.error) return `← ✗ ${truncateToWidth(safeText(last.error), 48)}`;
+    if (last.text) return `← ${truncateToWidth(safeText(last.text), 48)}`;
+    if (last.action) return `← ${last.action}`;
+    return "";
+  }
+  return `→ ${last.source}`;
+};
+
 const actorLine = (theme: Theme, actor: FabricUiActor): string => {
   const effectiveStatus = actor.lastError ? "failed" : actor.status;
   const status = colorStatus(theme, effectiveStatus, statusGlyph(effectiveStatus));
@@ -81,7 +93,8 @@ const actorLine = (theme: Theme, actor: FabricUiActor): string => {
   const usage = actor.worker?.usage
     ? ` · ${formatTokens(actor.worker.usage.input + actor.worker.usage.output)} tok`
     : "";
-  return `  ${status} ${safeText(actor.name)}  ${theme.fg("muted", safeText(activity))}${theme.fg(
+  const stream = actorStream(actor);
+  return `  ${status} ${safeText(actor.name)}  ${theme.fg("muted", safeText(activity))}${stream ? theme.fg("muted", ` · ${stream}`) : ""}${theme.fg(
     "dim",
     `${queue}${messages}${usage}`,
   )}`;
@@ -122,7 +135,7 @@ export class FabricWidget implements Component {
         ? candidateRun
         : undefined;
     const activeAgents = snapshot.agents.filter((agent) => isActiveStatus(agent.status));
-    const activeActors = snapshot.actors.filter((actor) => isActiveStatus(actor.status));
+    const visibleActors = snapshot.actors.filter((actor) => actor.status !== "stopped");
     const activeState = snapshot.state.filter((entry) => isActiveStatus(entry.status));
     const nestedCalls =
       run?.calls.filter((call) => call.kind !== "agent" && call.kind !== "actor") ?? [];
@@ -151,7 +164,7 @@ export class FabricWidget implements Component {
       }
     }
     if (activeAgents.length > 0) parts.push(`${activeAgents.length} running`);
-    if (snapshot.actors.length > 0) parts.push(`${snapshot.actors.length} actor${snapshot.actors.length === 1 ? "" : "s"}`);
+    if (visibleActors.length > 0) parts.push(`${visibleActors.length} actor${visibleActors.length === 1 ? "" : "s"}`);
     const tokens = totalTokens(snapshot, run);
     if (tokens > 0) parts.push(`${formatTokens(tokens)} tok`);
     if (run) parts.push(formatDuration((run.finishedAt ?? snapshot.now) - run.startedAt));
@@ -164,7 +177,7 @@ export class FabricWidget implements Component {
     const lines = [truncateToWidth(header, width)];
 
     for (const agent of activeAgents) lines.push(agentLine(this.theme, agent, snapshot.now));
-    for (const actor of activeActors) lines.push(actorLine(this.theme, actor));
+    for (const actor of visibleActors) lines.push(actorLine(this.theme, actor));
     for (const item of runningItems) {
       const current = item.current ?? item.detail;
       const progress =
@@ -185,12 +198,6 @@ export class FabricWidget implements Component {
           entry.label,
         )}${this.theme.fg("dim", ` · ${entry.owner ?? entry.status}`)}`,
       );
-    }
-
-    if (lines.length === 1 && snapshot.actors.length > 0) {
-      for (const actor of snapshot.actors.filter((candidate) => candidate.status !== "stopped")) {
-        lines.push(actorLine(this.theme, actor));
-      }
     }
 
     const bounded = lines.slice(0, Math.max(1, this.maxRows));
