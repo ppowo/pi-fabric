@@ -240,4 +240,67 @@ describe("ActorManager", () => {
     );
     expect(eventTypes).toContain("agent_start");
   });
+
+  it("setModel updates and clears an actor's model and it takes effect on the next run", async () => {
+    const { actors } = setup();
+    const actor = await actors.create({
+      name: "reviewer",
+      instructions: "Review messages and reply concisely.",
+      responseMode: "text",
+    });
+    expect(actors.status(actor.id).model).toBeUndefined();
+
+    await actors.setModel(actor.id, "anthropic/claude-sonnet-4-5");
+    expect(actors.status(actor.id).model).toBe("anthropic/claude-sonnet-4-5");
+
+    // The new model is forwarded to the subagent run launched for the next message.
+    await actors.ask(actor.id, "Inspect auth");
+    await waitFor(() => actors.status(actor.id).status === "idle");
+    const run = actors.readLog(actor.id, { type: "run" });
+    expect(run.run?.status?.model).toBe("anthropic/claude-sonnet-4-5");
+
+    // Clearing the override falls back to the Fabric default (no stored model).
+    await actors.setModel(actor.id, undefined);
+    expect(actors.status(actor.id).model).toBeUndefined();
+    await actors.ask(actor.id, "Inspect auth");
+    await waitFor(() => actors.status(actor.id).status === "idle");
+    const clearedRun = actors.readLog(actor.id, { type: "run" });
+    expect(clearedRun.run?.status?.model).toBeUndefined();
+
+    // Whitespace-only values are treated as clearing the override.
+    await actors.setModel(actor.id, "  ");
+    expect(actors.status(actor.id).model).toBeUndefined();
+  });
+
+  it("setModel throws for an unknown actor", async () => {
+    const { actors } = setup();
+    await expect(actors.setModel("nope", "anthropic/claude-sonnet-4-5")).rejects.toThrow(
+      "Unknown Fabric actor",
+    );
+  });
+
+  it("persists a setModel change across actor manager restarts", async () => {
+    const setupState = setup(true);
+    const actor = await setupState.actors.create({
+      name: "reviewer",
+      instructions: "Review messages and reply concisely.",
+      responseMode: "text",
+    });
+    await setupState.actors.setModel(actor.id, "anthropic/claude-sonnet-4-5");
+    await setupState.actors.close();
+    actorManagers.splice(actorManagers.indexOf(setupState.actors), 1);
+
+    const restored = new ActorManager(
+      "test",
+      setupState.identity,
+      setupState.mesh,
+      setupState.meshConfig,
+      setupState.subagents,
+      () => {},
+      { actorRoot: path.join(setupState.root, "actors"), persistent: true },
+    );
+    actorManagers.push(restored);
+
+    expect(restored.status(actor.id).model).toBe("anthropic/claude-sonnet-4-5");
+  });
 });

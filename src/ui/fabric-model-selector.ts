@@ -31,6 +31,10 @@ export interface FabricModelSelectorOptions {
   currentValue: string;
   onSelect: (value: string) => void;
   onCancel: () => void;
+  /** Header line above the search input. Defaults to the global-default wording. */
+  headerText?: string;
+  /** Description shown for the Inherit row's footer name. Defaults to the host-default wording. */
+  inheritName?: string;
 }
 
 /**
@@ -54,6 +58,8 @@ export class FabricModelSelector extends Container implements Focusable {
   private readonly listContainer = new Container();
   private readonly onSelectCallback: (value: string) => void;
   private readonly onCancelCallback: () => void;
+  private readonly headerText: string;
+  private readonly inheritName: string;
   private _focused = false;
 
   constructor(options: FabricModelSelectorOptions) {
@@ -64,6 +70,10 @@ export class FabricModelSelector extends Container implements Focusable {
     this.currentKey = options.currentValue === INHERIT_VALUE ? null : options.currentValue;
     this.onSelectCallback = options.onSelect;
     this.onCancelCallback = options.onCancel;
+    this.headerText =
+      options.headerText ??
+      "Default model for Fabric subagents and actors. Pick Inherit to use the host session's model.";
+    this.inheritName = options.inheritName ?? "Use the host session's default model";
 
     this.allEntries = this.buildEntries(options.source.models);
     this.filteredEntries = this.allEntries;
@@ -72,10 +82,7 @@ export class FabricModelSelector extends Container implements Focusable {
 
     this.addChild(
       new Text(
-        this.theme.fg(
-          "muted",
-          "Default model for Fabric subagents and actors. Pick Inherit to use the host session's model.",
-        ),
+        this.theme.fg("muted", this.headerText),
         0,
         0,
       ),
@@ -136,7 +143,7 @@ export class FabricModelSelector extends Container implements Focusable {
       value: INHERIT_VALUE,
       id: "Inherit",
       provider: "",
-      name: "Use the host session's default model",
+      name: this.inheritName,
       isModel: false,
     };
     const modelEntries: ModelEntry[] = sorted.map((model) => ({

@@ -8,6 +8,8 @@ import type {
   FabricActivityRun,
 } from "../activity/types.js";
 import { formatClock, formatDuration, formatTokens, padToWidth, safeText, wrapPlainText } from "./format.js";
+import { FabricModelSelector } from "./fabric-model-selector.js";
+import { INHERIT_VALUE, type ModelSource } from "./model-picker.js";
 import type {
   FabricDashboardSnapshot,
   FabricUiActor,
@@ -262,19 +264,38 @@ export class FabricDashboard implements Component, Focusable {
   private detailId: string | undefined;
   private detailScroll = 0;
   private readonly refreshTimer: NodeJS.Timeout;
+  private mode: "overview" | "detail" | "modelPicker" = "overview";
+  private picker: FabricModelSelector | undefined;
+  private readonly modelSource: ModelSource | undefined;
+  private readonly onActorModel:
+    | ((actorId: string, model: string | undefined) => void)
+    | undefined;
+  private pickerActorName: string | undefined;
 
   constructor(
     readonly tui: TUI,
     readonly theme: Theme,
     readonly snapshot: () => FabricDashboardSnapshot,
     readonly done: () => void,
+    options: {
+      modelSource?: ModelSource;
+      onActorModel?: (actorId: string, model: string | undefined) => void;
+    } = {},
   ) {
     this.focused = true;
+    this.modelSource = options.modelSource;
+    this.onActorModel = options.onActorModel;
     this.refreshTimer = setInterval(() => this.tui.requestRender(), 500);
     this.refreshTimer.unref();
   }
 
   handleInput(data: string): void {
+    if (this.mode === "modelPicker" && this.picker) {
+      this.picker.handleInput(data);
+      this.tui.requestRender();
+      return;
+    }
+
     const snapshot = this.snapshot();
     const run = snapshot.runs[this.runIndex];
     const panels = phasePanels(snapshot, run);
@@ -299,6 +320,11 @@ export class FabricDashboard implements Component, Focusable {
         this.detailScroll++;
       } else if (matchesKey(data, Key.home) || data === "g") {
         this.detailScroll = 0;
+      } else if (data === "m") {
+        const detail = entities.find((entity) => entity.id === this.detailId);
+        if (detail && detail.kind === "actor" && detail.status !== "stopped") {
+          this.openModelPicker(detail);
+        }
       }
       this.tui.requestRender();
       return;
@@ -363,6 +389,9 @@ export class FabricDashboard implements Component, Focusable {
 
   render(width: number): string[] {
     if (width <= 0) return [];
+    if (this.mode === "modelPicker" && this.picker) {
+      return this.renderModelPicker(width);
+    }
     const snapshot = this.snapshot();
     this.runIndex = Math.max(0, Math.min(this.runIndex, Math.max(0, snapshot.runs.length - 1)));
     const run = snapshot.runs[this.runIndex];
@@ -385,6 +414,53 @@ export class FabricDashboard implements Component, Focusable {
 
   dispose(): void {
     clearInterval(this.refreshTimer);
+    this.picker = undefined;
+    this.mode = "overview";
+  }
+
+  private openModelPicker(entity: Entity): void {
+    if (entity.kind !== "actor" || !this.modelSource || !this.onActorModel) return;
+    const actor = entity.value;
+    this.pickerActorName = actor.name;
+    this.picker = new FabricModelSelector({
+      theme: this.theme,
+      source: this.modelSource,
+      currentValue: actor.model ?? INHERIT_VALUE,
+      headerText: `Model for actor "${actor.name}". Pick Inherit to use the Fabric default.`,
+      inheritName: "Use the Fabric default model (or host default)",
+      onSelect: (value) => {
+        const model = value === INHERIT_VALUE ? undefined : value;
+        this.onActorModel!(actor.id, model);
+        this.closeModelPicker();
+      },
+      onCancel: () => this.closeModelPicker(),
+    });
+    this.picker.focused = true;
+    this.mode = "modelPicker";
+  }
+
+  private closeModelPicker(): void {
+    this.picker = undefined;
+    this.pickerActorName = undefined;
+    this.mode = "detail";
+  }
+
+  private renderModelPicker(width: number): string[] {
+    if (width < 24 || !this.picker) return [];
+    const lines = [
+      this.topBorder(width, `actor · ${this.pickerActorName ?? ""} · model`),
+    ];
+    const inner = this.picker.render(width - 2);
+    for (const line of inner) lines.push(this.row(width, line));
+    lines.push(this.middleBorder(width));
+    lines.push(
+      this.row(
+        width,
+        this.theme.fg("dim", "  Enter to select · Esc to cancel · type to filter"),
+      ),
+    );
+    lines.push(this.bottomBorder(width));
+    return lines.map((line) => truncateToWidth(line, width, ""));
   }
 
   private renderOverview(
@@ -621,12 +697,16 @@ export class FabricDashboard implements Component, Focusable {
     for (const line of visible) lines.push(this.row(width, line));
     while (lines.length < maxBody + 1) lines.push(this.row(width, ""));
     lines.push(this.middleBorder(width));
+    const actorModelHint =
+      entity.kind === "actor" && entity.status !== "stopped" && this.modelSource
+        ? " · m model"
+        : "";
     lines.push(
       this.row(
         width,
         this.theme.fg(
           "dim",
-          `j/k scroll · esc back${content.length > maxBody ? ` · ${this.detailScroll + 1}-${Math.min(content.length, this.detailScroll + maxBody)}/${content.length}` : ""}`,
+          `j/k scroll · esc back${content.length > maxBody ? ` · ${this.detailScroll + 1}-${Math.min(content.length, this.detailScroll + maxBody)}/${content.length}` : ""}${actorModelHint}`,
         ),
       ),
     );

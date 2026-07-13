@@ -245,6 +245,24 @@ export class ActorManager {
     return this.#publicInfo(this.#requireActor(id));
   }
 
+  /**
+   * Change an existing actor's model. Takes effect on the actor's next queued
+   * message: #runRequest reads actor.model at run start, so an in-flight run
+   * keeps the model it was launched with. Pass undefined (or an empty/whitespace
+   * string) to clear the override so the actor inherits the Fabric default
+   * (subagents.model), which may itself inherit the host session's model.
+   */
+  async setModel(id: string, model: string | undefined): Promise<FabricActorInfo> {
+    const actor = this.#requireActor(id);
+    const next = typeof model === "string" ? model.trim() : "";
+    if (next) actor.model = next;
+    else delete actor.model;
+    actor.updatedAt = Date.now();
+    this.#saveActors();
+    await this.#publishPresence(actor);
+    return this.#publicInfo(actor);
+  }
+
   tell(id: string, message: string, data?: unknown): { queued: true; messageId: string } {
     this.#validateDirectMessage(message, data);
     const actor = this.#requireActiveActor(id);

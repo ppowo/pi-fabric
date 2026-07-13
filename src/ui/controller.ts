@@ -3,6 +3,7 @@ import type { TUI } from "@earendil-works/pi-tui";
 import type { FabricState } from "../fabric-state.js";
 import type { MeshEvent } from "../mesh/store.js";
 import { FabricDashboard } from "./dashboard.js";
+import { buildModelSource } from "./model-picker.js";
 import { createDashboardSnapshot } from "./snapshot.js";
 import { type FabricDashboardSnapshot } from "./types.js";
 import { FabricWidget, shouldShowFabricWidget } from "./widget.js";
@@ -76,9 +77,16 @@ export class FabricUiController {
     }
     if (!this.#context) this.start(context);
     else this.#refresh();
+    const modelSource = buildModelSource(context.modelRegistry);
+    const onActorModel = (actorId: string, model: string | undefined): void => {
+      this.state.actors.setModel(actorId, model).catch(() => undefined);
+    };
     await context.ui.custom<void>(
       (tui, theme, _keybindings, done) =>
-        new FabricDashboard(tui, theme, () => this.#snapshot, () => done(undefined)),
+        new FabricDashboard(tui, theme, () => this.#snapshot, () => done(undefined), {
+          modelSource,
+          onActorModel,
+        }),
       {
         overlay: true,
         overlayOptions: {

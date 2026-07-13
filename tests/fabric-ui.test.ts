@@ -3,8 +3,17 @@ import type { TUI } from "@earendil-works/pi-tui";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import { FabricDashboard } from "../src/ui/dashboard.js";
+import type { ModelSource } from "../src/ui/model-picker.js";
 import type { FabricDashboardSnapshot } from "../src/ui/types.js";
 import { FabricWidget, shouldShowFabricWidget } from "../src/ui/widget.js";
+
+const actorModelSource: ModelSource = {
+  models: [
+    { provider: "anthropic", id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5" },
+    { provider: "openai", id: "gpt-5.5", name: "GPT 5.5" },
+  ],
+  lastUsed: {},
+};
 
 const theme = {
   fg: (_color: string, text: string) => text,
@@ -290,6 +299,108 @@ describe("Fabric dynamic UI", () => {
       expect(detailText).toContain("Review the migration for security defects");
       expect(detailText).toContain("anthropic/claude-opus-4-8");
       expect(detail.every((line) => visibleWidth(line) <= 80)).toBe(true);
+    } finally {
+      dashboard.dispose();
+    }
+  });
+
+  const openActorDetail = (dashboard: FabricDashboard): void => {
+    // Phases pane: move from the auto-selected "audit" phase to the session panel.
+    dashboard.handleInput("j");
+    // Switch to the entities pane and select the actor (index 1, after the
+    // unlinked agent), then open its detail.
+    dashboard.handleInput("l");
+    dashboard.handleInput("j");
+    dashboard.handleInput("\r");
+  };
+
+  it("offers a per-actor model picker from the actor detail view", () => {
+    const tui = { requestRender: vi.fn() } as unknown as TUI;
+    const onActorModel = vi.fn();
+    const dashboard = new FabricDashboard(tui, theme, snapshot, vi.fn(), {
+      modelSource: actorModelSource,
+      onActorModel,
+    });
+    try {
+      openActorDetail(dashboard);
+      const detail = dashboard.render(120);
+      expect(detail.join("\n")).toContain("advisor");
+      expect(detail.join("\n")).toContain("m model");
+
+      // Open the picker.
+      dashboard.handleInput("m");
+      const picker = dashboard.render(120);
+      const pickerText = picker.join("\n");
+      expect(pickerText).toContain('Model for actor "advisor"');
+      expect(pickerText).toContain("Inherit");
+      expect(pickerText).toContain("claude-sonnet-4-5");
+      expect(picker.every((line) => visibleWidth(line) <= 120)).toBe(true);
+
+      // Select the first real model (Inherit is index 0; one down lands on it).
+      dashboard.handleInput("\x1b[B");
+      dashboard.handleInput("\r");
+      expect(onActorModel).toHaveBeenCalledWith("actor-1", "anthropic/claude-sonnet-4-5");
+
+      // Selecting closes the picker and returns to the actor detail.
+      const after = dashboard.render(120);
+      expect(after.join("\n")).toContain("advisor");
+      expect(after.join("\n")).not.toContain('Model for actor "advisor"');
+    } finally {
+      dashboard.dispose();
+    }
+  });
+
+  it("picking Inherit clears the actor model override", () => {
+    const tui = { requestRender: vi.fn() } as unknown as TUI;
+    const onActorModel = vi.fn();
+    const dashboard = new FabricDashboard(tui, theme, snapshot, vi.fn(), {
+      modelSource: actorModelSource,
+      onActorModel,
+    });
+    try {
+      openActorDetail(dashboard);
+      dashboard.handleInput("m");
+      // Inherit is the default selection (index 0).
+      dashboard.handleInput("\r");
+      expect(onActorModel).toHaveBeenCalledWith("actor-1", undefined);
+      const after = dashboard.render(120);
+      expect(after.join("\n")).toContain("advisor");
+    } finally {
+      dashboard.dispose();
+    }
+  });
+
+  it("canceling the picker returns to the detail without changing the model", () => {
+    const tui = { requestRender: vi.fn() } as unknown as TUI;
+    const onActorModel = vi.fn();
+    const dashboard = new FabricDashboard(tui, theme, snapshot, vi.fn(), {
+      modelSource: actorModelSource,
+      onActorModel,
+    });
+    try {
+      openActorDetail(dashboard);
+      dashboard.handleInput("m");
+      dashboard.handleInput("\x1b");
+      expect(onActorModel).not.toHaveBeenCalled();
+      const after = dashboard.render(120);
+      expect(after.join("\n")).toContain("advisor");
+      expect(after.join("\n")).not.toContain('Model for actor "advisor"');
+    } finally {
+      dashboard.dispose();
+    }
+  });
+
+  it("does not offer the picker when no model source is wired", () => {
+    const tui = { requestRender: vi.fn() } as unknown as TUI;
+    const dashboard = new FabricDashboard(tui, theme, snapshot, vi.fn());
+    try {
+      openActorDetail(dashboard);
+      const detail = dashboard.render(120);
+      expect(detail.join("\n")).not.toContain("m model");
+      // Pressing m is a no-op: still in the actor detail.
+      dashboard.handleInput("m");
+      const after = dashboard.render(120);
+      expect(after.join("\n")).toContain("advisor");
     } finally {
       dashboard.dispose();
     }
