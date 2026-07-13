@@ -69,7 +69,15 @@ describe("ActionRegistry", () => {
     });
     expect(result).toBe("hello");
     expect(approve).toHaveBeenCalledOnce();
-    expect(audits).toMatchObject([{ ref: "demo.echo", success: true }]);
+    expect(audits).toMatchObject([
+      {
+        ref: "demo.echo",
+        provider: "demo",
+        tool: "echo",
+        args: { value: "hello" },
+        success: true,
+      },
+    ]);
   });
 
   it("emits structured invocation activity without exposing another model tool", async () => {
@@ -93,6 +101,74 @@ describe("ActionRegistry", () => {
       },
       { type: "call_end", success: true, result: "hello" },
     ]);
+  });
+
+  it("populates audit preview metadata before invoking the provider", async () => {
+    const registry = new ActionRegistry();
+    const audits: FabricCallAudit[] = [];
+    let observed: FabricCallAudit | undefined;
+    registry.register({
+      ...provider(),
+      async invoke(_name, args) {
+        observed = audits[0] ? { ...audits[0] } : undefined;
+        return args.value;
+      },
+    });
+
+    await registry.invoke("demo.echo", { value: "in flight" }, {
+      ...context,
+      approve: async () => {},
+      audits,
+      maxResultChars: 10_000,
+    });
+
+    expect(observed).toMatchObject({
+      ref: "demo.echo",
+      provider: "demo",
+      tool: "echo",
+      args: { value: "in flight" },
+    });
+    expect(observed?.success).toBeUndefined();
+  });
+
+  it("marks failed agent results as failed nested calls without hiding the result", async () => {
+    const registry = new ActionRegistry();
+    const audits: FabricCallAudit[] = [];
+    const events: unknown[] = [];
+    registry.register({
+      name: "agents",
+      description: "Test agents",
+      async list() {
+        return [{
+          name: "run",
+          description: "Run a test agent",
+          inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          risk: "agent",
+        }];
+      },
+      async describe(name) {
+        return name === "run" ? (await this.list({}, context))[0] : undefined;
+      },
+      async invoke() {
+        return { status: "failed", error: "provider unavailable" };
+      },
+    });
+
+    const result = await registry.invoke("agents.run", {}, {
+      ...context,
+      approve: async () => {},
+      audits,
+      maxResultChars: 10_000,
+      observeInvocation: (event) => events.push(event),
+    });
+
+    expect(result).toEqual({ status: "failed", error: "provider unavailable" });
+    expect(audits).toMatchObject([{ success: false, error: "provider unavailable" }]);
+    expect(events.at(-1)).toMatchObject({
+      type: "call_end",
+      success: false,
+      error: "provider unavailable",
+    });
   });
 
   it("caps nested results before crossing the sandbox bridge", async () => {

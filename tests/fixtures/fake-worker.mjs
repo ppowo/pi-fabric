@@ -22,6 +22,8 @@ const record = {
   status: fail ? "failed" : "completed",
   transport: args.get("transport"),
   fullCodeMode: args.get("full-code-mode"),
+  tools: JSON.parse(args.get("tools") ?? "[]"),
+  extensions: args.get("extensions"),
   cwd: args.get("cwd"),
   startedAt: now,
   updatedAt: now,

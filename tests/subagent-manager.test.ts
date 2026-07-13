@@ -32,6 +32,40 @@ describe("SubagentManager", () => {
     expect(manager.list()).toHaveLength(1);
   });
 
+  it("keeps direct tools native for ordinary children and full code mode for recursion", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-manager-"));
+    roots.push(root);
+    const manager = new SubagentManager(process.cwd(), DEFAULT_FABRIC_CONFIG.subagents, {
+      workerPath: path.resolve("tests/fixtures/fake-worker.mjs"),
+      runRoot: root,
+      fullCodeMode: true,
+    });
+    managers.push(manager);
+    type ObservedResult = SubagentRunResult & {
+      fullCodeMode?: string;
+      tools?: string[];
+      extensions?: string;
+    };
+
+    const direct = (await manager.run({
+      task: "Use native tools",
+      transport: "process",
+      tools: ["read", "grep"],
+    })) as ObservedResult;
+    expect(direct.fullCodeMode).toBe("false");
+    expect(direct.tools).toEqual(["read", "grep"]);
+    expect(direct.extensions).toBe("true");
+
+    const recursive = (await manager.run({
+      task: "Delegate recursively",
+      transport: "process",
+      tools: ["read"],
+      recursive: true,
+    })) as ObservedResult;
+    expect(recursive.fullCodeMode).toBe("true");
+    expect(recursive.tools).toEqual(["read", "fabric_exec"]);
+  });
+
   it("validates structured output through the real Fabric worker", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-manager-"));
     roots.push(root);
@@ -68,6 +102,56 @@ describe("SubagentManager", () => {
       message: "validated actor response:false",
     });
     expect(result.usage).toMatchObject({ input: 3, output: 4 });
+  });
+
+  it("keeps the RPC worker alive when Pi announces a retry", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-manager-"));
+    roots.push(root);
+    const fakePi = path.resolve("tests/fixtures/fake-pi-rpc.mjs");
+    fs.chmodSync(fakePi, 0o755);
+    const manager = new SubagentManager(process.cwd(), DEFAULT_FABRIC_CONFIG.subagents, {
+      workerPath: path.resolve("src/worker.ts"),
+      piBinary: fakePi,
+      runRoot: root,
+      fullCodeMode: true,
+    });
+    managers.push(manager);
+
+    const result = await manager.run({
+      task: "RETRY_THEN_SUCCEED",
+      transport: "process",
+      timeoutMs: 5_000,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.text).toBe("retry recovered");
+    expect(result.error).toBeUndefined();
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("preserves provider diagnostics when the final agent attempt fails", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-manager-"));
+    roots.push(root);
+    const fakePi = path.resolve("tests/fixtures/fake-pi-rpc.mjs");
+    fs.chmodSync(fakePi, 0o755);
+    const manager = new SubagentManager(process.cwd(), DEFAULT_FABRIC_CONFIG.subagents, {
+      workerPath: path.resolve("src/worker.ts"),
+      piBinary: fakePi,
+      runRoot: root,
+      fullCodeMode: true,
+    });
+    managers.push(manager);
+
+    const result = await manager.run({
+      task: "FAIL_PROVIDER",
+      transport: "process",
+      timeoutMs: 5_000,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.exitCode).toBe(0);
+    expect(result.error).toContain("openai-codex/gpt-test: fetch failed · WebSocket error");
+    expect(result.error).not.toContain("exited with code 0");
   });
 
   it("notifies when a detached background agent completes", async () => {

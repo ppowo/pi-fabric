@@ -97,6 +97,15 @@ const previewResult = (value: unknown): unknown => {
   return value;
 };
 
+const failedResultError = (value: unknown): string | undefined => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const status = record.status;
+  if (status !== "failed" && status !== "stopped" && status !== "timed_out") return undefined;
+  const error = typeof record.error === "string" ? record.error.trim() : "";
+  return error ? truncateString(error, PREVIEW_RESULT_CHARS) : `Fabric action returned ${status}`;
+};
+
 const boundedResult = (
   value: unknown,
   maxChars: number,
@@ -261,6 +270,9 @@ export class ActionRegistry {
       ref,
       nestedToolCallId,
       startedAt: Date.now(),
+      tool: action.name,
+      provider: action.provider,
+      args: previewArgs(preparedArgs),
     };
     context.audits.push(audit);
     context.observeInvocation?.({
@@ -292,18 +304,18 @@ export class ActionRegistry {
         },
       });
       const bounded = boundedResult(value, context.maxResultChars);
-      audit.success = true;
+      const resultError = failedResultError(value);
+      audit.success = resultError === undefined;
+      if (resultError) audit.error = resultError;
       audit.resultChars = bounded.chars;
       audit.resultTruncated = bounded.truncated;
-      audit.tool = action.name;
-      audit.provider = action.provider;
-      audit.args = previewArgs(preparedArgs);
       audit.result = previewResult(bounded.value);
       context.observeInvocation?.({
         type: "call_end",
         callId: nestedToolCallId,
-        success: true,
+        success: resultError === undefined,
         result: value,
+        ...(resultError ? { error: resultError } : {}),
       });
       return bounded.value;
     } catch (error) {

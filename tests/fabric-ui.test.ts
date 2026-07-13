@@ -219,7 +219,7 @@ describe("Fabric dynamic UI", () => {
     expect(shouldShowFabricWidget(current, "auto")).toBe(true);
   });
 
-  it("preserves widget height across a run as agents complete", () => {
+  it("compacts widget rows as agents complete without blank padding", () => {
     const current = snapshot();
     current.actors = [];
     current.state = [];
@@ -232,16 +232,17 @@ describe("Fabric dynamic UI", () => {
     const widget = new FabricWidget(theme, () => current, 8);
     const first = widget.render(72);
     expect(first.length).toBe(3); // header + alpha + beta
-    // one agent completing must not shrink the widget (content swap, not height change)
+
     current.agents[1]!.status = "completed";
     const second = widget.render(72);
-    expect(second.length).toBe(3);
-    expect(visibleWidth(second[2]!)).toBe(0); // blank pad line holds the height
+    expect(second.length).toBe(2); // header + alpha
     expect(second.join("\n")).toContain("alpha");
-    // a new run resets the reserve so the widget collapses to actual content
-    current.runs[0]!.id = "run-2";
+    expect(second.every((line) => visibleWidth(line) > 0)).toBe(true);
+
+    current.agents[0]!.status = "completed";
     const third = widget.render(72);
-    expect(third.length).toBe(2); // header + alpha
+    expect(third.length).toBe(1); // header only
+    expect(visibleWidth(third[0]!)).toBeGreaterThan(0);
   });
 
   it("reports whether the rendered output changed", () => {

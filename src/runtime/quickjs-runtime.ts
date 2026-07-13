@@ -174,13 +174,15 @@ const __workflowAgent = async (prompt, options = {}) => {
     throw new Error("Fabric workflow token budget exhausted");
   }
   const { label, ...agentOptions } = options;
+  const workerName = String(label || agentOptions.name || "Fabric workflow agent");
   const result = __recordAgentUsage(await agents.run({
     ...agentOptions,
     ...(label && !agentOptions.name ? { name: label } : {}),
     task: prompt,
   }));
   if (!result || result.status !== "completed") {
-    throw new Error(result && result.error ? result.error : "Fabric workflow agent failed");
+    const reason = result && result.error ? result.error : "agent did not complete";
+    throw new Error(workerName + " failed: " + reason);
   }
   return result.value !== undefined ? result.value : result.text;
 };

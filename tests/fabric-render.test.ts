@@ -21,6 +21,19 @@ describe("fabric nested rendering", () => {
     expect(title).toContain("\x1b[38;2;");
   }, 15_000);
 
+  it("renders in-flight agent names from invocation arguments", () => {
+    const title = nestedCallTitle(
+      {
+        ref: "agents.run",
+        provider: "agents",
+        tool: "run",
+        args: { name: "dashboard reviewer", task: "Review the dashboard" },
+      },
+      theme,
+    );
+    expect(title).toContain("dashboard reviewer");
+  });
+
   it("returns null for non-edit calls and edits without operations", () => {
     expect(nestedEditDiff({ ref: "pi.read", tool: "read" }, theme)).toBeNull();
     expect(nestedEditDiff({ ref: "pi.edit", tool: "edit", args: { path: "a.ts" } }, theme)).toBeNull();

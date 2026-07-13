@@ -64,6 +64,26 @@ return { values, spent: budget.spent() };
     expect(calls).toEqual(["fabric.$phase", "agents.run", "agents.run"]);
   });
 
+  it("includes the workflow label and child cause in agent failures", async () => {
+    const result = await new QuickJsRuntime().execute(
+      'return agent("review", { label: "dashboard reviewer" });',
+      async (ref) => {
+        if (ref === "agents.run") {
+          return {
+            status: "failed",
+            error: "openai-codex/gpt-test: fetch failed · WebSocket error",
+            usage: { input: 0, output: 0 },
+          };
+        }
+        throw new Error(`Unexpected call: ${ref}`);
+      },
+      options,
+    );
+    expect(result.error).toContain(
+      "dashboard reviewer failed: openai-codex/gpt-test: fetch failed · WebSocket error",
+    );
+  });
+
   it("runs parallel(items, mapper, concurrency) fan-out", async () => {
     const calls: string[] = [];
     const result = await new QuickJsRuntime().execute(

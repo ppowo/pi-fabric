@@ -266,7 +266,7 @@ export class SubagentManager {
         "--depth",
         String(this.#currentDepth + 1),
         "--full-code-mode",
-        String(this.#fullCodeMode),
+        String(request.recursive === true && this.#fullCodeMode),
         "--extensions",
         String(request.recursive ? true : (request.extensions ?? this.config.extensions)),
         "--tools",

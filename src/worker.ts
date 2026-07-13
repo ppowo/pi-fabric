@@ -132,6 +132,33 @@ const applyUsage = (record: SubagentRunRecord, message: Record<string, unknown>)
   }
 };
 
+const stringField = (value: unknown): string | undefined =>
+  typeof value === "string" && value.trim() ? value.trim() : undefined;
+
+const assistantError = (message: Record<string, unknown>): string => {
+  const details: string[] = [];
+  const direct = stringField(message.errorMessage) ?? stringField(message.error);
+  if (direct) details.push(direct);
+  if (Array.isArray(message.diagnostics)) {
+    for (const diagnostic of message.diagnostics) {
+      if (typeof diagnostic !== "object" || diagnostic === null || Array.isArray(diagnostic)) continue;
+      const record = diagnostic as Record<string, unknown>;
+      const nested =
+        typeof record.error === "object" && record.error !== null && !Array.isArray(record.error)
+          ? (record.error as Record<string, unknown>)
+          : undefined;
+      const detail = stringField(nested?.message) ?? stringField(record.message);
+      if (detail) details.push(detail);
+    }
+  }
+  const unique = [...new Set(details)];
+  const provider = stringField(message.provider);
+  const model = stringField(message.model);
+  const source = [provider, model].filter((value): value is string => Boolean(value)).join("/");
+  const summary = unique.join(" · ") || "Pi agent reported an error";
+  return `${source ? `${source}: ` : ""}${summary}`.slice(0, MAX_STDERR_CHARS);
+};
+
 const terminateChild = (child: ChildProcess, signal: NodeJS.Signals): void => {
   if (!child.pid) return;
   try {
@@ -266,6 +293,7 @@ const main = async (): Promise<void> => {
   let terminalStatus: SubagentRunStatus | undefined;
   let terminalError: string | undefined;
   let sawAgentError = false;
+  let retryPending = false;
 
   const update = (): void => {
     record.updatedAt = Date.now();
@@ -281,6 +309,12 @@ const main = async (): Promise<void> => {
       if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return;
       event = parsed as Record<string, unknown>;
     } catch {
+      return;
+    }
+    if (event.type === "agent_start") {
+      retryPending = false;
+      sawAgentError = false;
+      terminalError = undefined;
       return;
     }
     if (event.type === "response" && event.command === "prompt" && event.success === false) {
@@ -331,12 +365,22 @@ const main = async (): Promise<void> => {
         process.stdout.write(`\n${text}\n`);
       }
       applyUsage(record, messageRecord);
-      if (messageRecord.stopReason === "error") sawAgentError = true;
+      if (messageRecord.stopReason === "error") {
+        sawAgentError = true;
+        terminalError = assistantError(messageRecord);
+      } else {
+        sawAgentError = false;
+        terminalError = undefined;
+      }
       update();
       return;
     }
+    if (event.type === "agent_end") {
+      retryPending = event.willRetry === true;
+      return;
+    }
     if (event.type === "agent_settled") {
-      child.stdin?.end();
+      if (!retryPending) child.stdin?.end();
       return;
     }
     if (event.type === "extension_error") {
@@ -403,7 +447,11 @@ const main = async (): Promise<void> => {
   record.status = terminalStatus ?? (exitCode === 0 && !sawAgentError ? "completed" : "failed");
   if (terminalError) record.error = terminalError;
   if (record.status === "failed" && !record.error) {
-    record.error = stderr.trim() || `Pi exited with code ${exitCode ?? "unknown"}`;
+    record.error =
+      stderr.trim() ||
+      (exitCode === 0
+        ? "Pi agent reported an error before exiting"
+        : `Pi exited with code ${exitCode ?? "unknown"}`);
   }
   if (record.status === "completed" && options.schemaFile) {
     try {
