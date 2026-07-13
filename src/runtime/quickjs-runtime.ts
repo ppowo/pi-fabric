@@ -220,6 +220,35 @@ globalThis.council = Object.freeze({
   },
 });
 globalThis.console = Object.freeze({ log: print, info: print, warn: print, error: print });
+const __timerCallbacks = new Map();
+let __nextTimerId = 1;
+globalThis.setTimeout = (callback, ms = 0) => {
+  const id = __nextTimerId++;
+  __timerCallbacks.set(id, { callback, interval: false });
+  __call("fabric.$timer", { ms }).then(() => {
+    const entry = __timerCallbacks.get(id);
+    if (!entry) return;
+    __timerCallbacks.delete(id);
+    try { entry.callback(); } catch { /* swallow timer callback errors */ }
+  });
+  return id;
+};
+globalThis.setInterval = (callback, ms = 0) => {
+  const id = __nextTimerId++;
+  __timerCallbacks.set(id, { callback, interval: true });
+  const schedule = () => {
+    __call("fabric.$timer", { ms }).then(() => {
+      const entry = __timerCallbacks.get(id);
+      if (!entry) return;
+      try { entry.callback(); } catch { /* swallow timer callback errors */ }
+      if (__timerCallbacks.has(id)) schedule();
+    });
+  };
+  schedule();
+  return id;
+};
+globalThis.clearTimeout = (id) => { __timerCallbacks.delete(id); };
+globalThis.clearInterval = (id) => { __timerCallbacks.delete(id); };
 `;
 
 const transpile = (code: string): string =>
@@ -291,6 +320,7 @@ export class QuickJsRuntime {
     let logsTruncated = false;
     const pendingHostPromises = new Set<any>();
     const hostTasks = new Set<Promise<void>>();
+    const pendingTimers = new Set<NodeJS.Timeout>();
     let closing = false;
     let cancelled = false;
     let timedOut = false;
@@ -327,6 +357,18 @@ export class QuickJsRuntime {
           const promise = context.newPromise();
           pendingHostPromises.add(promise);
           void promise.settled.then(() => pendingHostPromises.delete(promise));
+          if (reference === "fabric.$timer") {
+            const ms = Math.max(0, Number(args.ms ?? 0));
+            const timer = setTimeout(() => {
+              if (closing || promise.alive === false) return;
+              promise.resolve(context.undefined);
+              runtime.executePendingJobs();
+            }, ms);
+            timer.unref?.();
+            pendingTimers.add(timer);
+            void promise.settled.then(() => pendingTimers.delete(timer));
+            return promise.handle;
+          }
           const task = hostCall(reference, args, hostAbortController.signal)
             .then((value) => {
               if (closing || promise.alive === false) return;
@@ -449,6 +491,7 @@ export class QuickJsRuntime {
       };
     } finally {
       if (timeout) clearTimeout(timeout);
+      for (const timer of pendingTimers) clearTimeout(timer);
       if (abortHandler) options.signal?.removeEventListener("abort", abortHandler);
       if (!timedOut && !cancelled && hostTasks.size > 0) {
         await Promise.allSettled(hostTasks);

@@ -47,14 +47,19 @@ export const createDashboardSnapshot = (
 ): FabricDashboardSnapshot => {
   const runs = state.activity.runs();
   const agentRecords = state.subagents.list();
-  const allAgents: FabricUiAgent[] = agentRecords.map((record) => {
-    const linked = runs
-      .flatMap((run) => run.calls.map((call) => ({ runId: run.id, call })))
-      .find(
-        ({ call }) =>
-          call.entityId &&
-          (record.id.startsWith(call.entityId) || call.entityId.startsWith(record.id)),
-      );
+  const agentFromRecord = (
+    record: SubagentRunRecord | SubagentHandleInfo,
+    parentId?: string,
+  ): FabricUiAgent => {
+    const linked = parentId
+      ? undefined
+      : runs
+          .flatMap((run) => run.calls.map((call) => ({ runId: run.id, call })))
+          .find(
+            ({ call }) =>
+              call.entityId &&
+              (record.id.startsWith(call.entityId) || call.entityId.startsWith(record.id)),
+          );
     const base: FabricUiAgent = {
       id: record.id,
       name: record.name,
@@ -68,6 +73,7 @@ export const createDashboardSnapshot = (
       ...(record.worktree ? { worktree: record.worktree } : {}),
       ...(record.actorId ? { actorId: record.actorId } : {}),
       ...(record.actorName ? { actorName: record.actorName } : {}),
+      ...(parentId ? { parentId } : {}),
       ...(linked ? { runId: linked.runId } : {}),
       ...(linked?.call.phaseId ? { phaseId: linked.call.phaseId } : {}),
     };
@@ -85,7 +91,16 @@ export const createDashboardSnapshot = (
       ...(record.text ? { text: record.text } : {}),
       ...(record.error ? { error: record.error } : {}),
     };
-  });
+  };
+  const allAgents: FabricUiAgent[] = [];
+  for (const record of agentRecords) {
+    allAgents.push(agentFromRecord(record));
+    if (isRunRecord(record) && record.nestedAgents) {
+      for (const nested of record.nestedAgents) {
+        allAgents.push(agentFromRecord(nested, record.id));
+      }
+    }
+  }
 
   const actors = state.actors.list().map((actor) => {
     const worker = allAgents.find((agent) => agent.actorId === actor.id);

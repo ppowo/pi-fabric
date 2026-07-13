@@ -65,7 +65,8 @@ const agentLine = (theme: Theme, agent: FabricUiAgent, now: number): string => {
       ? formatDuration((agent.finishedAt ?? now) - agent.startedAt)
       : undefined,
   ].filter((value): value is string => Boolean(value));
-  return `  ${status} ${safeText(agent.name)}  ${theme.fg("muted", safeText(activity))}${
+  const indent = agent.parentId ? "    " : "  ";
+  return `${indent}${status} ${safeText(agent.name)}  ${theme.fg("muted", safeText(activity))}${
     metrics.length > 0 ? theme.fg("dim", ` · ${metrics.join(" · ")}`) : ""
   }`;
 };

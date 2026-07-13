@@ -63,6 +63,7 @@ export interface SubagentRunRecord {
   branch?: string;
   worktree?: string;
   logFile?: string;
+  nestedAgents?: SubagentRunRecord[];
 }
 
 export interface SubagentRunResult extends SubagentRunRecord {
@@ -108,6 +109,7 @@ export interface SubagentWorkerOptions {
   actorId?: string;
   actorName?: string;
   meshRoot?: string;
+  runRoot?: string;
   transport: FabricSubagentTransport;
   sessionId?: string;
   attachCommand?: string;

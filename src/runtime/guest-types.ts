@@ -75,6 +75,9 @@ type FabricExtensionsApi = Record<string, FabricCapturedTool>;
 // String-primary tools (read/bash/grep/find/ls) accept a bare string; the
 // runtime proxy coerces it to { <primaryField>: string }. Lets the model write
 // the natural form (pi.bash("ls")) instead of pi.bash({ command: "ls" }).
+// Return shapes differ by tool: read/grep/find/ls return their text as a bare
+// string (e.g. const src: string = await pi.read({ path })); bash/edit/write
+// return { ok, output, details } (e.g. const { output } = await pi.bash(...)).
 interface PiToolsApi {
   read(args: string | { path: string; offset?: number; limit?: number }): Promise<string>;
   bash(args: string | { command: string; timeout?: number }): Promise<{ ok: true; output: string; details: unknown }>;
@@ -175,18 +178,19 @@ type FabricMcpApi = Record<string, FabricMcpServer> & {
   }): Promise<{ registered: string }>;
   call(args: { server: string; tool: string; args?: Record<string, unknown> }): Promise<unknown>;
 };
+interface FabricCouncilRunOptions {
+  task: string;
+  roles: string[];
+  transport?: FabricTransport;
+  model?: string;
+  thinking?: FabricThinking;
+  tools?: string[];
+  timeoutMs?: number;
+  worktree?: boolean;
+}
 interface FabricCouncilApi {
-  run(args: {
-    task: string;
-    roles: string[];
-    transport?: FabricTransport;
-    model?: string;
-    thinking?: FabricThinking;
-    tools?: string[];
-    timeoutMs?: number;
-    worktree?: boolean;
-    synthesize?: boolean;
-  }): Promise<FabricAgentResult[] | FabricAgentResult>;
+  run(args: FabricCouncilRunOptions & { synthesize?: true }): Promise<FabricAgentResult>;
+  run(args: FabricCouncilRunOptions & { synthesize: false }): Promise<FabricAgentResult[]>;
 }
 interface FabricMeshIdentity {
   id: string;
@@ -283,6 +287,10 @@ interface FabricConsole {
 declare const console: FabricConsole;
 declare const π: Readonly<Record<string, string>>;
 declare function print(...args: unknown[]): void;
+declare function setTimeout(handler: () => void, timeout?: number): number;
+declare function clearTimeout(handle: number): void;
+declare function setInterval(handler: () => void, timeout?: number): number;
+declare function clearInterval(handle: number): void;
 `;
 
 const FULL_CODE_GLOBAL_DECLARATIONS = [

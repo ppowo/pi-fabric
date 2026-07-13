@@ -48,6 +48,7 @@ const parseOptions = (): SubagentWorkerOptions => {
   const actorId = optional(args, "actor-id");
   const actorName = optional(args, "actor-name");
   const meshRoot = optional(args, "mesh-root");
+  const runRoot = optional(args, "run-root");
   const branch = optional(args, "branch");
   const worktree = optional(args, "worktree");
   return {
@@ -74,6 +75,7 @@ const parseOptions = (): SubagentWorkerOptions => {
     ...(actorId ? { actorId } : {}),
     ...(actorName ? { actorName } : {}),
     ...(meshRoot ? { meshRoot } : {}),
+    ...(runRoot ? { runRoot } : {}),
     ...(branch ? { branch } : {}),
     ...(worktree ? { worktree } : {}),
   };
@@ -212,6 +214,7 @@ const main = async (): Promise<void> => {
       ...(options.actorId ? { PI_FABRIC_ACTOR_ID: options.actorId } : {}),
       ...(options.actorName ? { PI_FABRIC_ACTOR_NAME: options.actorName } : {}),
       ...(options.meshRoot ? { PI_FABRIC_MESH_ROOT: options.meshRoot } : {}),
+      ...(options.runRoot ? { PI_FABRIC_RUN_ROOT: options.runRoot } : {}),
     },
     stdio: ["pipe", "pipe", "pipe"],
   });

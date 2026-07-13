@@ -28,6 +28,7 @@ export interface FabricUiAgent {
   actorName?: string;
   runId?: string;
   phaseId?: string;
+  parentId?: string;
 }
 
 export interface FabricUiActor extends FabricActorInfo {

@@ -67,6 +67,22 @@ const readRecord = (filePath: string): SubagentRunRecord | undefined => {
   }
 };
 
+const readNestedAgents = (runDirectory: string): SubagentRunRecord[] => {
+  const nestedRoot = path.join(runDirectory, "nested");
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(nestedRoot);
+  } catch {
+    return [];
+  }
+  const agents: SubagentRunRecord[] = [];
+  for (const entry of entries) {
+    const record = readRecord(path.join(nestedRoot, entry, "status.json"));
+    if (record) agents.push(record);
+  }
+  return agents;
+};
+
 const writeRecord = (filePath: string, record: SubagentRunRecord): void => {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const temporaryPath = `${filePath}.${process.pid}.tmp`;
@@ -139,7 +155,8 @@ export class SubagentManager {
     } = {},
   ) {
     this.#semaphore = new Semaphore(config.maxConcurrent);
-    this.#runRoot = options.runRoot ?? fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-runs-"));
+    this.#runRoot =
+      options.runRoot ?? process.env.PI_FABRIC_RUN_ROOT ?? fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-runs-"));
     this.#workerPath =
       options.workerPath ?? fileURLToPath(new URL("../worker.js", import.meta.url));
     this.#fabricExtensionPath =
@@ -239,6 +256,8 @@ export class SubagentManager {
         ...(request.actorId ? ["--actor-id", request.actorId] : []),
         ...(request.actorName ? ["--actor-name", request.actorName] : []),
         ...(request.meshRoot ? ["--mesh-root", request.meshRoot] : []),
+        "--run-root",
+        path.join(runDirectory, "nested"),
         ...(schemaFile ? ["--schema-file", schemaFile] : []),
         ...(branch ? ["--branch", branch] : []),
         ...(worktree ? ["--worktree", worktree] : []),
@@ -482,8 +501,10 @@ export class SubagentManager {
   }
 
   #withTransportMetadata(record: SubagentRunRecord, managed: ManagedSubagent): SubagentRunRecord {
+    const nestedAgents = readNestedAgents(managed.runDirectory);
     return {
       ...record,
+      ...(nestedAgents.length > 0 ? { nestedAgents } : {}),
       ...(managed.model ? { model: managed.model } : {}),
       ...(managed.thinking ? { thinking: managed.thinking } : {}),
       ...(managed.actorId ? { actorId: managed.actorId } : {}),
