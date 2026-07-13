@@ -130,8 +130,10 @@ export const createDashboardSnapshot = (
     agents: agents.sort((left, right) => {
       const leftActive = activeStatuses.has(left.status) ? 1 : 0;
       const rightActive = activeStatuses.has(right.status) ? 1 : 0;
+      if (rightActive !== leftActive) return rightActive - leftActive;
+      if (right.parentId === left.id) return -1;
+      if (left.parentId === right.id) return 1;
       return (
-        rightActive - leftActive ||
         (numberFrom(right.updatedAt) ?? numberFrom(right.startedAt) ?? 0) -
           (numberFrom(left.updatedAt) ?? numberFrom(left.startedAt) ?? 0)
       );
