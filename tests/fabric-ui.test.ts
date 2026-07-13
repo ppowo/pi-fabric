@@ -249,6 +249,42 @@ describe("Fabric dynamic UI", () => {
     expect(lines.some((line) => line.includes("ENOENT"))).toBe(true);
   });
 
+  it("clears lines one at a time from the bottom", () => {
+    const current = snapshot();
+    const run = current.runs[0];
+    if (!run) throw new Error("missing fixture run");
+    run.calls = Array.from({ length: 3 }, (_, i) => ({
+      id: "c" + i, ref: "pi.bash", label: "call " + (i + 1), kind: "tool", status: "completed",
+      phaseId: "audit", startedAt: run.startedAt, updatedAt: current.now, finishedAt: current.now, detail: "out " + (i + 1),
+    }));
+    run.items = [];
+    current.agents = [];
+    current.actors = [];
+    current.state = [];
+    run.status = "running";
+    const w = new FabricWidget(theme, () => current, 8, 10000);
+    const full = w.render(72);
+    expect(full.length).toBe(4);
+    w.startClear([...w.lastLines]);
+    expect(w.clearing).toBe(true);
+    expect(w.render(72).length).toBe(4);
+    const after1 = w.render(72);
+    expect(w.clearStep()).toBe(false);
+    const step1 = w.render(72);
+    expect(step1.length).toBe(3);
+    expect(step1.some((l) => l.includes("call 3"))).toBe(false);
+    expect(step1.some((l) => l.includes("call 1"))).toBe(true);
+    expect(w.clearStep()).toBe(false);
+    expect(w.render(72).length).toBe(2);
+    expect(w.clearStep()).toBe(false);
+    expect(w.render(72).length).toBe(1);
+    expect(w.clearStep()).toBe(true);
+    expect(w.render(72).length).toBe(0);
+    w.cancelClear();
+    expect(w.clearing).toBe(false);
+    expect(w.render(72).length).toBe(4);
+  });
+
   it("hides lingering runs once a new turn dismisses them", () => {
     const current = snapshot();
     const run = current.runs[0];

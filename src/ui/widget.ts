@@ -111,8 +111,41 @@ export class FabricWidget implements Component {
     readonly lingerMs: number,
   ) {}
 
+  #lastLines: string[] = [];
+  #clearing = false;
+  #clearLines: string[] = [];
+  #hideFromBottom = 0;
+
+  get lastLines(): string[] {
+    return this.#lastLines;
+  }
+
+  get clearing(): boolean {
+    return this.#clearing;
+  }
+
+  startClear(lines: string[]): void {
+    this.#clearing = true;
+    this.#clearLines = lines;
+    this.#hideFromBottom = 0;
+  }
+
+  clearStep(): boolean {
+    this.#hideFromBottom++;
+    return this.#hideFromBottom >= this.#clearLines.length;
+  }
+
+  cancelClear(): void {
+    this.#clearing = false;
+    this.#clearLines = [];
+    this.#hideFromBottom = 0;
+  }
+
   render(width: number): string[] {
     if (width <= 0) return [];
+    if (this.#clearing) {
+      return this.#clearLines.slice(0, Math.max(0, this.#clearLines.length - this.#hideFromBottom));
+    }
     const snapshot = this.snapshot();
     const candidateRun = snapshot.runs[0];
     const candidateFinishedAt = candidateRun?.finishedAt ?? candidateRun?.updatedAt ?? 0;
@@ -239,7 +272,9 @@ export class FabricWidget implements Component {
         `+${lines.length - bounded.length}`,
       )}`;
     }
-    return bounded.map((line) => truncateToWidth(line, width));
+    const rendered = bounded.map((line) => truncateToWidth(line, width));
+    this.#lastLines = rendered;
+    return rendered;
   }
 
   invalidate(): void {}
