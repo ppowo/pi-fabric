@@ -17,9 +17,11 @@ import {
   expandHint,
   isNumberedTool,
   nestedCallBody,
+  nestedCallCode,
   nestedCallTitle,
   type FabricRenderAudit,
 } from "./ui/fabric-render.js";
+import { highlightCode, initHighlighting } from "./ui/highlight.js";
 
 const RESULT_FORMATS = ["auto", "json", "text"] as const;
 type ResultFormat = (typeof RESULT_FORMATS)[number];
@@ -76,7 +78,11 @@ const registrationFrom = (value: unknown): FabricProviderRegistration | undefine
 };
 
 export default async function piFabric(pi: ExtensionAPI): Promise<void> {
-  await loadCodePreviewSettings(process.cwd());
+  const codePreviewSettings = await loadCodePreviewSettings(process.cwd());
+  void initHighlighting(
+    codePreviewSettings.shikiTheme,
+    codePreviewSettings.syntaxHighlighting,
+  );
   const capturedTools = new CapturedToolCatalog();
   const state = new FabricState(pi, capturedTools);
   const toolOwnership = new FabricToolOwnership(pi);
@@ -170,7 +176,7 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
           0,
         );
       },
-      renderResult(result, { expanded, isPartial }, theme) {
+      renderResult(result, { expanded, isPartial }, theme, context) {
         const details = result.details as
           | {
               success?: boolean;
@@ -220,16 +226,34 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
             if (audit.success === false && audit.error) {
               text += `\n  ${theme.fg("error", safeTerminalText(audit.error))}`;
             } else if (expanded) {
-              const body = nestedCallBody(audit);
-              if (body) {
-                const bodyLines = safeTerminalText(body).split("\n");
-                const bodyLimit = 40;
+              const bodyLimit = 40;
+              let bodyLines: string[] | null = null;
+              let numbered = false;
+              const codeInfo = nestedCallCode(audit);
+              if (codeInfo) {
+                const highlighted = highlightCode(
+                  codeInfo.code,
+                  codeInfo.lang,
+                  context?.invalidate,
+                );
+                if (highlighted) {
+                  bodyLines = highlighted.map((line) => line || " ");
+                  numbered = true;
+                }
+              }
+              if (!bodyLines) {
+                const body = nestedCallBody(audit);
+                if (body) {
+                  bodyLines = safeTerminalText(body).split("\n");
+                  numbered = isNumberedTool(audit);
+                }
+              }
+              if (bodyLines) {
                 const bodyShown = bodyLines.slice(0, bodyLimit);
-                const numbered = isNumberedTool(audit);
                 text += `\n${bodyShown
                   .map((line, index) =>
                     numbered
-                      ? `${theme.fg("dim", String(index + 1).padStart(3, " "))} ${theme.fg("toolOutput", line || " ")}`
+                      ? `${theme.fg("dim", String(index + 1).padStart(3, " "))} ${line}`
                       : theme.fg("toolOutput", line || " "),
                   )
                   .join("\n")}`;

@@ -1,5 +1,6 @@
 import type { AppKeybinding, Theme } from "@earendil-works/pi-coding-agent";
 import { getKeybindings } from "@earendil-works/pi-tui";
+import { languageFromPath } from "./highlight.js";
 
 export interface FabricRenderAudit {
   ref: string;
@@ -62,6 +63,23 @@ export function nestedCallBody(audit: FabricRenderAudit): string | undefined {
     if (typeof obj.text === "string") return obj.text;
   }
   return undefined;
+}
+
+/** Source code + language for syntax highlighting, for reads (file content) and writes (content being written). */
+export function nestedCallCode(
+  audit: FabricRenderAudit,
+): { code: string; lang: string } | null {
+  const args = audit.args ?? {};
+  const path = typeof args.path === "string" ? args.path : undefined;
+  const lang = languageFromPath(path);
+  if (!lang) return null;
+  if (audit.tool === "read") {
+    return typeof audit.result === "string" ? { code: audit.result, lang } : null;
+  }
+  if (audit.tool === "write") {
+    return typeof args.content === "string" ? { code: args.content, lang } : null;
+  }
+  return null;
 }
 
 /** Whether a nested call's body should be rendered with line numbers (reads/searches/listings). */
