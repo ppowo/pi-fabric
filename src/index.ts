@@ -2,6 +2,7 @@ import {
   defineTool,
   type ExtensionAPI,
   type ExtensionContext,
+  type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { loadCodePreviewSettings, withCodePreviewShell } from "pi-code-previews";
@@ -45,6 +46,20 @@ const safeTerminalText = (value: string): string =>
 
 const countLabel = (count: number, singular: string): string =>
   `${count} ${count === 1 ? singular : `${singular}s`}`;
+
+const PROGRESS_PREVIEW_LINES = 3;
+
+// A streaming bash call can dump many lines of stdout into `progress`. In a
+// multitool partial render that shoves the rest of the call list around, so
+// tail-window the progress to a fixed line count and keep the height stable.
+const tailProgressPreview = (progress: string, theme: Theme): string => {
+  const escaped = safeTerminalText(progress);
+  const lines = escaped.split("\n");
+  if (lines.length <= PROGRESS_PREVIEW_LINES) return theme.fg("dim", escaped);
+  const hidden = lines.length - PROGRESS_PREVIEW_LINES;
+  const tail = lines.slice(lines.length - PROGRESS_PREVIEW_LINES);
+  return theme.fg("dim", `… ${hidden} lines streaming\n${tail.join("\n")}`);
+};
 
 const formatValue = (value: unknown, format: ResultFormat): string => {
   if (value === undefined) return "";
@@ -299,7 +314,7 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
               text += nl + `  ${theme.fg("error", safeTerminalText(audit.error))}`;
             }
           }
-          if (progress) text += nl + theme.fg("dim", safeTerminalText(progress));
+          if (progress) text += nl + tailProgressPreview(progress, theme);
           return new Text(text, 0, 0);
         }
 
