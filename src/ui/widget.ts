@@ -104,6 +104,9 @@ export const shouldShowFabricWidget = (
 };
 
 export class FabricWidget implements Component {
+  #reservedCallRows = 0;
+  #reservedRunId: string | undefined;
+
   constructor(
     readonly theme: Theme,
     readonly snapshot: () => FabricDashboardSnapshot,
@@ -124,10 +127,9 @@ export class FabricWidget implements Component {
     const activeAgents = snapshot.agents.filter((agent) => isActiveStatus(agent.status));
     const activeActors = snapshot.actors.filter((actor) => isActiveStatus(actor.status));
     const activeState = snapshot.state.filter((entry) => isActiveStatus(entry.status));
-    const runningCalls =
-      run?.calls.filter(
-        (call) => call.status === "running" && call.kind !== "agent" && call.kind !== "actor",
-      ) ?? [];
+    const nestedCalls =
+      run?.calls.filter((call) => call.kind !== "agent" && call.kind !== "actor") ?? [];
+    const runningCalls = nestedCalls.filter((call) => call.status === "running");
     const runningItems = run?.items.filter((item) => isActiveStatus(item.status)) ?? [];
     const title = run?.name ?? "Fabric session";
     const headerStatus = run?.status ?? (activeAgents.length > 0 ? "running" : "idle");
@@ -160,8 +162,32 @@ export class FabricWidget implements Component {
 
     for (const agent of activeAgents) lines.push(agentLine(this.theme, agent, snapshot.now));
     for (const actor of activeActors) lines.push(actorLine(this.theme, actor));
-    for (const call of runningCalls) {
-      const progress = call.progress ? ` · ${safeText(call.progress)}` : "";
+    // Stabilize the widget height across a run: remember the peak number of
+    // nested-call lines shown and keep recently-finished calls visible to
+    // fill back up to it. Without this, a call completing drops its line
+    // instantly and the editor/input placed below the widget jumps. Running
+    // calls are always shown first; the most recently finished calls fill the
+    // remaining reserved slots. The reserve resets when the run changes.
+    const runId = run?.id;
+    if (runId !== this.#reservedRunId) {
+      this.#reservedRunId = runId;
+      this.#reservedCallRows = 0;
+    }
+    this.#reservedCallRows = Math.max(
+      this.#reservedCallRows,
+      Math.min(runningCalls.length, this.maxRows),
+    );
+    const finishedCalls = nestedCalls
+      .filter((call) => call.status === "completed" || call.status === "failed")
+      .sort((a, b) => (b.finishedAt ?? b.updatedAt) - (a.finishedAt ?? a.updatedAt));
+    const displayCalls = [...runningCalls];
+    for (const call of finishedCalls) {
+      if (displayCalls.length >= this.#reservedCallRows) break;
+      displayCalls.push(call);
+    }
+    for (const call of displayCalls) {
+      const progress =
+        call.status === "running" && call.progress ? ` · ${safeText(call.progress)}` : "";
       lines.push(
         `  ${colorStatus(this.theme, call.status, statusGlyph(call.status))} ${safeText(
           call.label,

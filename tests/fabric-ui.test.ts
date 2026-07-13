@@ -186,6 +186,45 @@ describe("Fabric dynamic UI", () => {
     expect(lines.join("\n")).toContain("advisor");
   });
 
+  it("keeps a stable height as nested calls complete", () => {
+    const current = snapshot();
+    const run = current.runs[0];
+    if (!run) throw new Error("missing fixture run");
+    run.calls = [
+      { id: "c1", ref: "pi.bash", label: "bash one", kind: "tool", status: "running", phaseId: "audit", startedAt: run.startedAt, updatedAt: current.now },
+      { id: "c2", ref: "pi.bash", label: "bash two", kind: "tool", status: "running", phaseId: "audit", startedAt: run.startedAt, updatedAt: current.now },
+    ];
+    run.items = [];
+    current.agents = [];
+    current.actors = [];
+    current.state = [];
+
+    const widget = new FabricWidget(theme, () => current, 8, 10_000);
+    const first = widget.render(72);
+    expect(first.length).toBe(3);
+    expect(first.some((line) => line.includes("bash one"))).toBe(true);
+    expect(first.some((line) => line.includes("bash two"))).toBe(true);
+
+    run.calls[0]!.status = "completed";
+    run.calls[0]!.finishedAt = current.now;
+    const second = widget.render(72);
+    expect(second.length).toBe(3);
+    expect(second.some((line) => line.includes("bash one"))).toBe(true);
+    expect(second.some((line) => line.includes("bash two"))).toBe(true);
+
+    run.calls[1]!.status = "completed";
+    run.calls[1]!.finishedAt = current.now;
+    const third = widget.render(72);
+    expect(third.length).toBe(3);
+
+    run.id = "run-stable-2";
+    run.calls = [
+      { id: "c3", ref: "pi.bash", label: "bash three", kind: "tool", status: "running", phaseId: "audit", startedAt: run.startedAt, updatedAt: current.now },
+    ];
+    const fourth = widget.render(72);
+    expect(fourth.length).toBe(2);
+  });
+
   it("renders a responsive two-pane dashboard and agent details", () => {
     const tui = { requestRender: vi.fn() } as unknown as TUI;
     const dashboard = new FabricDashboard(tui, theme, snapshot, vi.fn());
