@@ -218,7 +218,10 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
           const callLimit = expanded ? 30 : 8;
           const callsShown = audits.slice(0, callLimit);
           const callsHidden = audits.length - callsShown.length;
+          let firstNested = true;
           for (const audit of callsShown) {
+            if (expanded && !firstNested) text += "\n";
+            firstNested = false;
             const glyph =
               audit.success === false ? theme.fg("error", "✗") : theme.fg("dim", "›");
             text += `\n${glyph} ${nestedCallTitle(audit, theme, context?.invalidate)}`;
