@@ -89,7 +89,6 @@ const actorLine = (theme: Theme, actor: FabricUiActor): string => {
 export const shouldShowFabricWidget = (
   snapshot: FabricDashboardSnapshot,
   mode: FabricUiWidgetMode,
-  lingerMs: number,
 ): boolean => {
   if (mode === "hidden") return false;
   if (mode === "always") return true;
@@ -100,7 +99,7 @@ export const shouldShowFabricWidget = (
   if (!run) return false;
   if (run.status === "running") return true;
   const finishedAt = run.finishedAt ?? run.updatedAt;
-  return snapshot.now - finishedAt <= lingerMs && finishedAt >= (snapshot.widgetDismissedAt ?? 0);
+  return finishedAt >= (snapshot.widgetDismissedAt ?? 0);
 };
 
 export class FabricWidget implements Component {
@@ -108,52 +107,17 @@ export class FabricWidget implements Component {
     readonly theme: Theme,
     readonly snapshot: () => FabricDashboardSnapshot,
     readonly maxRows: number,
-    readonly lingerMs: number,
   ) {}
-
-  #lastLines: string[] = [];
-  #clearing = false;
-  #clearLines: string[] = [];
-  #hideFromBottom = 0;
-
-  get lastLines(): string[] {
-    return this.#lastLines;
-  }
-
-  get clearing(): boolean {
-    return this.#clearing;
-  }
-
-  startClear(lines: string[]): void {
-    this.#clearing = true;
-    this.#clearLines = lines;
-    this.#hideFromBottom = 0;
-  }
-
-  clearStep(): boolean {
-    this.#hideFromBottom++;
-    return this.#hideFromBottom >= this.#clearLines.length;
-  }
-
-  cancelClear(): void {
-    this.#clearing = false;
-    this.#clearLines = [];
-    this.#hideFromBottom = 0;
-  }
 
   render(width: number): string[] {
     if (width <= 0) return [];
-    if (this.#clearing) {
-      return this.#clearLines.slice(0, Math.max(0, this.#clearLines.length - this.#hideFromBottom));
-    }
     const snapshot = this.snapshot();
     const candidateRun = snapshot.runs[0];
     const candidateFinishedAt = candidateRun?.finishedAt ?? candidateRun?.updatedAt ?? 0;
     const run =
       candidateRun &&
       (candidateRun.status === "running" ||
-        (snapshot.now - candidateFinishedAt <= this.lingerMs &&
-          candidateFinishedAt >= (snapshot.widgetDismissedAt ?? 0)))
+        candidateFinishedAt >= (snapshot.widgetDismissedAt ?? 0))
         ? candidateRun
         : undefined;
     const activeAgents = snapshot.agents.filter((agent) => isActiveStatus(agent.status));
@@ -200,43 +164,6 @@ export class FabricWidget implements Component {
 
     for (const agent of activeAgents) lines.push(agentLine(this.theme, agent, snapshot.now));
     for (const actor of activeActors) lines.push(actorLine(this.theme, actor));
-    // Show nested calls in the order they were made (oldest first). Each line
-    // carries a status glyph and a short metadata tail: in-flight progress
-    // while running, the error on failure, or a result summary (bash stdout,
-    // read content, etc.) once completed. When a run has more calls than fit,
-    // keep the most recent so the current activity stays visible and fold the
-    // older ones into a "+N older" marker on the first shown line.
-    const reservedLines =
-      1 +
-      activeAgents.length +
-      activeActors.length +
-      runningItems.length +
-      activeState.length;
-    const callBudget = Math.max(0, this.maxRows - reservedLines);
-    const olderCalls = Math.max(0, nestedCalls.length - callBudget);
-    const displayCalls = olderCalls > 0 ? nestedCalls.slice(olderCalls) : nestedCalls;
-    for (let index = 0; index < displayCalls.length; index++) {
-      const call = displayCalls[index]!;
-      const folded =
-        index === 0 && olderCalls > 0 ? this.theme.fg("dim", ` (+${olderCalls} older)`) : "";
-      const meta =
-        call.status === "running"
-          ? call.progress
-            ? ` · ${safeText(call.progress)}`
-            : ""
-          : call.status === "failed"
-            ? call.error
-              ? ` · ${safeText(call.error)}`
-              : ""
-            : call.detail
-              ? ` · ${safeText(call.detail)}`
-              : "";
-      lines.push(
-        `  ${colorStatus(this.theme, call.status, statusGlyph(call.status))} ${safeText(
-          call.label,
-        )}${this.theme.fg("dim", meta)}${folded}`,
-      );
-    }
     for (const item of runningItems) {
       const current = item.current ?? item.detail;
       const progress =
@@ -272,9 +199,7 @@ export class FabricWidget implements Component {
         `+${lines.length - bounded.length}`,
       )}`;
     }
-    const rendered = bounded.map((line) => truncateToWidth(line, width));
-    this.#lastLines = rendered;
-    return rendered;
+    return bounded.map((line) => truncateToWidth(line, width));
   }
 
   invalidate(): void {}

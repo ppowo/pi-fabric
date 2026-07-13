@@ -56,7 +56,6 @@ interface FabricUiConfig {
   widget: FabricUiWidgetMode;
   maxRows: number;
   refreshMs: number;
-  lingerMs: number;
   eventHistory: number;
 }
 
@@ -134,7 +133,6 @@ export const DEFAULT_FABRIC_CONFIG: FabricConfig = {
     widget: "auto",
     maxRows: 6,
     refreshMs: 500,
-    lingerMs: 2_000,
     eventHistory: 80,
   },
   mesh: {
@@ -355,7 +353,6 @@ export const normalizeFabricConfig = (input: Record<string, unknown>): FabricCon
       widget: widgetModeValue(ui.widget, DEFAULT_FABRIC_CONFIG.ui.widget),
       maxRows: boundedInteger(ui.maxRows, DEFAULT_FABRIC_CONFIG.ui.maxRows, 1, 20),
       refreshMs: boundedInteger(ui.refreshMs, DEFAULT_FABRIC_CONFIG.ui.refreshMs, 100, 10_000),
-      lingerMs: boundedInteger(ui.lingerMs, DEFAULT_FABRIC_CONFIG.ui.lingerMs, 0, 300_000),
       eventHistory: boundedInteger(
         ui.eventHistory,
         DEFAULT_FABRIC_CONFIG.ui.eventHistory,

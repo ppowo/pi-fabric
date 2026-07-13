@@ -8,7 +8,6 @@ import { type FabricDashboardSnapshot } from "./types.js";
 import { FabricWidget, shouldShowFabricWidget } from "./widget.js";
 
 const WIDGET_ID = "pi-fabric";
-const CLEAR_STEP_MS = 60;
 
 const emptySnapshot = (): FabricDashboardSnapshot => ({
   now: Date.now(),
@@ -30,8 +29,6 @@ export class FabricUiController {
   #widgetTui: TUI | undefined;
   #widgetMounted = false;
   #widget: FabricWidget | undefined;
-  #clearing = false;
-  #clearTimer: NodeJS.Timeout | undefined;
 
   constructor(readonly state: FabricState) {}
 
@@ -52,11 +49,8 @@ export class FabricUiController {
   stop(): void {
     if (this.#timer) clearInterval(this.#timer);
     if (this.#scheduledRefresh) clearTimeout(this.#scheduledRefresh);
-    if (this.#clearTimer) clearTimeout(this.#clearTimer);
     this.#timer = undefined;
     this.#scheduledRefresh = undefined;
-    this.#clearTimer = undefined;
-    this.#clearing = false;
     this.#widget = undefined;
     this.#activityUnsubscribe?.();
     this.#activityUnsubscribe = undefined;
@@ -143,50 +137,25 @@ export class FabricUiController {
     const config = this.state.config.ui;
     const shouldShow =
       context.mode === "tui" &&
-      shouldShowFabricWidget(this.#snapshot, config.widget, config.lingerMs);
+      shouldShowFabricWidget(this.#snapshot, config.widget);
     if (shouldShow) {
-      if (this.#clearing) {
-        this.#clearing = false;
-        if (this.#clearTimer) clearTimeout(this.#clearTimer);
-        this.#clearTimer = undefined;
-        this.#widget?.cancelClear();
-      }
       if (this.#widgetMounted) return;
       this.#widgetMounted = true;
       context.ui.setWidget(
         WIDGET_ID,
         (tui, theme) => {
           this.#widgetTui = tui;
-          this.#widget = new FabricWidget(theme, () => this.#snapshot, config.maxRows, config.lingerMs);
+          this.#widget = new FabricWidget(theme, () => this.#snapshot, config.maxRows);
           return this.#widget;
         },
         { placement: "aboveEditor" },
       );
       return;
     }
-    if (!this.#widgetMounted || this.#clearing) return;
-    if (!this.#widget) {
-      context.ui.setWidget(WIDGET_ID, undefined);
-      this.#widgetMounted = false;
-      this.#widgetTui = undefined;
-      return;
-    }
-    this.#clearing = true;
-    this.#widget.startClear(this.#widget.lastLines);
-    this.#clearTimer = setTimeout(() => this.#clearStep(context), CLEAR_STEP_MS);
-  }
-
-  #clearStep(context: ExtensionContext): void {
-    this.#clearTimer = undefined;
-    if (this.#widget?.clearStep() ?? true) {
-      context.ui.setWidget(WIDGET_ID, undefined);
-      this.#widgetMounted = false;
-      this.#widgetTui = undefined;
-      this.#widget = undefined;
-      this.#clearing = false;
-      return;
-    }
-    this.#widgetTui?.requestRender();
-    this.#clearTimer = setTimeout(() => this.#clearStep(context), CLEAR_STEP_MS);
+    if (!this.#widgetMounted) return;
+    context.ui.setWidget(WIDGET_ID, undefined);
+    this.#widgetMounted = false;
+    this.#widgetTui = undefined;
+    this.#widget = undefined;
   }
 }

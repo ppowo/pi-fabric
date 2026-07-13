@@ -155,7 +155,7 @@ const snapshot = (): FabricDashboardSnapshot => {
 describe("Fabric dynamic UI", () => {
   it("renders a bounded compact activity widget", () => {
     const current = snapshot();
-    const widget = new FabricWidget(theme, () => current, 5, 10_000);
+    const widget = new FabricWidget(theme, () => current, 5);
     const lines = widget.render(72);
 
     expect(lines.join("\n")).toContain("Repository migration");
@@ -163,12 +163,12 @@ describe("Fabric dynamic UI", () => {
     expect(lines.join("\n")).toContain("Audit");
     expect(lines.length).toBeLessThanOrEqual(5);
     expect(lines.every((line) => visibleWidth(line) <= 72)).toBe(true);
-    const ansiLines = new FabricWidget(ansiTheme, () => current, 5, 10_000).render(48);
+    const ansiLines = new FabricWidget(ansiTheme, () => current, 5).render(48);
     expect(ansiLines.every((line) => visibleWidth(line) <= 48)).toBe(true);
-    expect(shouldShowFabricWidget(current, "auto", 10_000)).toBe(true);
+    expect(shouldShowFabricWidget(current, "auto")).toBe(true);
   });
 
-  it("collapses completed runs while retaining ambient actor presence", () => {
+  it("keeps completed runs until settle, then dismisses but retains actors", () => {
     const current = snapshot();
     const run = current.runs[0];
     if (!run) throw new Error("missing fixture run");
@@ -177,115 +177,20 @@ describe("Fabric dynamic UI", () => {
     current.agents[0]!.status = "completed";
     current.state = [];
     current.actors = [];
-    expect(shouldShowFabricWidget(current, "auto", 10_000)).toBe(false);
-
+    // a completed run stays visible until the turn settles
+    expect(shouldShowFabricWidget(current, "auto")).toBe(true);
+    // settling (agent_settled) dismisses it
+    current.widgetDismissedAt = current.now;
+    expect(shouldShowFabricWidget(current, "auto")).toBe(false);
+    // ambient actors keep the widget visible regardless
     current.actors = snapshot().actors;
-    expect(shouldShowFabricWidget(current, "auto", 10_000)).toBe(true);
-    const lines = new FabricWidget(theme, () => current, 5, 10_000).render(72);
+    expect(shouldShowFabricWidget(current, "auto")).toBe(true);
+    const lines = new FabricWidget(theme, () => current, 5).render(72);
     expect(lines[0]).toContain("Fabric session");
     expect(lines.join("\n")).toContain("advisor");
   });
 
-  it("shows all nested calls and keeps a stable height as they complete", () => {
-    const current = snapshot();
-    const run = current.runs[0];
-    if (!run) throw new Error("missing fixture run");
-    run.calls = [
-      { id: "c1", ref: "pi.bash", label: "bash one", kind: "tool", status: "running", phaseId: "audit", startedAt: run.startedAt, updatedAt: current.now },
-      { id: "c2", ref: "pi.bash", label: "bash two", kind: "tool", status: "running", phaseId: "audit", startedAt: run.startedAt, updatedAt: current.now },
-    ];
-    run.items = [];
-    current.agents = [];
-    current.actors = [];
-    current.state = [];
-
-    const widget = new FabricWidget(theme, () => current, 8, 10_000);
-    const first = widget.render(72);
-    expect(first.length).toBe(3);
-    expect(first[0]).toContain("0/2");
-    expect(first.some((line) => line.includes("bash one"))).toBe(true);
-    expect(first.some((line) => line.includes("bash two"))).toBe(true);
-
-    run.calls[0]!.status = "completed";
-    run.calls[0]!.finishedAt = current.now;
-    const second = widget.render(72);
-    expect(second.length).toBe(3);
-    expect(second[0]).toContain("1/2");
-    expect(second.some((line) => line.includes("bash one"))).toBe(true);
-    expect(second.some((line) => line.includes("bash two"))).toBe(true);
-
-    run.calls[1]!.status = "completed";
-    run.calls[1]!.finishedAt = current.now;
-    const third = widget.render(72);
-    expect(third.length).toBe(3);
-    expect(third[0]).toContain("2/2");
-    expect(third.some((line) => line.includes("bash one"))).toBe(true);
-    expect(third.some((line) => line.includes("bash two"))).toBe(true);
-
-    run.id = "run-stable-2";
-    run.calls = [
-      { id: "c3", ref: "pi.bash", label: "bash three", kind: "tool", status: "running", phaseId: "audit", startedAt: run.startedAt, updatedAt: current.now },
-    ];
-    const fourth = widget.render(72);
-    expect(fourth.length).toBe(2);
-  });
-
-  it("shows result metadata for completed calls and progress for running calls", () => {
-    const current = snapshot();
-    const run = current.runs[0];
-    if (!run) throw new Error("missing fixture run");
-    run.calls = [
-      { id: "c1", ref: "pi.bash", label: "pi.bash", kind: "tool", status: "completed", phaseId: "audit", startedAt: run.startedAt, updatedAt: current.now, finishedAt: current.now, detail: "stdout one two three" },
-      { id: "c2", ref: "pi.bash", label: "pi.bash", kind: "tool", status: "running", phaseId: "audit", startedAt: run.startedAt, updatedAt: current.now, progress: "Calling pi.bash" },
-      { id: "c3", ref: "pi.read", label: "pi.read · /src/x.ts", kind: "tool", status: "failed", phaseId: "audit", startedAt: run.startedAt, updatedAt: current.now, finishedAt: current.now, error: "ENOENT" },
-    ];
-    run.items = [];
-    current.agents = [];
-    current.actors = [];
-    current.state = [];
-    const lines = new FabricWidget(theme, () => current, 8, 10_000).render(72);
-    expect(lines.some((line) => line.includes("✓") && line.includes("stdout one two three"))).toBe(true);
-    expect(lines.some((line) => line.includes("Calling pi.bash"))).toBe(true);
-    expect(lines.some((line) => line.includes("ENOENT"))).toBe(true);
-  });
-
-  it("clears lines one at a time from the bottom", () => {
-    const current = snapshot();
-    const run = current.runs[0];
-    if (!run) throw new Error("missing fixture run");
-    run.calls = Array.from({ length: 3 }, (_, i) => ({
-      id: "c" + i, ref: "pi.bash", label: "call " + (i + 1), kind: "tool", status: "completed",
-      phaseId: "audit", startedAt: run.startedAt, updatedAt: current.now, finishedAt: current.now, detail: "out " + (i + 1),
-    }));
-    run.items = [];
-    current.agents = [];
-    current.actors = [];
-    current.state = [];
-    run.status = "running";
-    const w = new FabricWidget(theme, () => current, 8, 10000);
-    const full = w.render(72);
-    expect(full.length).toBe(4);
-    w.startClear([...w.lastLines]);
-    expect(w.clearing).toBe(true);
-    expect(w.render(72).length).toBe(4);
-    const after1 = w.render(72);
-    expect(w.clearStep()).toBe(false);
-    const step1 = w.render(72);
-    expect(step1.length).toBe(3);
-    expect(step1.some((l) => l.includes("call 3"))).toBe(false);
-    expect(step1.some((l) => l.includes("call 1"))).toBe(true);
-    expect(w.clearStep()).toBe(false);
-    expect(w.render(72).length).toBe(2);
-    expect(w.clearStep()).toBe(false);
-    expect(w.render(72).length).toBe(1);
-    expect(w.clearStep()).toBe(true);
-    expect(w.render(72).length).toBe(0);
-    w.cancelClear();
-    expect(w.clearing).toBe(false);
-    expect(w.render(72).length).toBe(4);
-  });
-
-  it("hides lingering runs once a new turn dismisses them", () => {
+  it("hides dismissed runs and resurfaces later ones", () => {
     const current = snapshot();
     const run = current.runs[0];
     if (!run) throw new Error("missing fixture run");
@@ -299,18 +204,18 @@ describe("Fabric dynamic UI", () => {
     run.status = "completed";
     run.finishedAt = current.now;
     current.widgetDismissedAt = 0;
-    // a freshly-finished run shows while lingering
-    expect(shouldShowFabricWidget(current, "auto", 10_000)).toBe(true);
-    const lines = new FabricWidget(theme, () => current, 8, 10_000).render(72);
-    expect(lines.some((line) => line.includes("pi.bash") && line.includes("done"))).toBe(true);
+    // a freshly-finished run shows as a single-line summary
+    expect(shouldShowFabricWidget(current, "auto")).toBe(true);
+    const lines = new FabricWidget(theme, () => current, 8).render(72);
+    expect(lines.length).toBe(1);
     // a new prompt dismisses the run (it finished before the prompt) -> hidden
     current.widgetDismissedAt = current.now + 1;
-    expect(shouldShowFabricWidget(current, "auto", 10_000)).toBe(false);
+    expect(shouldShowFabricWidget(current, "auto")).toBe(false);
     // a later run that finishes after the dismiss shows again
     run.finishedAt = current.now + 2000;
     run.updatedAt = run.finishedAt;
     current.now = run.finishedAt;
-    expect(shouldShowFabricWidget(current, "auto", 10_000)).toBe(true);
+    expect(shouldShowFabricWidget(current, "auto")).toBe(true);
   });
 
   it("renders a responsive two-pane dashboard and agent details", () => {

@@ -39,7 +39,6 @@ describe("Fabric configuration", () => {
         widget: "always",
         maxRows: 100,
         refreshMs: 1,
-        lingerMs: 5_000_000,
         eventHistory: 0,
       },
       mesh: { actorQueueLimit: 0, eventContextChars: 5_000_000 },
@@ -59,7 +58,6 @@ describe("Fabric configuration", () => {
       widget: "always",
       maxRows: 20,
       refreshMs: 100,
-      lingerMs: 300_000,
       eventHistory: 1,
     });
     expect(config.mesh.actorQueueLimit).toBe(1);
