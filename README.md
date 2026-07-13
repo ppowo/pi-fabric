@@ -331,6 +331,7 @@ Pi discovers these package skills automatically:
 | `/skill:fabric-advisor [focus]`    | Decision-point peer reviewer (idle and tool errors) that prefers silence                         |
 | `/skill:fabric-ambient <role>`     | Meta-pattern for custom event-driven ambient actors                     |
 | `/skill:fabric-workflow <task>`    | Code-held phases, fan-out, pipelines, structured output, and synthesis  |
+| `/skill:fabric-rlm <task>`        | Recursive self-delegation via `rlm.query()` for tasks too big for one context window |
 | `/skill:fabric-swarm <objective>`  | Persistent actors, durable topics, and CAS-based shared tasks           |
 | `/skill:fabric-council <decision>` | Bounded independent perspectives plus synthesis                         |
 
