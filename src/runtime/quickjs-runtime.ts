@@ -184,12 +184,13 @@ const __workflowAgent = async (prompt, options = {}) => {
   }
   return result.value !== undefined ? result.value : result.text;
 };
-const __workflowParallel = async (thunks, options = {}) => {
+const __runParallel = async (thunks, options) => {
   if (!Array.isArray(thunks) || thunks.some((thunk) => typeof thunk !== "function")) {
-    throw new TypeError("workflow.parallel expects an array of functions");
+    throw new TypeError("workflow.parallel expects an array of functions or (items, mapper)");
   }
   if (thunks.length === 0) return [];
-  const requestedConcurrency = Number(options.concurrency ?? thunks.length);
+  const concurrencyOpt = typeof options === "number" ? { concurrency: options } : options ?? {};
+  const requestedConcurrency = Number(concurrencyOpt.concurrency ?? thunks.length);
   if (!Number.isFinite(requestedConcurrency) || requestedConcurrency < 1) {
     throw new RangeError("workflow.parallel concurrency must be a positive finite number");
   }
@@ -203,6 +204,13 @@ const __workflowParallel = async (thunks, options = {}) => {
     }
   }));
   return results;
+};
+const __workflowParallel = async (items, arg2, arg3) => {
+  if (typeof arg2 === "function") {
+    if (!Array.isArray(items)) throw new TypeError("workflow.parallel expects an array as the first argument");
+    return __runParallel(items.map((item, index) => () => arg2(item, index)), arg3);
+  }
+  return __runParallel(items, arg2);
 };
 const __workflowPipeline = async (items, ...stages) => {
   if (!Array.isArray(items) || stages.some((stage) => typeof stage !== "function")) {

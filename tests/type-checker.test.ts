@@ -54,6 +54,18 @@ return findings;
     expect(result.errors).toEqual([]);
   });
 
+  it("accepts parallel(items, mapper, concurrency) and infers item types", () => {
+    const result = typeCheckFabricCode(
+      `
+const items = [{ q: "a", n: 3 }, { q: "b", n: 2 }];
+const out = await parallel(items, ({ q, n }) => agent(q + ":" + n, { label: q }), 2);
+return out;
+`,
+      GUEST_TYPE_DECLARATIONS,
+    );
+    expect(result.errors).toEqual([]);
+  });
+
   it("reports user-facing line numbers", () => {
     const result = typeCheckFabricCode(
       'await pi.read({ path: 42 });\nreturn "never";',

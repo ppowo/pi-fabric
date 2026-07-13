@@ -64,6 +64,28 @@ return { values, spent: budget.spent() };
     expect(calls).toEqual(["fabric.$phase", "agents.run", "agents.run"]);
   });
 
+  it("runs parallel(items, mapper, concurrency) fan-out", async () => {
+    const calls: string[] = [];
+    const result = await new QuickJsRuntime().execute(
+      `
+const items = [{ q: "first" }, { q: "second" }, { q: "third" }];
+const out = await parallel(items, (item) => agent(item.q, { label: item.q }), 2);
+return out;
+`,
+      async (ref, args) => {
+        if (ref === "agents.run") {
+          calls.push(String(args.task));
+          return { status: "completed", text: String(args.task).toUpperCase(), usage: { input: 1, output: 1 } };
+        }
+        throw new Error(`Unexpected call: ${ref}`);
+      },
+      { ...options, tokenBudget: 30 },
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.value).toEqual(["FIRST", "SECOND", "THIRD"]);
+    expect(calls.sort()).toEqual(["first", "second", "third"]);
+  });
+
   it("calls captured extension tools through the lazy proxy", async () => {
     const result = await new QuickJsRuntime().execute(
       'return extensions.deploy_release({ environment: "staging" });',

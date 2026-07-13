@@ -263,7 +263,8 @@ interface FabricWorkflowItem {
 }
 interface FabricWorkflowApi {
   agent<T = string>(prompt: string, options?: FabricWorkflowAgentOptions): Promise<T>;
-  parallel<T>(thunks: Array<() => Promise<T> | T>, options?: { concurrency?: number }): Promise<T[]>;
+  parallel<T, R>(items: T[], mapper: (item: T, index: number) => Promise<R> | R, concurrency?: number | { concurrency?: number }): Promise<R[]>;
+  parallel<T>(thunks: Array<() => Promise<T> | T>, concurrency?: number | { concurrency?: number }): Promise<T[]>;
   pipeline<T>(items: T[], ...stages: Array<(value: unknown, original: T, index: number) => Promise<unknown> | unknown>): Promise<unknown[]>;
   configure(display: FabricWorkflowDisplay): Promise<FabricWorkflowDisplay>;
   phase(name: string, options?: FabricWorkflowPhaseOptions): Promise<{ name: string; index: number; id?: string }>;
@@ -281,7 +282,8 @@ declare const mcp: FabricMcpApi;
 declare const council: FabricCouncilApi;
 declare const workflow: FabricWorkflowApi;
 declare function agent<T = string>(prompt: string, options?: FabricWorkflowAgentOptions): Promise<T>;
-declare function parallel<T>(thunks: Array<() => Promise<T> | T>, options?: { concurrency?: number }): Promise<T[]>;
+declare function parallel<T, R>(items: T[], mapper: (item: T, index: number) => Promise<R> | R, concurrency?: number | { concurrency?: number }): Promise<R[]>;
+declare function parallel<T>(thunks: Array<() => Promise<T> | T>, concurrency?: number | { concurrency?: number }): Promise<T[]>;
 declare function pipeline<T>(items: T[], ...stages: Array<(value: unknown, original: T, index: number) => Promise<unknown> | unknown>): Promise<unknown[]>;
 declare function phase(name: string, options?: FabricWorkflowPhaseOptions): Promise<{ name: string; index: number; id?: string }>;
 declare function log(...values: unknown[]): void;
