@@ -4,7 +4,7 @@ description: >-
   Reference for writing `fabric_exec` TypeScript programs in the QuickJS
   sandbox: the mental model (one program, return only the final value), the
   core `pi` tools (read/bash/edit/write/grep/find/ls) with exact signatures,
-  `tools` discovery and introspection, `π` named strings, parallelization,
+  `tools` discovery and introspection, `π` named strings,
   and the validate, describe, retry error loop. Load before your first
   `fabric_exec` call and whenever a call errors on argument shape. For MCP,
   agents/rlm, and mesh, see `references/mcp.md`, `references/agents.md`, `references/mesh.md`.
@@ -12,7 +12,7 @@ description: >-
 
 # fabric_exec — core reference
 
-One type-checked TS program in a QuickJS sandbox. Only the `return` value reaches the model; `print()`/`console.log` go to the activity panel. Top-level `await`/`return` supported. `π.<key>` exposes `strings`-param values (use for awkward-to-quote content); `π` is not a tool. Compose many ops into one program; return one compact value (`Promise.all` for independent, sequential `await` for dependent) — one `fabric_exec` per `pi.*` is the anti-pattern.
+One type-checked TS program in a QuickJS sandbox. Only the `return` value reaches the model; `print()`/`console.log` go to the activity panel. `π` is not a tool.
 
 ## `pi` core tools (full code mode only)
 `pi.<tool>(arg)` — single arg: bare string (primary field) or options object; `edit`/`write` need an object. No positional args: `pi.grep(p, path)` → `pi.grep({ pattern: p, path })`.
@@ -33,7 +33,7 @@ Aliases: `cmd`→`command`, `query`→`pattern`, `file`→`path`, `dir`→`path`
 Refs namespaced: `pi.grep`, `extensions.<tool>`, `mcp.<server>.<tool>`; bare names rejected. `tools.providers()`→`[{name,description}]` · `tools.search({query,limit?})`→`FabricAction[]`(`ref,name,description,inputSchema,risk`) · `tools.describe({ref})`→full `FabricAction` (read `inputSchema` first) · `tools.call({ref,args?})` · `tools.list({provider?,namespace?,query?,limit?})` · `extensions.<tool>(args)` (full code mode only).
 
 ## Error recovery: read, describe, retry
-Read the line-numbered error → `await tools.describe({ref})` for the schema → match `inputSchema`, rerun (don't guess). Common mistakes: two positional args; bare ref (`grep`→`pi.grep`); shell/regex with `${...}` (pass via `strings`, read as `π.key`).
+Read the line-numbered error → `await tools.describe({ref})` for the schema → match `inputSchema`, rerun (don't guess). Common mistakes: two positional args; bare ref (`grep`→`pi.grep`).
 
 ## Other surfaces
 `references/mcp.md` (mcp.*) · `references/agents.md` (agents/actors/rlm) · `references/mesh.md` (topics/cas state). Workflow/councils → `/skill:fabric-workflow`, `/skill:fabric-council`.

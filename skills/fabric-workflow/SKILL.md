@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # Fabric Dynamic Workflow
 
-Turn the request into one type-checked `fabric_exec` program. The program, not the parent context, must hold the loop, branches, and intermediate results.
+Turn the request into one type-checked `fabric_exec` program. The program, not the parent context, must hold the loop and branches.
 
 Use these globals:
 
@@ -67,5 +67,3 @@ return { ok: true, result };
 ```
 
 Adapt the phases and worker tools to the request. For edits, partition ownership by path or use `worktree: true`; never have concurrent agents edit the same files. Include a final verifier or synthesizer when conclusions come from multiple workers. Set `agentBudget` and `tokenBudget` on `fabric_exec` when the requested scale is potentially large.
-
-Return only the compact final artifact and meaningful failures. Do not paste every intermediate transcript into the parent context.

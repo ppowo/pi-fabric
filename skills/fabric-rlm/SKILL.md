@@ -20,7 +20,7 @@ Recurse not because a task is hard, but because it is too big for one context wi
 
 ## One fabric_exec program
 
-Turn the request into a single type-checked `fabric_exec` program. The program holds the decomposition loop, branches, and intermediate results; only the compact final artifact returns to the parent context. Pass the root task through `strings.task`.
+Turn the request into a single type-checked `fabric_exec` program. The program holds the decomposition loop and branches. Pass the root task through `strings.task`.
 
 ```ts
 await workflow.configure({
@@ -82,5 +82,3 @@ Adapt the phases, tools, and fan-out to the request. Use `schema` on a worker wh
 - Deeper children should be more conservative: fewer sub-calls, more direct action. Teach the pattern once — size-first → search → chunk → delegate → combine — and let it repeat at every depth.
 - For edits, partition ownership by path or set `worktree: true`; never let concurrent recursive children edit the same files.
 - The pre-spawn budget check is best-effort (concurrent children can overshoot slightly); the race-free ceiling is `subagents.maxPerExecution`.
-
-Return only the compact final artifact and meaningful failures. Do not paste every intermediate transcript into the parent context.

@@ -48,6 +48,6 @@ Prefer silence. Return {"action":"silent"} when the agent is on track or product
 
 ## Heuristic: review on good signals, not every turn
 
-The advisor subscribes to `agent_settled` and `tool_error`, not `turn_end`. It runs at decision points (idle and on failures) and stays silent otherwise, so it does not invoke a model review on every turn. Intervene only on a concrete, high-confidence signal: a material correctness gap, a missed constraint, a risky assumption, or a tool error worth surfacing. This mirrors `../pi-supervisor/`, which analyzes at idle and on errors and otherwise trusts the agent to proceed.
+The advisor subscribes to `agent_settled` and `tool_error`, not `turn_end`. It runs at decision points (idle and on failures) and stays silent otherwise, so it does not invoke a model review on every turn. Intervene only on a concrete, high-confidence signal: a material correctness gap, a missed constraint, a risky assumption, or a tool error worth surfacing.
 
 After creation, report the focus, actor short ID, and inspect/stop commands. Do not wait for it. `triggerTurn: false` is intentional: delivered advice joins the main loop without forcing a new turn (advice to weigh, not an order).
