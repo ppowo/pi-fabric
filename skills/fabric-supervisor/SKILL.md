@@ -56,4 +56,8 @@ Return {"action":"silent"} while work is productively advancing. Return {"action
 The goal is complete only when the requested result and its relevant validation are evident in the transcript. At that point return {"action":"stop","message":"Goal verified complete."}.
 ```
 
+## Heuristic: steer on good signals, not every turn
+
+The supervisor subscribes to `agent_settled` and `tool_error`, not `turn_end` or `input`. It runs at decision points (idle and on failures) and stays silent while work is productively advancing, so it does not invoke a model review on every turn. Intervene only on a concrete, high-confidence signal: material work missing at idle, drift from the goal, a stuck state after a tool error, or verified completion. This mirrors `../pi-supervisor/`, which analyzes at idle and on errors and otherwise trusts the agent to proceed.
+
 After creation, report the goal, actor short ID, and inspect/stop commands. Do not wait for it; host events drive it across later turns.
