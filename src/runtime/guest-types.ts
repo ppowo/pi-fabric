@@ -56,6 +56,12 @@ interface FabricAgentResult extends FabricAgentHandle {
   error?: string;
   usage: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
 }
+interface FabricModelInfo {
+  provider: string;
+  id: string;
+  name: string;
+  key: string;
+}
 interface FabricToolsApi {
   providers(): Promise<Array<{ name: string; description: string }>>;
   list(args?: { provider?: string; namespace?: string; query?: string; limit?: number }): Promise<FabricAction[]>;
@@ -63,6 +69,7 @@ interface FabricToolsApi {
   describe(args: { ref: string }): Promise<FabricAction>;
   call(args: { ref: string; args?: Record<string, unknown> }): Promise<unknown>;
   progress(args: { message: string }): Promise<void>;
+  models(): Promise<FabricModelInfo[]>;
 }
 interface FabricCapturedToolResult {
   content: Array<{ type: string; text?: string; [key: string]: unknown }>;

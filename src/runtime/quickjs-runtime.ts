@@ -44,6 +44,7 @@ globalThis.tools = Object.freeze({
   describe: (args) => __call("fabric.$describe", args),
   call: (args) => __call("fabric.$call", args),
   progress: (args) => __call("fabric.$progress", args),
+  models: () => __call("fabric.$models", {}),
 });
 const __piStringFields = { bash: "command", read: "path", ls: "path", grep: "pattern", find: "pattern" };
 const __piArgAliases = {
@@ -186,6 +187,15 @@ const __workflowAgent = async (prompt, options = {}) => {
   }
   return result.value !== undefined ? result.value : result.text;
 };
+// Budget-aware agents.run used by council.run and rlm.query so their usage is
+// counted in budget.spent() and the tokenBudget guard can preempt them, just
+// like workflow.agent(). Without this, councils bypass the budget entirely.
+const __budgetedRun = async (args) => {
+  if (__workflowSpentTokens >= __workflowBudgetTotal) {
+    throw new Error("Fabric workflow token budget exhausted");
+  }
+  return __recordAgentUsage(await agents.run(args));
+};
 const __runParallel = async (thunks, options) => {
   if (!Array.isArray(thunks) || thunks.some((thunk) => typeof thunk !== "function")) {
     throw new TypeError("workflow.parallel expects an array of functions or (items, mapper)");
@@ -246,18 +256,18 @@ globalThis.phase = workflow.phase;
 globalThis.log = workflow.log;
 globalThis.budget = workflow.budget;
 globalThis.rlm = Object.freeze({
-  query: (args) => agents.run({ ...args, recursive: true }),
+  query: (args) => __budgetedRun({ ...args, recursive: true }),
 });
 globalThis.council = Object.freeze({
   async run(args) {
     const { task, roles, synthesize = true, ...agentOptions } = args;
-    const results = await Promise.all(roles.map((role) => agents.run({
+    const results = await Promise.all(roles.map((role) => __budgetedRun({
       ...agentOptions,
       name: role,
       task: "Act as the " + role + " council member. Independently analyze this task:\\n\\n" + task,
     })));
     if (!synthesize) return results;
-    return agents.run({
+    return __budgetedRun({
       ...agentOptions,
       name: "council-synthesizer",
       task: "Synthesize the council's independent reports into one decision. Preserve disagreements and cite which role raised each concern.\\n\\nTask:\\n" + task + "\\n\\nReports:\\n" + JSON.stringify(results),

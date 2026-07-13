@@ -8,6 +8,8 @@ disable-model-invocation: true
 
 Use one `fabric_exec` call and `council.run()`. Choose roles that disagree usefully rather than duplicating one another.
 
+A council runs N role agents concurrently plus a sequential synthesizer, all inside the single `fabric_exec` sandbox. The sandbox has a hard wall-clock ceiling (`executor.timeoutMs`, default 120s; raise it in `fabric.json` or `/fabric` settings for read-heavy councils). Keep roles and per-role tool work bounded so `max(role durations) + synthesizer` fits the ceiling, or the sandbox times out and aborts every in-flight agent. Council and `rlm.query` usage counts toward `budget.spent()` and the `tokenBudget` guard.
+
 ```ts
 const roles = JSON.parse(π.roles) as string[];
 await workflow.configure({

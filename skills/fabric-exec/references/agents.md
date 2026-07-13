@@ -14,7 +14,8 @@ Every method takes a single options object.
 `args` is a `FabricAgentRequest`: `{ task, name?, transport?, model?, thinking?, tools?, timeoutMs?, extensions?, recursive?, worktree?, schema? }`.
 
 - `transport` is one of `auto`, `process`, `tmux`, `screen`, `localterm` (default `process`). `auto` tries LocalTerm, tmux, screen, then process.
-- `tools` defaults to `subagents.defaultTools`. Children inherit the parent model unless `model` is set.
+- `model` is a `provider/id` string; use `tools.models()` to discover valid `key` values. Children inherit the parent model unless `model` is set.
+- `tools` defaults to `subagents.defaultTools`.
 - `schema` is a JSON Schema; the worker returns validated structured data in `result.value`.
 - `worktree: true` creates a dedicated Git worktree on branch `pi-fabric/<name>-<id>`, retained until `agents.cleanup()`.
 
@@ -41,6 +42,7 @@ Use `/fabric agents` to list children and `/fabric attach <id>` for the attach c
 
 `args` is a `FabricActorRequest`: `{ name, instructions, events?, topics?, delivery?, responseMode?, triggerTurn?, coalesce?, model?, thinking?, tools?, transport?, timeoutMs? }`.
 
+- `model` is a `provider/id` string (the canonical `key` from `tools.models()`). Omitted inherits the host session's model. The model is fixed at creation — a later `tell`/`ask` message cannot switch the underlying Pi process model, so set it here when it matters.
 - `events` is a subset of `input`, `turn_end`, `agent_settled`, `tool_error`, `session_compact` (host events to subscribe to).
 - `topics` lists durable mesh topics to subscribe to (see `mesh.md`).
 - `responseMode` is `text` (every non-empty response becomes an outbox message) or `directive` (validated `{ action, message?, data? }` where `action` is `silent`, `message`, or `stop`; the actor decides whether to intervene).
@@ -69,7 +71,7 @@ Mailbox:
 
 ## Recursive queries
 
-`rlm.query(args)` is `agents.run({ ...args, recursive: true })` with Fabric enabled in the child. Recursion is rejected at `subagents.maxDepth`. Approving the initial recursive call delegates only the `agent` risk capability to recursive children; network, execution, and write approvals are not inherited. Each Fabric process enforces its own concurrency and timeout limits.
+`rlm.query(args)` is a budget-aware `agents.run({ ...args, recursive: true })` with Fabric enabled in the child. Its usage counts toward `budget.spent()` and the `tokenBudget` guard. Recursion is rejected at `subagents.maxDepth`. Approving the initial recursive call delegates only the `agent` risk capability to recursive children; network, execution, and write approvals are not inherited. Each Fabric process enforces its own concurrency and timeout limits.
 
 ```ts
 return rlm.query({ task: "Decompose this repository and produce a compact architecture map.", transport: "process" });

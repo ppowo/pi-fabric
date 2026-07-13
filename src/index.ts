@@ -26,10 +26,25 @@ import {
   type FabricRenderAudit,
 } from "./ui/fabric-render.js";
 import { highlightCode, initHighlighting } from "./ui/highlight.js";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
 import { truncateMiddle } from "./util.js";
 
 const RESULT_FORMATS = ["auto", "json", "text"] as const;
 type ResultFormat = (typeof RESULT_FORMATS)[number];
+
+// Absolute path to the Fabric skills bundled with this extension. Resolved
+// relative to the extension entry so it works both in development (src/) and
+// in an installed package (dist/). Contributed via resources_discover so child
+// Pi processes that load Fabric with -e (subagents and actors) discover the
+// same fabric-exec / fabric-advisor / fabric-council skill references as the
+// main agent, which gets them through the package manifest.
+const FABRIC_SKILLS_DIR = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "skills",
+);
 
 // Appended to the system prompt each agent run. Lives in the system prompt
 // (the most cache-stable prefix), not the tool schema — applyFabricMode()
@@ -112,6 +127,11 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
       registration.provider,
       registration.overwrite === undefined ? {} : { overwrite: registration.overwrite },
     );
+  });
+
+  pi.on("resources_discover", async () => {
+    if (existsSync(FABRIC_SKILLS_DIR)) return { skillPaths: [FABRIC_SKILLS_DIR] };
+    return {};
   });
 
   const fabricTool = withCodePreviewShell(

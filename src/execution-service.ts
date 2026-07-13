@@ -146,6 +146,23 @@ export class FabricExecutionService {
                 .filter(
                   (provider) => this.config.fullCodeMode || !fullCodeProvider(provider.name),
                 );
+            case "fabric.$models": {
+              const registry = options.context.modelRegistry;
+              let models: Array<{ provider: string; id: string; name: string; key: string }> = [];
+              try {
+                const available =
+                  typeof registry?.getAvailable === "function" ? registry.getAvailable() : [];
+                models = available.map((model) => ({
+                  provider: String(model.provider),
+                  id: String(model.id),
+                  name: String(model.name ?? model.id),
+                  key: `${model.provider}/${model.id}`,
+                }));
+              } catch {
+                models = [];
+              }
+              return models;
+            }
             case "fabric.$list": {
               if (typeof args.provider === "string") guardFullCodeRef(`${args.provider}.*`);
               const actions = await this.registry.list(

@@ -230,4 +230,70 @@ await Promise.all([
     expect(failed.error).toContain("π.previewFile is not defined");
     expect(failed.error).toContain("provided: content");
   });
+
+  it("bridges tools.models() to the fabric.$models host call", async () => {
+    const result = await new QuickJsRuntime().execute(
+      `const models = await tools.models(); return models;`,
+      async (ref) => {
+        if (ref === "fabric.$models") {
+          return [
+            { provider: "litellm", id: "glm-5.2", name: "GLM 5.2", key: "litellm/glm-5.2" },
+          ];
+        }
+        throw new Error(`Unexpected call: ${ref}`);
+      },
+      options,
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.value).toEqual([
+      { provider: "litellm", id: "glm-5.2", name: "GLM 5.2", key: "litellm/glm-5.2" },
+    ]);
+  });
+
+  it("counts council.run role usage toward budget.spent()", async () => {
+    const result = await new QuickJsRuntime().execute(
+      `await council.run({ task: "review", roles: ["a", "b"], synthesize: false }); return budget.spent();`,
+      async (ref, args) => {
+        if (ref === "agents.run") {
+          return { status: "completed", text: String(args.name), usage: { input: 10, output: 5 } };
+        }
+        throw new Error(`Unexpected call: ${ref}`);
+      },
+      { ...options, tokenBudget: 100 },
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.value).toBe(30);
+  });
+
+  it("counts rlm.query usage toward budget.spent()", async () => {
+    const result = await new QuickJsRuntime().execute(
+      `await rlm.query({ task: "map" }); return budget.spent();`,
+      async (ref) => {
+        if (ref === "agents.run") {
+          return { status: "completed", text: "done", usage: { input: 7, output: 3 } };
+        }
+        throw new Error(`Unexpected call: ${ref}`);
+      },
+      { ...options, tokenBudget: 100 },
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.value).toBe(10);
+  });
+
+  it("preempts the council synthesizer when roles exhaust the token budget", async () => {
+    const calls: string[] = [];
+    const result = await new QuickJsRuntime().execute(
+      `await council.run({ task: "review", roles: ["a", "b"] }); return "done";`,
+      async (ref, args) => {
+        if (ref === "agents.run") {
+          calls.push(String(args.name));
+          return { status: "completed", text: "x", usage: { input: 100, output: 50 } };
+        }
+        throw new Error(`Unexpected call: ${ref}`);
+      },
+      { ...options, tokenBudget: 20 },
+    );
+    expect(result.error).toContain("token budget exhausted");
+    expect(calls).toEqual(["a", "b"]);
+  });
 });

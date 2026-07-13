@@ -30,7 +30,7 @@ One type-checked TS program in a QuickJS sandbox. Only the `return` value reache
 Aliases: `cmd`→`command`, `query`→`pattern`, `file`→`path`, `dir`→`path`.
 
 ## `tools` — discovery & generic calls
-Refs namespaced: `pi.grep`, `extensions.<tool>`, `mcp.<server>.<tool>`; bare names rejected. `tools.providers()`→`[{name,description}]` · `tools.search({query,limit?})`→`FabricAction[]`(`ref,name,description,inputSchema,risk`) · `tools.describe({ref})`→full `FabricAction` (read `inputSchema` first) · `tools.call({ref,args?})` · `tools.list({provider?,namespace?,query?,limit?})` · `extensions.<tool>(args)` (full code mode only).
+Refs namespaced: `pi.grep`, `extensions.<tool>`, `mcp.<server>.<tool>`; bare names rejected. `tools.providers()`→`[{name,description}]` · `tools.search({query,limit?})`→`FabricAction[]`(`ref,name,description,inputSchema,risk`) · `tools.describe({ref})`→full `FabricAction` (read `inputSchema` first) · `tools.call({ref,args?})` · `tools.list({provider?,namespace?,query?,limit?})` · `tools.models()`→`[{provider,id,name,key}]` (canonical `key` is `"provider/id"`; pass it to `agents.run`/`agents.create` `model` — a bare id may not resolve) · `extensions.<tool>(args)` (full code mode only).
 
 ## Error recovery: read, describe, retry
 Read the line-numbered error → `await tools.describe({ref})` for the schema → match `inputSchema`, rerun (don't guess). Common mistakes: two positional args; bare ref (`grep`→`pi.grep`).

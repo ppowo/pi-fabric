@@ -8,7 +8,7 @@ disable-model-invocation: true
 
 Start an emergent advisor using `fabric_exec`; never install or invoke an external advisor extension.
 
-Treat skill arguments as an optional review focus. Put the completed advisor prompt in `strings.instructions` and the stable name `advisor` in `strings.name`, then call `fabric_exec` once with:
+Treat skill arguments as an optional review focus. Put the completed advisor prompt in `strings.instructions` and the stable name `advisor` in `strings.name`. Optionally set `strings.model` to a `provider/id` key or model id substring to pin the actor's model at creation via `tools.models()` lookup; omitted means it inherits the host model. An actor's model is fixed at creation — sending it a message later cannot switch the underlying model, so set it here. Then call `fabric_exec` once with:
 
 ```ts
 await workflow.configure({
@@ -20,6 +20,14 @@ const current = await agents.actors();
 const existing = current.find((actor) => actor.name === π.name && actor.status !== "stopped");
 if (existing) return { reused: true, actor: existing };
 
+let model;
+if (π.model) {
+  const models = await tools.models();
+  const needle = π.model.toLowerCase();
+  model = models.find(
+    (m) => m.key === needle || m.id.toLowerCase().includes(needle),
+  )?.key;
+}
 const actor = await agents.create({
   name: π.name,
   instructions: π.instructions,
@@ -29,6 +37,7 @@ const actor = await agents.create({
   triggerTurn: false,
   coalesce: true,
   tools: ["read", "grep", "find", "ls"],
+  ...(model ? { model } : {}),
 });
 return {
   started: true,
