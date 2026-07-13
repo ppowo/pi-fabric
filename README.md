@@ -328,11 +328,13 @@ Pi discovers these package skills automatically:
 | Command                            | Pattern                                                                 |
 | ---------------------------------- | ----------------------------------------------------------------------- |
 | `/skill:fabric-supervisor <goal>`  | Persistent goal watcher driven by `agent_settled` and tool-error events |
-| `/skill:fabric-advisor [focus]`    | Turn-by-turn peer reviewer that prefers silence                         |
+| `/skill:fabric-advisor [focus]`    | Decision-point peer reviewer (idle and tool errors) that prefers silence                         |
 | `/skill:fabric-ambient <role>`     | Meta-pattern for custom event-driven ambient actors                     |
 | `/skill:fabric-workflow <task>`    | Code-held phases, fan-out, pipelines, structured output, and synthesis  |
 | `/skill:fabric-swarm <objective>`  | Persistent actors, durable topics, and CAS-based shared tasks           |
 | `/skill:fabric-council <decision>` | Bounded independent perspectives plus synthesis                         |
+
+`fabric-exec` is the one discoverable reference skill: it holds the full `fabric_exec` API (core `pi.*` tools, `tools` discovery, `π` strings, error recovery) plus `references/` files for MCP, agents/rlm, and mesh loaded by relative path (not separate skills). It appears in `<available_skills>`; load it via `read` before your first `fabric_exec` call or when a call errors.
 
 Supervisor and advisor are deliberately skills rather than hard-coded host services: the skill writes ordinary Fabric code over the same actor primitive available to every other pattern.
 

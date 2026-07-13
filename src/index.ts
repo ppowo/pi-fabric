@@ -108,6 +108,7 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
         "Compose Pi core tools, MCP tools, workflows, persistent actors, agents, and mesh state",
       promptGuidelines: [
         "Inside fabric_exec, route by surface: MCP is mcp.<server>.<tool>(args); subagents and persistent actors are agents.*; mesh coordination is mesh.*; scripted fan-out is workflow.agent()/parallel()/pipeline()/phase() (aliases agent/parallel/pipeline/phase), with workflow.configure()/item()/event() for a live dashboard on long setups.",
+        "`pi.*` tools take a single options object, never positional args. The `fabric-exec` skill has the full reference (exact signatures, `tools` discovery, `π` strings, validate/describe/retry) plus reference files for MCP, agents/rlm, and mesh.",
         "Use agents.create() for persistent mailbox actors; subscribe to host events for ambient behavior or mesh topics for peer coordination; directive response mode when silence/intervention is conditional.",
         "Return only the compact final value; intermediate results stay in the sandbox. Use council.run()/rlm.query() only when their cost is justified.",
         "workflow.parallel accepts (items, mapper, concurrency?) to map over items or (thunks, concurrency?) to run zero-arg functions; concurrency may be a bare number.",
@@ -566,7 +567,7 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
     state.widgetDismissedAt = Date.now();
     if (!pi.getActiveTools().includes("fabric_exec")) return;
     const guidance = (fullCodeMode
-      ? "Pi Fabric full code mode is on: fabric_exec is the only path to Pi core tools — call them as `pi.<tool>(args)` (read, bash, edit, write, grep, find, ls); direct core tools are unavailable. `π.<key>` is only for named strings from the `strings` parameter. Hidden extension tools are discoverable via `tools.search({ query })`/`tools.describe({ ref })` and callable via `extensions.<tool>(args)` or `tools.call({ ref, args })`."
+      ? "Pi Fabric full code mode is on: fabric_exec is the only path to Pi core tools — call them as `pi.<tool>(options)`, a single options object (read, bash, edit, write, grep, find, ls); direct core tools are unavailable. `π.<key>` is only for named strings from the `strings` parameter. Hidden extension tools are discoverable via `tools.search({ query })`/`tools.describe({ ref })` and callable via `extensions.<tool>(options)` or `tools.call({ ref, args })`. The `fabric-exec` skill has the full reference, with reference files for MCP, agents/rlm, and mesh."
       : "Pi Fabric is in orchestration-only mode. Keep Pi core and registered extension tools on their native direct execution path. Inside fabric_exec, use only MCP, agents, actors, workflows, mesh coordination, councils, recursive queries, and explicit Fabric providers; pi.* and extensions.* are unavailable.")
       + "\n\n" + FABRIC_TEMPLATE_LITERAL_CAVEAT;
     return {
