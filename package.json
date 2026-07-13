@@ -47,6 +47,10 @@
     "type": "git",
     "url": "git+https://github.com/monotykamary/pi-fabric.git"
   },
+  "homepage": "https://github.com/monotykamary/pi-fabric#readme",
+  "bugs": {
+    "url": "https://github.com/monotykamary/pi-fabric/issues"
+  },
   "engines": {
     "node": ">=24"
   },
