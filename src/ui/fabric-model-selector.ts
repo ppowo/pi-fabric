@@ -1,4 +1,4 @@
-import { DynamicBorder, type Theme } from "@earendil-works/pi-coding-agent";
+import { type Theme } from "@earendil-works/pi-coding-agent";
 import {
   Container,
   type Focusable,
@@ -35,7 +35,7 @@ export interface FabricModelSelectorOptions {
 
 /**
  * A /model-style searchable model picker adapted for Fabric: same look
- * (dynamic borders, search input, list with `[provider]` badges and a \u2713 on
+ * (search input, list with `[provider]` badges and a ✓ on
  * the current row, scroll indicator, and a "Model Name:" footer) but it writes
  * the Fabric default-model setting instead of the host's default model, and
  * pins an "Inherit" row on top. Order respects pi-model-sort (most recently
@@ -70,7 +70,6 @@ export class FabricModelSelector extends Container implements Focusable {
     const current = this.allEntries.findIndex((entry) => entry.value === this.currentValue);
     this.selectedIndex = current >= 0 ? current : 0;
 
-    this.addChild(new DynamicBorder((text) => this.theme.fg("border", text)));
     this.addChild(new Spacer(1));
     this.addChild(
       new Text(
@@ -93,7 +92,6 @@ export class FabricModelSelector extends Container implements Focusable {
     this.addChild(new Spacer(1));
     this.addChild(this.listContainer);
     this.addChild(new Spacer(1));
-    this.addChild(new DynamicBorder((text) => this.theme.fg("border", text)));
     this.updateList();
   }
 
@@ -198,7 +196,7 @@ export class FabricModelSelector extends Container implements Focusable {
       const isSelected = i === this.selectedIndex;
       const isCurrent = entry.value === this.currentValue;
       const badge = entry.provider ? ` ${this.theme.fg("muted", `[${entry.provider}]`)}` : "";
-      const check = isCurrent ? this.theme.fg("success", " \u2713") : "";
+      const check = isCurrent ? this.theme.fg("success", " ✓") : "";
       const line = isSelected
         ? `${this.theme.fg("accent", "\u2192 ")}${this.theme.fg("accent", entry.id)}${badge}${check}`
         : `  ${entry.id}${badge}${check}`;
