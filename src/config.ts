@@ -134,7 +134,7 @@ export const DEFAULT_FABRIC_CONFIG: FabricConfig = {
     widget: "auto",
     maxRows: 6,
     refreshMs: 500,
-    lingerMs: 10_000,
+    lingerMs: 2_000,
     eventHistory: 80,
   },
   mesh: {
