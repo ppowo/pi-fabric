@@ -9,6 +9,8 @@ const statusFile = args.get("status-file");
 const taskFile = args.get("task-file");
 const schemaFile = args.get("schema-file");
 const schema = schemaFile ? JSON.parse(fs.readFileSync(schemaFile, "utf8")) : undefined;
+const task = fs.readFileSync(taskFile, "utf8");
+const fail = task.includes("FAIL_DIRECTIVE");
 const directive = schema?.properties?.action
   ? { action: "message", message: "fake actor advice" }
   : undefined;
@@ -16,8 +18,8 @@ const now = Date.now();
 const record = {
   id: args.get("id"),
   name: args.get("name"),
-  task: fs.readFileSync(taskFile, "utf8"),
-  status: "completed",
+  task,
+  status: fail ? "failed" : "completed",
   transport: args.get("transport"),
   fullCodeMode: args.get("full-code-mode"),
   cwd: args.get("cwd"),
@@ -26,8 +28,9 @@ const record = {
   finishedAt: now,
   turns: 1,
   toolCalls: 0,
-  text: directive ? JSON.stringify(directive) : "fake worker complete",
-  ...(directive ? { value: directive } : {}),
+  text: directive && !fail ? JSON.stringify(directive) : "fake worker complete",
+  ...(directive && !fail ? { value: directive } : {}),
+  ...(fail ? { error: "Structured agent output was invalid: Unexpected token (output: not json)" } : {}),
   exitCode: 0,
   usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, cost: 0 },
 };

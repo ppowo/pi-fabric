@@ -139,10 +139,52 @@ const terminateChild = (child: ChildProcess, signal: NodeJS.Signals): void => {
   } catch { /* child process group already exited */ }
 };
 
+const extractBalancedJson = (text: string, start: number): string | null => {
+  const open = text[start];
+  if (open !== "{" && open !== "[") return null;
+  const close = open === "{" ? "}" : "]";
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === open) depth++;
+    else if (ch === close) {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+};
+
 const parseStructuredValue = (text: string): unknown => {
   const trimmed = text.trim();
-  const fenced = trimmed.match(/^```(?:json)?\s*\n([\s\S]*?)\n```$/i);
-  return JSON.parse(fenced?.[1]?.trim() ?? trimmed) as unknown;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    // Whole text is not JSON; try extraction below.
+  }
+  const fenced = trimmed.match(/```(?:json)?\s*\n([\s\S]*?)\n```/i);
+  if (fenced?.[1]) {
+    try {
+      return JSON.parse(fenced[1].trim());
+    } catch {
+      // Fenced block is not JSON; try balanced extraction below.
+    }
+  }
+  const start = trimmed.search(/[{\[]/);
+  if (start >= 0) {
+    const balanced = extractBalancedJson(trimmed, start);
+    if (balanced) return JSON.parse(balanced);
+  }
+  return JSON.parse(trimmed);
 };
 
 const main = async (): Promise<void> => {
@@ -380,7 +422,10 @@ const main = async (): Promise<void> => {
       record.value = value;
     } catch (error) {
       record.status = "failed";
-      record.error = `Structured agent output was invalid: ${error instanceof Error ? error.message : String(error)}`;
+      const reason = error instanceof Error ? error.message : String(error);
+      const output = record.text.trim();
+      const snippet = output.slice(0, 200);
+      record.error = `Structured agent output was invalid: ${reason}${snippet ? ` (output: ${snippet}${output.length > 200 ? "…" : ""})` : ""}`;
     }
   }
   delete record.currentTool;

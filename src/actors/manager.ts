@@ -328,10 +328,12 @@ export class ActorManager {
     const actor = this.#requireActor(id);
     await this.stop(id);
     await actor.drain?.catch(() => undefined);
+    const retainedRunId = actor.lastRunId;
     this.#actors.delete(id);
     fs.rmSync(path.dirname(actor.sessionFile), { recursive: true, force: true });
     this.#saveActors();
     await this.mesh.delete({ key: this.#presenceKey(actor.id) }).catch(() => ({ deleted: false }));
+    if (retainedRunId) await this.subagents.cleanup(retainedRunId).catch(() => ({ cleaned: false }));
     return { removed: true };
   }
 
@@ -426,6 +428,8 @@ export class ActorManager {
       actor.abortController = abortController;
       await this.#publishPresence(actor);
       let runId: string | undefined;
+      const previousRunId = actor.lastRunId;
+      let runCompleted = false;
       try {
         const result = await this.subagents.run(
           this.#runRequest(actor, item),
@@ -433,7 +437,29 @@ export class ActorManager {
         );
         runId = result.id;
         actor.lastRunId = result.id;
+        runCompleted = result.status === "completed";
         if (result.status !== "completed") {
+          if (actor.responseMode === "directive") {
+            // A failed directive run is non-fatal: stay silent and keep the
+            // actor ambient instead of erroring out. Record the run error for
+            // debugging; the failed run itself is retained (see finally) so
+            // agents.status(actor.lastRunId) can inspect the full output.
+            const silent: FabricActorMessage = {
+              id: randomUUID(),
+              actorId: actor.id,
+              actorName: actor.name,
+              direction: "out",
+              source: item.source,
+              createdAt: Date.now(),
+              action: "silent",
+              data: { runError: result.error || `Actor run ${result.status}`, runId: result.id },
+              runId: result.id,
+              usage: result.usage,
+            };
+            this.#recordMessage(actor, silent);
+            item.resolve?.(structuredClone(silent));
+            continue;
+          }
           throw new Error(result.error || `Actor run ${result.status}`);
         }
         const message = this.#outgoingMessage(actor, item, result);
@@ -481,7 +507,15 @@ export class ActorManager {
         this.#recordMessage(actor, failed);
         item.reject?.(new Error(message));
       } finally {
-        if (runId) await this.subagents.cleanup(runId).catch(() => ({ cleaned: false }));
+        // Retain failed runs for debugging (agents.status(actor.lastRunId)
+        // inspects the full agent output and log); release completed runs and
+        // any previously retained run to avoid unbounded growth.
+        if (previousRunId && previousRunId !== runId) {
+          await this.subagents.cleanup(previousRunId).catch(() => ({ cleaned: false }));
+        }
+        if (runId && runCompleted) {
+          await this.subagents.cleanup(runId).catch(() => ({ cleaned: false }));
+        }
         delete actor.abortController;
         actor.updatedAt = Date.now();
         if (actor.status !== "stopped") actor.status = actor.queue.length > 0 ? "queued" : "idle";
@@ -658,7 +692,6 @@ export class ActorManager {
       createdAt: actor.createdAt,
       updatedAt: actor.updatedAt,
       ...(actor.lastRunId ? { lastRunId: actor.lastRunId } : {}),
-      ...(actor.lastError ? { lastError: actor.lastError } : {}),
     }));
     atomicWrite(this.#registryPath, { format: 1, actors });
   }
@@ -738,7 +771,6 @@ export class ActorManager {
         createdAt: record.createdAt,
         updatedAt: Date.now(),
         ...(typeof record.lastRunId === "string" ? { lastRunId: record.lastRunId } : {}),
-        ...(typeof record.lastError === "string" ? { lastError: record.lastError } : {}),
       };
       if (Array.isArray(record.messages)) {
         for (const candidate of record.messages.slice(-MESSAGE_HISTORY_LIMIT)) {

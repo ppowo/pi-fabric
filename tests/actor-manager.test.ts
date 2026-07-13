@@ -95,6 +95,40 @@ describe("ActorManager", () => {
     expect(deliveries).toEqual(["fake actor advice"]);
   });
 
+  it("stays ambient and retains the failed run when a directive run fails", async () => {
+    const { actors, subagents } = setup();
+    const actor = await actors.create({
+      name: "supervisor",
+      instructions: "Watch and steer only when needed.",
+      responseMode: "directive",
+      delivery: "steer",
+    });
+
+    const reply = await actors.ask(actor.id, "FAIL_DIRECTIVE");
+    expect(reply).toMatchObject({ action: "silent" });
+    expect((reply.data as { runError: string }).runError).toContain(
+      "Structured agent output was invalid",
+    );
+
+    await waitFor(() => actors.status(actor.id).status === "idle");
+    const status = actors.status(actor.id);
+    expect(status).toMatchObject({ status: "idle" });
+    expect(status.lastError).toBeUndefined();
+
+    // The failed run is retained for debugging (agents.status(lastRunId)), not cleaned up.
+    const retained = subagents.list();
+    expect(retained).toHaveLength(1);
+    const run = subagents.status(retained[0]!.id);
+    expect(run).toMatchObject({
+      status: "failed",
+      error: expect.stringContaining("Structured agent output was invalid"),
+    });
+
+    // Removing the actor releases the retained run.
+    await actors.remove(actor.id);
+    expect(subagents.list()).toEqual([]);
+  });
+
   it("restores persistent ambient actors for the same Pi session", async () => {
     const setupState = setup(true);
     const actor = await setupState.actors.create({
