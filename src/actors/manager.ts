@@ -55,6 +55,7 @@ interface ManagedActor {
   lastError?: string;
   abortController?: AbortController;
   drain?: Promise<void>;
+  draining: boolean;
 }
 
 const ACTOR_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9 _.-]{0,59}$/;
@@ -225,6 +226,7 @@ export class ActorManager {
       ...(request.timeoutMs ? { timeoutMs: request.timeoutMs } : {}),
       sessionFile: path.join(actorDirectory, "session.jsonl"),
       queue: [],
+      draining: false,
       messages: [],
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -536,6 +538,7 @@ export class ActorManager {
       if (existing) {
         existing.payload = payload;
         existing.createdAt = Date.now();
+        this.#ensureDrain(actor);
         return existing;
       }
     }
@@ -566,123 +569,147 @@ export class ActorManager {
       data: structuredClone(payload),
     });
     void this.#publishPresence(actor);
-    actor.drain ??= this.#drain(actor).finally(() => {
-      delete actor.drain;
-    });
+    this.#ensureDrain(actor);
     return item;
   }
 
+  /**
+   * Ensure exactly one drain loop is processing the actor's queue. The loop
+   * clears `actor.draining` synchronously when it exits, so a host-event
+   * enqueue that lands in the microtask window between the loop exiting and
+   * this drain's promise settling still observes `draining === false` and
+   * starts a fresh drain — preventing a queued item from being stranded with
+   * no drain to process it (the "stuck at queue:1" race).
+   */
+  #ensureDrain(actor: ManagedActor): void {
+    if (actor.draining || actor.status === "stopped" || this.#closing) return;
+    actor.draining = true;
+    const drain = this.#drain(actor);
+    actor.drain = drain;
+    const release = (): void => {
+      if (actor.drain === drain) delete actor.drain;
+    };
+    drain.then(release, release);
+  }
+
   async #drain(actor: ManagedActor): Promise<void> {
-    while (actor.queue.length > 0 && actor.status !== "stopped" && !this.#closing) {
-      const item = actor.queue.shift();
-      if (!item) break;
-      actor.status = "running";
-      actor.updatedAt = Date.now();
-      delete actor.lastError;
-      const abortController = new AbortController();
-      actor.abortController = abortController;
-      await this.#publishPresence(actor);
-      let runId: string | undefined;
-      const previousRunId = actor.lastRunId;
-      let runCompleted = false;
-      try {
-        const result = await this.subagents.run(
-          this.#runRequest(actor, item),
-          abortController.signal,
-        );
-        runId = result.id;
-        actor.lastRunId = result.id;
-        runCompleted = result.status === "completed";
-        if (result.status !== "completed") {
-          if (actor.responseMode === "directive") {
-            // A failed directive run is non-fatal: stay silent and keep the
-            // actor ambient instead of erroring out. Record the run error for
-            // debugging; the failed run itself is retained (see finally) so
-            // agents.status(actor.lastRunId) can inspect the full output.
-            const silent: FabricActorMessage = {
-              id: randomUUID(),
-              actorId: actor.id,
-              actorName: actor.name,
-              direction: "out",
-              source: item.source,
-              createdAt: Date.now(),
-              action: "silent",
-              data: { runError: result.error || `Actor run ${result.status}`, runId: result.id },
-              runId: result.id,
-              usage: result.usage,
-            };
-            this.#recordMessage(actor, silent);
-            item.resolve?.(structuredClone(silent));
-            continue;
-          }
-          throw new Error(result.error || `Actor run ${result.status}`);
-        }
-        const message = this.#outgoingMessage(actor, item, result);
-        this.#recordMessage(actor, message);
-        await this.mesh
-          .publish({
-            topic: "fabric.actor.output",
-            kind: message.action ?? "message",
-            from: { id: actor.id, name: actor.name, kind: "actor", sessionId: this.sessionId },
-            ...(message.text ? { text: message.text } : {}),
-            ...(message.data !== undefined ? { data: message.data } : {}),
-          })
-          .catch(() => undefined);
-        if (
-          (message.action === "message" || message.action === "stop") &&
-          message.text &&
-          actor.delivery !== "mailbox"
-        ) {
-          try {
-            this.onDeliver({
-              actor: this.#publicInfo(actor),
-              message: structuredClone(message),
-              delivery: actor.delivery,
-              triggerTurn: actor.triggerTurn,
-            });
-          } catch { /* skip non-cloneable or undeliverable message */ }
-        }
-        item.resolve?.(structuredClone(message));
-        if (message.action === "stop") {
-          actor.status = "stopped";
-          actor.queue.splice(0).forEach((queued) => queued.reject?.(new Error("Actor stopped")));
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        actor.lastError = message;
-        const failed: FabricActorMessage = {
-          id: randomUUID(),
-          actorId: actor.id,
-          actorName: actor.name,
-          direction: "out",
-          source: item.source,
-          createdAt: Date.now(),
-          error: message,
-        };
-        this.#recordMessage(actor, failed);
-        item.reject?.(new Error(message));
-      } finally {
-        // Retain a durable copy of the run's event log + status in the
-        // actor's directory so agents.log / /fabric log can inspect what the
-        // actor sent to and received from its model, even after a successful
-        // run cleans up the in-memory handle and tmp run directory. Failed
-        // runs stay in the subagent registry for agents.status(lastRunId).
-        if (runId) {
-          await this.#retainRunLog(actor, runId).catch(() => undefined);
-        }
-        // Release the in-memory handle and tmp run dir for completed runs;
-        // failed runs are retained for agents.status(actor.lastRunId).
-        if (previousRunId && previousRunId !== runId) {
-          await this.subagents.cleanup(previousRunId).catch(() => ({ cleaned: false }));
-        }
-        if (runId && runCompleted) {
-          await this.subagents.cleanup(runId).catch(() => ({ cleaned: false }));
-        }
-        delete actor.abortController;
+    try {
+      while (actor.queue.length > 0 && actor.status !== "stopped" && !this.#closing) {
+        const item = actor.queue.shift();
+        if (!item) break;
+        actor.status = "running";
         actor.updatedAt = Date.now();
-        if (actor.status !== "stopped") actor.status = actor.queue.length > 0 ? "queued" : "idle";
+        delete actor.lastError;
+        const abortController = new AbortController();
+        actor.abortController = abortController;
         await this.#publishPresence(actor);
+        let runId: string | undefined;
+        const previousRunId = actor.lastRunId;
+        let runCompleted = false;
+        try {
+          const result = await this.subagents.run(
+            this.#runRequest(actor, item),
+            abortController.signal,
+          );
+          runId = result.id;
+          actor.lastRunId = result.id;
+          runCompleted = result.status === "completed";
+          if (result.status !== "completed") {
+            if (actor.responseMode === "directive") {
+              // A failed directive run is non-fatal: stay silent and keep the
+              // actor ambient instead of erroring out. Record the run error for
+              // debugging; the failed run itself is retained (see finally) so
+              // agents.status(actor.lastRunId) can inspect the full output.
+              const silent: FabricActorMessage = {
+                id: randomUUID(),
+                actorId: actor.id,
+                actorName: actor.name,
+                direction: "out",
+                source: item.source,
+                createdAt: Date.now(),
+                action: "silent",
+                data: { runError: result.error || `Actor run ${result.status}`, runId: result.id },
+                runId: result.id,
+                usage: result.usage,
+              };
+              this.#recordMessage(actor, silent);
+              item.resolve?.(structuredClone(silent));
+              continue;
+            }
+            throw new Error(result.error || `Actor run ${result.status}`);
+          }
+          const message = this.#outgoingMessage(actor, item, result);
+          this.#recordMessage(actor, message);
+          await this.mesh
+            .publish({
+              topic: "fabric.actor.output",
+              kind: message.action ?? "message",
+              from: { id: actor.id, name: actor.name, kind: "actor", sessionId: this.sessionId },
+              ...(message.text ? { text: message.text } : {}),
+              ...(message.data !== undefined ? { data: message.data } : {}),
+            })
+            .catch(() => undefined);
+          if (
+            (message.action === "message" || message.action === "stop") &&
+            message.text &&
+            actor.delivery !== "mailbox"
+          ) {
+            try {
+              this.onDeliver({
+                actor: this.#publicInfo(actor),
+                message: structuredClone(message),
+                delivery: actor.delivery,
+                triggerTurn: actor.triggerTurn,
+              });
+            } catch { /* skip non-cloneable or undeliverable message */ }
+          }
+          item.resolve?.(structuredClone(message));
+          if (message.action === "stop") {
+            actor.status = "stopped";
+            actor.queue.splice(0).forEach((queued) => queued.reject?.(new Error("Actor stopped")));
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          actor.lastError = message;
+          const failed: FabricActorMessage = {
+            id: randomUUID(),
+            actorId: actor.id,
+            actorName: actor.name,
+            direction: "out",
+            source: item.source,
+            createdAt: Date.now(),
+            error: message,
+          };
+          this.#recordMessage(actor, failed);
+          item.reject?.(new Error(message));
+        } finally {
+          // Retain a durable copy of the run's event log + status in the
+          // actor's directory so agents.log / /fabric log can inspect what the
+          // actor sent to and received from its model, even after a successful
+          // run cleans up the in-memory handle and tmp run directory. Failed
+          // runs stay in the subagent registry for agents.status(lastRunId).
+          if (runId) {
+            await this.#retainRunLog(actor, runId).catch(() => undefined);
+          }
+          // Release the in-memory handle and tmp run dir for completed runs;
+          // failed runs are retained for agents.status(actor.lastRunId).
+          if (previousRunId && previousRunId !== runId) {
+            await this.subagents.cleanup(previousRunId).catch(() => ({ cleaned: false }));
+          }
+          if (runId && runCompleted) {
+            await this.subagents.cleanup(runId).catch(() => ({ cleaned: false }));
+          }
+          delete actor.abortController;
+          actor.updatedAt = Date.now();
+          if (actor.status !== "stopped") actor.status = actor.queue.length > 0 ? "queued" : "idle";
+          await this.#publishPresence(actor);
+        }
       }
+    } finally {
+      // Mark the drain inactive the moment its loop exits (or throws) so a
+      // concurrent #ensureDrain observes `draining === false` and starts a
+      // fresh drain instead of stranding a just-enqueued item.
+      actor.draining = false;
     }
   }
 
@@ -972,6 +999,7 @@ export class ActorManager {
         ...(typeof record.timeoutMs === "number" ? { timeoutMs: record.timeoutMs } : {}),
         sessionFile: path.join(this.#actorRoot, record.id, "session.jsonl"),
         queue: [],
+        draining: false,
         messages: [],
         createdAt: record.createdAt,
         updatedAt: Date.now(),
