@@ -575,13 +575,20 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
       if (!state.initialized || !state.config.mesh.enabled) return;
       let halted = 0;
       try {
+        // A lone Esc that lands while Fabric is already in a stop-the-world
+        // halt is a no-op: the gate is armed and resumes on the next message,
+        // so don't repeat the notice — a double-Esc to open /tree would
+        // otherwise pop it on every press. Only the first Esc of a halt
+        // session notifies.
+        if (state.actors.halted) return;
         halted = state.actors.haltAll().halted;
       } catch {
         return;
       }
-      // Always notify: the stop-the-world gate arms even when no actor had
-      // active work to abort, so the user knows Fabric is paused and that it
-      // resumes on the next message.
+      // Nothing had work to abort: the gate armed silently, so skip the
+      // notice — a lone Esc with no active actors should not pop a
+      // "halted 0 actors" line.
+      if (halted === 0) return;
       context.ui.notify(
         `Fabric: halted ${halted} actor${halted === 1 ? "" : "s"} (Esc) · resumes on next message`,
         "warning",

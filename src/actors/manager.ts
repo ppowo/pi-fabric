@@ -480,6 +480,17 @@ export class ActorManager {
   }
 
   /**
+   * Whether the stop-the-world gate is currently armed. haltAll() arms it
+   * (ESC stop-the-world) and the "input" host event lifts it when the user
+   * resumes with a new message. Read-only view of the private gate so the
+   * ESC handler can treat a repeated lone Esc while already halted as a
+   * no-op rather than re-arming and re-notifying.
+   */
+  get halted(): boolean {
+    return this.#halted;
+  }
+
+  /**
    * Interrupt every non-stopped actor: abort its in-flight run (if any) and
    * reject every queued message so subsequent execution is cancelled. Unlike
    * stop(), actors stay alive and idle — they keep their identity, session,

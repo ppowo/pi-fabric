@@ -524,6 +524,28 @@ describe("ActorManager", () => {
     await waitFor(() => actors.status(actor.id).status === "idle");
   });
 
+  it("exposes the stop-the-world gate via halted, lifting it on the next message", async () => {
+    const { actors } = setup();
+
+    // The gate starts disarmed.
+    expect(actors.halted).toBe(false);
+
+    // haltAll() arms the gate even when no actor had active work to abort.
+    expect(actors.haltAll()).toEqual({ halted: 0 });
+    expect(actors.halted).toBe(true);
+
+    // A repeated halt is a no-op (the gate is already armed) — the index.ts
+    // ESC handler reads halted to avoid re-notifying on a double-Esc.
+    expect(actors.haltAll()).toEqual({ halted: 0 });
+    expect(actors.halted).toBe(true);
+
+    // The next message ("input") lifts the gate; it can then re-arm.
+    expect(actors.dispatchHostEvent("input", { turn: 1 })).toBe(0);
+    expect(actors.halted).toBe(false);
+    expect(actors.haltAll()).toEqual({ halted: 0 });
+    expect(actors.halted).toBe(true);
+  });
+
   it("setEvents replaces an actor's host-event subscriptions and dedupes", async () => {
     const { actors } = setup();
     const actor = await actors.create({
