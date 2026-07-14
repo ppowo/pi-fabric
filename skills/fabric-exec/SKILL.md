@@ -6,8 +6,8 @@ description: >-
   core `pi` tools (read/bash/edit/write/grep/find/ls) with exact signatures,
   `tools` discovery and introspection, `π` named strings,
   and the validate, describe, retry error loop. Load before your first
-  `fabric_exec` call and whenever a call errors on argument shape. For MCP,
-  agents/rlm, and mesh, see `references/mcp.md`, `references/agents.md`, `references/mesh.md`.
+  `fabric_exec` call and whenever a call errors on argument shape. MCP is
+  discoverable via `tools`; see `references/mcp.md`.
 ---
 
 # fabric_exec — core reference
@@ -35,5 +35,5 @@ Refs namespaced: `pi.grep`, `extensions.<tool>`, `mcp.<server>.<tool>`; bare nam
 ## Error recovery: read, describe, retry
 Read the line-numbered error → `await tools.describe({ref})` for the schema → match `inputSchema`, rerun (don't guess). Common mistakes: two positional args; bare ref (`grep`→`pi.grep`).
 
-## Other surfaces
-`references/mcp.md` (mcp.*) · `references/agents.md` (agents/actors/rlm) · `references/mesh.md` (topics/cas state). Workflow/councils → `/skill:fabric-workflow`, `/skill:fabric-council`.
+## Other surfaces (opt-in)
+MCP tools are discoverable via `tools` (`mcp.<server>.<tool>`); see `references/mcp.md`. Multi-agent orchestration is opt-in: load `/skill:fabric-workflow`, `/skill:fabric-council`, or `/skill:fabric-rlm` (API detail in `references/agents.md`, `references/mesh.md`).

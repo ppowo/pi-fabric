@@ -51,7 +51,7 @@ const FABRIC_SKILLS_DIR = path.resolve(
 // re-registers the tool on several lifecycle events, so the system prompt is
 // the more reliable cached surface for persistent guidance.
 const FABRIC_TEMPLATE_LITERAL_CAVEAT =
-  "Caveat: when a fabric_exec program builds a string containing literal `${...}` (shell snippets, MCP/agent args, grep patterns), avoid TS template literals — TS interpolates `${var}` into a 'Cannot find name' type error, or substitutes silently if a same-named variable exists. Use a plain quoted string or pass the content via the `strings` param and reference it as `π.key`.";
+  "Caveat: when a fabric_exec program builds a string containing literal `${...}` (shell snippets, tool args, grep patterns), avoid TS template literals — TS interpolates `${var}` into a 'Cannot find name' type error, or substitutes silently if a same-named variable exists. Use a plain quoted string or pass the content via the `strings` param and reference it as `π.key`.";
 
 const safeTerminalText = (value: string): string =>
   value.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, (character) => {
@@ -139,15 +139,12 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
       name: "fabric_exec",
       label: "Fabric",
       description:
-        "Execute type-checked TypeScript in a QuickJS sandbox for Pi core tools, MCP, agents, actors, workflows, mesh coordination, councils, and recursive orchestration. In full code mode, this is the exclusive path to Pi core tools.",
+        "Execute type-checked TypeScript in a QuickJS sandbox for Pi core tools, discovery, and extensions. In full code mode, this is the exclusive path to Pi core tools.",
       promptSnippet:
-        "Compose Pi core tools, MCP tools, workflows, persistent actors, agents, and mesh state",
+        "Pi core tools, tool discovery, and extensions",
       promptGuidelines: [
-        "Inside fabric_exec, route by surface: MCP is mcp.<server>.<tool>(args); subagents and persistent actors are agents.*; mesh coordination is mesh.*; scripted fan-out is workflow.agent()/parallel()/pipeline()/phase() (aliases agent/parallel/pipeline/phase), with workflow.configure()/item()/event() for a live dashboard on long setups.",
-        "`pi.*` tools take a single options object, never positional args. The `fabric-exec` skill has the full reference (exact signatures, `tools` discovery, `π` strings, validate/describe/retry) plus reference files for MCP, agents/rlm, and mesh.",
-        "Use agents.create() for persistent mailbox actors; subscribe to host events for ambient behavior or mesh topics for peer coordination; directive response mode when silence/intervention is conditional.",
-        "Batch independent operations in one `fabric_exec` program (`Promise.all` for parallel, sequential `await` for ordered), not one call per tool; keep dependent/conditional steps sequential. Return only the compact final value; intermediate results stay in the sandbox. Use council.run()/rlm.query() only when their cost is justified.",
-        "workflow.parallel accepts (items, mapper, concurrency?) to map over items or (thunks, concurrency?) to run zero-arg functions; concurrency may be a bare number.",
+        "Batch independent operations in one `fabric_exec` program (`Promise.all` for parallel, sequential `await` for ordered), not one call per tool; keep dependent/conditional steps sequential. Return only the compact final value; intermediate results stay in the sandbox.",
+        "The `fabric-exec` skill has exact signatures and the read-error → `tools.describe({ ref })` → retry loop; load it before your first call and on argument errors.",
       ],
       // The model-facing schema is intentionally flat: one large `code` string
       // plus scalar/optional params. Do not add nested arrays-of-objects with
@@ -160,7 +157,7 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
       parameters: Type.Object({
         code: Type.String({
           description:
-            "TypeScript function body. Top-level await and return are supported. Globals: tools, mcp, agents, mesh, workflow, agent, parallel, pipeline, phase, council, rlm, print, π (named strings via the `strings` param). In full code mode, also pi (Pi core tools) and extensions.",
+            "TypeScript function body. Top-level await and return are supported. Globals: `tools`, `print`, `π` (named strings via the `strings` param); full-code mode adds `pi` (core tools) and `extensions`. See session guidance / `fabric-exec` skill for surfaces and exact signatures.",
         }),
         strings: Type.Optional(
           Type.Record(Type.String(), Type.String(), {
@@ -664,8 +661,8 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
     state.widgetDismissedAt = Date.now();
     if (!pi.getActiveTools().includes("fabric_exec")) return;
     const guidance = (fullCodeMode
-      ? "Pi Fabric full code mode is on: fabric_exec is the only path to Pi core tools (read, bash, edit, write, grep, find, ls); direct core tools are unavailable. `π.<key>` is only for named strings from the `strings` parameter. Hidden extension tools are discoverable via `tools.search({ query })`/`tools.describe({ ref })` and callable via `extensions.<tool>(options)` or `tools.call({ ref, args })`."
-      : "Pi Fabric is in orchestration-only mode. Keep Pi core and registered extension tools on their native direct execution path. Inside fabric_exec, use only MCP, agents, actors, workflows, mesh coordination, councils, recursive queries, and explicit Fabric providers; pi.* and extensions.* are unavailable.")
+      ? "Pi Fabric full code mode is on: `fabric_exec` is the exclusive path to Pi core tools — call them as `pi.read`/`pi.bash`/`pi.edit`/`pi.write`/`pi.grep`/`pi.find`/`pi.ls` (single options object). `pi` is a dynamic proxy with no enumerable keys. `tools` is discovery + generic calls only: `tools.search`/`tools.describe`/`tools.call`/`tools.list`/`tools.providers`/`tools.models`; find MCP/extension tools via `tools.search`/`tools.list` and call via `extensions.<tool>(options)` or `tools.call({ ref, args })`. `π.<key>` is only for named strings from the `strings` parameter."
+      : "Pi Fabric is in orchestration-only mode. Pi core and registered extension tools stay on their native direct execution path; inside fabric_exec, `pi.*` and `extensions.*` are unavailable. Use `tools` (`tools.search`/`tools.describe`/`tools.call`/`tools.list`) to discover and invoke MCP and Fabric providers, plus the orchestration surfaces (agents, actors, mesh, workflow, council, rlm).")
       + "\n\n" + FABRIC_TEMPLATE_LITERAL_CAVEAT;
     return {
       systemPrompt: `${event.systemPrompt}\n\n${guidance}`,
