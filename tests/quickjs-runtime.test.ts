@@ -296,4 +296,25 @@ await Promise.all([
     expect(result.error).toContain("token budget exhausted");
     expect(calls).toEqual(["a", "b"]);
   });
+
+  it("routes agents.setEvents and agents.setInstructions to the actors provider", async () => {
+    const calls: string[] = [];
+    const result = await new QuickJsRuntime().execute(
+      `
+await agents.setEvents({ id: "a1", events: ["turn_end"] });
+await agents.setInstructions({ id: "a1", instructions: "Be brief." });
+return { done: true };
+`,
+      async (ref, args) => {
+        calls.push(ref);
+        if (ref === "agents.setEvents") return { id: args.id, status: "idle", name: "x" };
+        if (ref === "agents.setInstructions") return { id: args.id, status: "idle", name: "x" };
+        throw new Error(`Unexpected call: ${ref}`);
+      },
+      options,
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.value).toEqual({ done: true });
+    expect(calls).toEqual(["agents.setEvents", "agents.setInstructions"]);
+  });
 });
