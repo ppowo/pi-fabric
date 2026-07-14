@@ -210,6 +210,54 @@ describe("SubagentManager", () => {
     expect(result.model).toBe("gpt-override");
   });
 
+  it("forwards the configured default thinking when a call omits one", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-manager-"));
+    roots.push(root);
+    const config = { ...DEFAULT_FABRIC_CONFIG.subagents, thinking: "high" as const };
+    const manager = new SubagentManager(process.cwd(), config, {
+      workerPath: path.resolve("tests/fixtures/fake-worker.mjs"),
+      runRoot: root,
+      fullCodeMode: false,
+    });
+    managers.push(manager);
+    const result = await manager.run({ task: "Use the default thinking", transport: "process" });
+    expect(result.status).toBe("completed");
+    expect(result.thinking).toBe("high");
+  });
+
+  it("lets a per-call thinking override the configured default", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-manager-"));
+    roots.push(root);
+    const config = { ...DEFAULT_FABRIC_CONFIG.subagents, thinking: "high" as const };
+    const manager = new SubagentManager(process.cwd(), config, {
+      workerPath: path.resolve("tests/fixtures/fake-worker.mjs"),
+      runRoot: root,
+      fullCodeMode: false,
+    });
+    managers.push(manager);
+    const result = await manager.run({
+      task: "Override the thinking",
+      transport: "process",
+      thinking: "max",
+    });
+    expect(result.status).toBe("completed");
+    expect(result.thinking).toBe("max");
+  });
+
+  it("forwards the medium default when neither config nor call set a thinking level", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-manager-"));
+    roots.push(root);
+    const manager = new SubagentManager(process.cwd(), DEFAULT_FABRIC_CONFIG.subagents, {
+      workerPath: path.resolve("tests/fixtures/fake-worker.mjs"),
+      runRoot: root,
+      fullCodeMode: false,
+    });
+    managers.push(manager);
+    const result = await manager.run({ task: "Default medium thinking", transport: "process" });
+    expect(result.status).toBe("completed");
+    expect(result.thinking).toBe("medium");
+  });
+
   it("inherits the host model when neither config nor call set one", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-manager-"));
     roots.push(root);

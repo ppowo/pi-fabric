@@ -362,6 +362,80 @@ describe("ActorManager", () => {
     expect(restored.status(actor.id).model).toBe("anthropic/claude-sonnet-4-5");
   });
 
+  it("setThinking updates and clears an actor's thinking and it takes effect on the next run", async () => {
+    const { actors } = setup();
+    const actor = await actors.create({
+      name: "reviewer",
+      instructions: "Review messages and reply concisely.",
+      responseMode: "text",
+    });
+    expect(actors.status(actor.id).thinking).toBeUndefined();
+
+    await actors.setThinking(actor.id, "high");
+    expect(actors.status(actor.id).thinking).toBe("high");
+
+    // The new thinking is forwarded to the subagent run launched for the next message.
+    await actors.ask(actor.id, "Inspect auth");
+    await waitFor(() => actors.status(actor.id).status === "idle");
+    const run = actors.readLog(actor.id, { type: "run" });
+    expect(run.run?.status?.thinking).toBe("high");
+
+    // Clearing the override falls back to the Fabric default (medium).
+    await actors.setThinking(actor.id, undefined);
+    expect(actors.status(actor.id).thinking).toBeUndefined();
+    await actors.ask(actor.id, "Inspect auth");
+    await waitFor(() => actors.status(actor.id).status === "idle");
+    const clearedRun = actors.readLog(actor.id, { type: "run" });
+    expect(clearedRun.run?.status?.thinking).toBe("medium");
+
+    // Whitespace-only values are treated as clearing the override.
+    await actors.setThinking(actor.id, "  ");
+    expect(actors.status(actor.id).thinking).toBeUndefined();
+  });
+
+  it("setThinking rejects an invalid thinking level", async () => {
+    const { actors } = setup();
+    const actor = await actors.create({
+      name: "reviewer",
+      instructions: "Review messages and reply concisely.",
+      responseMode: "text",
+    });
+    await expect(actors.setThinking(actor.id, "turbo")).rejects.toThrow(
+      "Invalid Fabric actor thinking level",
+    );
+    expect(actors.status(actor.id).thinking).toBeUndefined();
+  });
+
+  it("setThinking throws for an unknown actor", async () => {
+    const { actors } = setup();
+    await expect(actors.setThinking("nope", "high")).rejects.toThrow("Unknown Fabric actor");
+  });
+
+  it("persists a setThinking change across actor manager restarts", async () => {
+    const setupState = setup(true);
+    const actor = await setupState.actors.create({
+      name: "reviewer",
+      instructions: "Review messages and reply concisely.",
+      responseMode: "text",
+    });
+    await setupState.actors.setThinking(actor.id, "xhigh");
+    await setupState.actors.close();
+    actorManagers.splice(actorManagers.indexOf(setupState.actors), 1);
+
+    const restored = new ActorManager(
+      "test",
+      setupState.identity,
+      setupState.mesh,
+      setupState.meshConfig,
+      setupState.subagents,
+      () => {},
+      { actorRoot: path.join(setupState.root, "actors"), persistent: true },
+    );
+    actorManagers.push(restored);
+
+    expect(restored.status(actor.id).thinking).toBe("xhigh");
+  });
+
   it("haltAll aborts an in-flight run and cancels queued work without tearing actors down", async () => {
     const { actors } = setup();
     const actor = await actors.create({

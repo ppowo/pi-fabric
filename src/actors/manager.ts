@@ -18,6 +18,7 @@ import type {
   FabricActorResponseMode,
   FabricActorStatus,
 } from "./types.js";
+import { isFabricThinking, type FabricThinking } from "../thinking.js";
 
 interface ActorQueueItem {
   id: string;
@@ -41,7 +42,7 @@ interface ManagedActor {
   triggerTurn: boolean;
   coalesce: boolean;
   model?: string;
-  thinking?: FabricActorRequest["thinking"];
+  thinking?: FabricThinking;
   tools?: string[];
   transport?: FabricSubagentTransport;
   timeoutMs?: number;
@@ -262,6 +263,27 @@ export class ActorManager {
     const next = typeof model === "string" ? model.trim() : "";
     if (next) actor.model = next;
     else delete actor.model;
+    actor.updatedAt = Date.now();
+    this.#saveActors();
+    await this.#publishPresence(actor);
+    return this.#publicInfo(actor);
+  }
+  /**
+   * Change an existing actor's thinking (reasoning effort) level. Takes effect
+   * on the actor's next queued message: #runRequest reads actor.thinking at run
+   * start, so an in-flight run keeps the level it was launched with. Pass
+   * undefined (or an empty/whitespace string) to clear the override so the
+   * actor inherits the Fabric default (subagents.thinking, default "medium").
+   */
+  async setThinking(id: string, thinking: string | undefined): Promise<FabricActorInfo> {
+    const actor = this.#requireActor(id);
+    const trimmed = typeof thinking === "string" ? thinking.trim() : "";
+    if (trimmed) {
+      if (!isFabricThinking(trimmed)) throw new Error(`Invalid Fabric actor thinking level: ${trimmed}`);
+      actor.thinking = trimmed;
+    } else {
+      delete actor.thinking;
+    }
     actor.updatedAt = Date.now();
     this.#saveActors();
     await this.#publishPresence(actor);
@@ -936,15 +958,7 @@ export class ActorManager {
         triggerTurn: record.triggerTurn === true,
         coalesce: record.coalesce !== false,
         ...(typeof record.model === "string" ? { model: record.model } : {}),
-        ...(record.thinking === "off" ||
-        record.thinking === "minimal" ||
-        record.thinking === "low" ||
-        record.thinking === "medium" ||
-        record.thinking === "high" ||
-        record.thinking === "xhigh" ||
-        record.thinking === "max"
-          ? { thinking: record.thinking }
-          : {}),
+        ...(isFabricThinking(record.thinking) ? { thinking: record.thinking } : {}),
         ...(Array.isArray(record.tools)
           ? { tools: record.tools.filter((tool): tool is string => typeof tool === "string") }
           : {}),

@@ -9,7 +9,9 @@ import type {
 } from "../activity/types.js";
 import { formatClock, formatDuration, formatTokens, padToWidth, safeText, wrapPlainText } from "./format.js";
 import { FabricModelSelector } from "./fabric-model-selector.js";
+import { FabricThinkingSelector } from "./fabric-thinking-selector.js";
 import { INHERIT_VALUE, type ModelSource } from "./model-picker.js";
+import { isFabricThinking, type FabricThinking } from "../thinking.js";
 import type {
   FabricDashboardSnapshot,
   FabricUiActor,
@@ -264,11 +266,14 @@ export class FabricDashboard implements Component, Focusable {
   private detailId: string | undefined;
   private detailScroll = 0;
   private readonly refreshTimer: NodeJS.Timeout;
-  private mode: "overview" | "detail" | "modelPicker" = "overview";
-  private picker: FabricModelSelector | undefined;
+  private mode: "overview" | "detail" | "modelPicker" | "thinkingPicker" = "overview";
+  private picker: FabricModelSelector | FabricThinkingSelector | undefined;
   private readonly modelSource: ModelSource | undefined;
   private readonly onActorModel:
     | ((actorId: string, model: string | undefined) => void)
+    | undefined;
+  private readonly onActorThinking:
+    | ((actorId: string, thinking: FabricThinking | undefined) => void)
     | undefined;
   private pickerActorName: string | undefined;
 
@@ -280,17 +285,19 @@ export class FabricDashboard implements Component, Focusable {
     options: {
       modelSource?: ModelSource;
       onActorModel?: (actorId: string, model: string | undefined) => void;
+      onActorThinking?: (actorId: string, thinking: FabricThinking | undefined) => void;
     } = {},
   ) {
     this.focused = true;
     this.modelSource = options.modelSource;
     this.onActorModel = options.onActorModel;
+    this.onActorThinking = options.onActorThinking;
     this.refreshTimer = setInterval(() => this.tui.requestRender(), 500);
     this.refreshTimer.unref();
   }
 
   handleInput(data: string): void {
-    if (this.mode === "modelPicker" && this.picker) {
+    if ((this.mode === "modelPicker" || this.mode === "thinkingPicker") && this.picker) {
       this.picker.handleInput(data);
       this.tui.requestRender();
       return;
@@ -324,6 +331,11 @@ export class FabricDashboard implements Component, Focusable {
         const detail = entities.find((entity) => entity.id === this.detailId);
         if (detail && detail.kind === "actor" && detail.status !== "stopped") {
           this.openModelPicker(detail);
+        }
+      } else if (data === "e") {
+        const detail = entities.find((entity) => entity.id === this.detailId);
+        if (detail && detail.kind === "actor" && detail.status !== "stopped") {
+          this.openThinkingPicker(detail);
         }
       }
       this.tui.requestRender();
@@ -389,8 +401,8 @@ export class FabricDashboard implements Component, Focusable {
 
   render(width: number): string[] {
     if (width <= 0) return [];
-    if (this.mode === "modelPicker" && this.picker) {
-      return this.renderModelPicker(width);
+    if ((this.mode === "modelPicker" || this.mode === "thinkingPicker") && this.picker) {
+      return this.renderPicker(width);
     }
     const snapshot = this.snapshot();
     this.runIndex = Math.max(0, Math.min(this.runIndex, Math.max(0, snapshot.runs.length - 1)));
@@ -439,24 +451,46 @@ export class FabricDashboard implements Component, Focusable {
     this.mode = "modelPicker";
   }
 
+  private openThinkingPicker(entity: Entity): void {
+    if (entity.kind !== "actor" || !this.onActorThinking) return;
+    const actor = entity.value;
+    this.pickerActorName = actor.name;
+    this.picker = new FabricThinkingSelector({
+      theme: this.theme,
+      currentValue: actor.thinking ?? INHERIT_VALUE,
+      headerText: `Thinking level for actor "${actor.name}". Pick Inherit to use the Fabric default.`,
+      inheritName: "Use the Fabric default thinking level",
+      onSelect: (value) => {
+        const thinking = value === INHERIT_VALUE ? undefined : value;
+        this.onActorThinking!(actor.id, isFabricThinking(thinking) ? thinking : undefined);
+        this.closeModelPicker();
+      },
+      onCancel: () => this.closeModelPicker(),
+    });
+    this.picker.focused = true;
+    this.mode = "thinkingPicker";
+  }
+
   private closeModelPicker(): void {
     this.picker = undefined;
     this.pickerActorName = undefined;
     this.mode = "detail";
   }
 
-  private renderModelPicker(width: number): string[] {
+  private renderPicker(width: number): string[] {
     if (width < 24 || !this.picker) return [];
+    const kind = this.mode === "thinkingPicker" ? "thinking" : "model";
     const lines = [
-      this.topBorder(width, `actor · ${this.pickerActorName ?? ""} · model`),
+      this.topBorder(width, `actor · ${this.pickerActorName ?? ""} · ${kind}`),
     ];
     const inner = this.picker.render(width - 2);
     for (const line of inner) lines.push(this.row(width, line));
     lines.push(this.middleBorder(width));
+    const filterHint = this.mode === "thinkingPicker" ? "" : " · type to filter";
     lines.push(
       this.row(
         width,
-        this.theme.fg("dim", "  Enter to select · Esc to cancel · type to filter"),
+        this.theme.fg("dim", `  Enter to select · Esc to cancel${filterHint}`),
       ),
     );
     lines.push(this.bottomBorder(width));
@@ -701,12 +735,16 @@ export class FabricDashboard implements Component, Focusable {
       entity.kind === "actor" && entity.status !== "stopped" && this.modelSource
         ? " · m model"
         : "";
+    const actorThinkingHint =
+      entity.kind === "actor" && entity.status !== "stopped" && this.onActorThinking
+        ? " · e thinking"
+        : "";
     lines.push(
       this.row(
         width,
         this.theme.fg(
           "dim",
-          `j/k scroll · esc back${content.length > maxBody ? ` · ${this.detailScroll + 1}-${Math.min(content.length, this.detailScroll + maxBody)}/${content.length}` : ""}${actorModelHint}`,
+          `j/k scroll · esc back${content.length > maxBody ? ` · ${this.detailScroll + 1}-${Math.min(content.length, this.detailScroll + maxBody)}/${content.length}` : ""}${actorModelHint}${actorThinkingHint}`,
         ),
       ),
     );
@@ -732,6 +770,7 @@ export class FabricDashboard implements Component, Focusable {
       const agent = entity.value;
       field("ID", agent.id);
       field("Model", agent.model);
+      field("Thinking", agent.thinking);
       field("Transport", agent.transport);
       field("Activity", agent.currentTool);
       field("Elapsed", agent.startedAt ? formatDuration((agent.finishedAt ?? now) - agent.startedAt) : undefined);
@@ -746,6 +785,7 @@ export class FabricDashboard implements Component, Focusable {
       const actor = entity.value;
       field("ID", actor.id);
       field("Model", actor.model ?? actor.worker?.model);
+      field("Thinking", actor.thinking ?? actor.worker?.thinking);
       field("Delivery", `${actor.delivery} · ${actor.responseMode}`);
       field("Activity", actor.worker?.currentTool);
       field("Transport", actor.worker?.transport);

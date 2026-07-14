@@ -4,6 +4,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import { FabricDashboard } from "../src/ui/dashboard.js";
 import type { ModelSource } from "../src/ui/model-picker.js";
+import type { FabricThinking } from "../src/thinking.js";
 import type { FabricDashboardSnapshot } from "../src/ui/types.js";
 import { FabricWidget, shouldShowFabricWidget } from "../src/ui/widget.js";
 
@@ -385,6 +386,101 @@ describe("Fabric dynamic UI", () => {
       const after = dashboard.render(120);
       expect(after.join("\n")).toContain("advisor");
       expect(after.join("\n")).not.toContain('Model for actor "advisor"');
+    } finally {
+      dashboard.dispose();
+    }
+  });
+
+  it("offers a per-actor thinking picker from the actor detail view", () => {
+    const tui = { requestRender: vi.fn() } as unknown as TUI;
+    const onActorThinking = vi.fn<(id: string, thinking: FabricThinking | undefined) => void>();
+    const dashboard = new FabricDashboard(tui, theme, snapshot, vi.fn(), {
+      modelSource: actorModelSource,
+      onActorThinking,
+    });
+    try {
+      openActorDetail(dashboard);
+      const detail = dashboard.render(120);
+      expect(detail.join("\n")).toContain("advisor");
+      expect(detail.join("\n")).toContain("e thinking");
+
+      // Open the thinking picker.
+      dashboard.handleInput("e");
+      const picker = dashboard.render(120);
+      const pickerText = picker.join("\n");
+      expect(pickerText).toContain('Thinking level for actor "advisor"');
+      expect(pickerText).toContain("Inherit");
+      expect(pickerText).toContain("Medium");
+      expect(picker.every((line) => visibleWidth(line) <= 120)).toBe(true);
+
+      // Inherit is index 0; "medium" is index 4 (off=1, minimal=2, low=3, medium=4).
+      dashboard.handleInput("\x1b[B");
+      dashboard.handleInput("\x1b[B");
+      dashboard.handleInput("\x1b[B");
+      dashboard.handleInput("\x1b[B");
+      dashboard.handleInput("\r");
+      expect(onActorThinking).toHaveBeenCalledWith("actor-1", "medium");
+
+      // Selecting closes the picker and returns to the actor detail.
+      const after = dashboard.render(120);
+      expect(after.join("\n")).toContain("advisor");
+      expect(after.join("\n")).not.toContain('Thinking level for actor "advisor"');
+    } finally {
+      dashboard.dispose();
+    }
+  });
+
+  it("picking Inherit clears the actor thinking override", () => {
+    const tui = { requestRender: vi.fn() } as unknown as TUI;
+    const onActorThinking = vi.fn();
+    const dashboard = new FabricDashboard(tui, theme, snapshot, vi.fn(), {
+      modelSource: actorModelSource,
+      onActorThinking,
+    });
+    try {
+      openActorDetail(dashboard);
+      dashboard.handleInput("e");
+      // Inherit is the default selection (index 0) for an actor with no thinking set.
+      dashboard.handleInput("\r");
+      expect(onActorThinking).toHaveBeenCalledWith("actor-1", undefined);
+      const after = dashboard.render(120);
+      expect(after.join("\n")).toContain("advisor");
+    } finally {
+      dashboard.dispose();
+    }
+  });
+
+  it("canceling the thinking picker returns to the detail without changing thinking", () => {
+    const tui = { requestRender: vi.fn() } as unknown as TUI;
+    const onActorThinking = vi.fn();
+    const dashboard = new FabricDashboard(tui, theme, snapshot, vi.fn(), {
+      modelSource: actorModelSource,
+      onActorThinking,
+    });
+    try {
+      openActorDetail(dashboard);
+      dashboard.handleInput("e");
+      dashboard.handleInput("\x1b");
+      expect(onActorThinking).not.toHaveBeenCalled();
+      const after = dashboard.render(120);
+      expect(after.join("\n")).toContain("advisor");
+      expect(after.join("\n")).not.toContain('Thinking level for actor "advisor"');
+    } finally {
+      dashboard.dispose();
+    }
+  });
+
+  it("does not offer the thinking picker when no onActorThinking is wired", () => {
+    const tui = { requestRender: vi.fn() } as unknown as TUI;
+    const dashboard = new FabricDashboard(tui, theme, snapshot, vi.fn());
+    try {
+      openActorDetail(dashboard);
+      const detail = dashboard.render(120);
+      expect(detail.join("\n")).not.toContain("e thinking");
+      // Pressing e is a no-op: still in the actor detail.
+      dashboard.handleInput("e");
+      const after = dashboard.render(120);
+      expect(after.join("\n")).toContain("advisor");
     } finally {
       dashboard.dispose();
     }

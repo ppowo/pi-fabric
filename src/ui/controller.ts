@@ -1,6 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import type { FabricState } from "../fabric-state.js";
+import type { FabricThinking } from "../thinking.js";
 import type { MeshEvent } from "../mesh/store.js";
 import { FabricDashboard } from "./dashboard.js";
 import { buildModelSource } from "./model-picker.js";
@@ -80,6 +81,9 @@ export class FabricUiController {
     const modelSource = buildModelSource(context.modelRegistry);
     const onActorModel = (actorId: string, model: string | undefined): void => {
       this.state.actors.setModel(actorId, model).catch(() => undefined);
+    };
+    const onActorThinking = (actorId: string, thinking: FabricThinking | undefined): void => {
+      this.state.actors.setThinking(actorId, thinking).catch(() => undefined);
     };
     await context.ui.custom<void>(
       (tui, theme, _keybindings, done) =>

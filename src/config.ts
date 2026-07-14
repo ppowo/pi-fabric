@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { PI_CORE_TOOL_NAME_SET } from "./core/pi-tools.js";
 import type { FabricRisk } from "./protocol.js";
+import { DEFAULT_FABRIC_THINKING, isFabricThinking, type FabricThinking } from "./thinking.js";
 
 type FabricApprovalMode = "allow" | "ask" | "deny";
 export type FabricSubagentTransport = "auto" | "process" | "tmux" | "screen" | "localterm";
@@ -35,6 +36,7 @@ export interface FabricSubagentConfig {
   enabled: boolean;
   transport: FabricSubagentTransport;
   model?: string;
+  thinking: FabricThinking;
   maxConcurrent: number;
   maxPerExecution: number;
   maxDepth: number;
@@ -110,6 +112,7 @@ export const DEFAULT_FABRIC_CONFIG: FabricConfig = {
   subagents: {
     enabled: true,
     transport: "process",
+    thinking: DEFAULT_FABRIC_THINKING,
     maxConcurrent: 4,
     maxPerExecution: 100,
     maxDepth: 2,
@@ -226,6 +229,9 @@ const transportValue = (
     ? value
     : fallback;
 
+const thinkingValue = (value: unknown, fallback: FabricThinking): FabricThinking =>
+  isFabricThinking(value) ? value : fallback;
+
 const objectValue = (value: unknown): Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -262,6 +268,7 @@ export const normalizeFabricConfig = (input: Record<string, unknown>): FabricCon
   const configPath = stringValue(mcp.configPath);
   const meshRoot = stringValue(mesh.root);
   const subagentModel = stringValue(subagents.model);
+  const subagentThinking = thinkingValue(subagents.thinking, DEFAULT_FABRIC_CONFIG.subagents.thinking);
   const configuredVisible = Array.isArray(capture.keepVisible)
     ? capture.keepVisible.filter(
         (name): name is string => typeof name === "string" && Boolean(name.trim()),
@@ -331,6 +338,7 @@ export const normalizeFabricConfig = (input: Record<string, unknown>): FabricCon
       enabled: booleanValue(subagents.enabled, DEFAULT_FABRIC_CONFIG.subagents.enabled),
       transport: transportValue(subagents.transport, DEFAULT_FABRIC_CONFIG.subagents.transport),
       ...(subagentModel ? { model: subagentModel } : {}),
+      thinking: subagentThinking,
       maxConcurrent: boundedInteger(
         subagents.maxConcurrent,
         DEFAULT_FABRIC_CONFIG.subagents.maxConcurrent,

@@ -20,6 +20,7 @@ import {
 import { FabricModelSelector } from "./fabric-model-selector.js";
 import { buildModelSource, INHERIT_VALUE, type ModelSource } from "./model-picker.js";
 import { saveFabricConfig, type FabricConfig } from "../config.js";
+import { THINKING_LEVELS, thinkingLabel } from "../thinking.js";
 import type { CapturedToolCatalog } from "../capture/catalog.js";
 import type { FabricState } from "../fabric-state.js";
 
@@ -292,6 +293,28 @@ class SelectSubmenu extends Container {
   }
 }
 
+const thinkingSubmenu = (
+  theme: Theme,
+  currentValue: string,
+): SettingsSubmenu => (_currentValue, done) => {
+  const options: SelectItem[] = THINKING_LEVELS.map((level) => ({
+    value: level,
+    label: thinkingLabel(level),
+  }));
+  if (!options.some((option) => option.value === currentValue)) {
+    options.unshift({ value: currentValue, label: currentValue });
+  }
+  return new SelectSubmenu(
+    theme,
+    "Default thinking",
+    "Reasoning effort forwarded to spawned subagents and actors when a call does not specify one. The level is clamped to each model's supported levels (next highest if unsupported).",
+    options,
+    currentValue,
+    (value) => done(value),
+    () => done(),
+  );
+};
+
 const modelPickerSubmenu = (
   theme: Theme,
   source: ModelSource,
@@ -326,7 +349,7 @@ class SectionSubmenu extends Container {
     this.addChild(new Spacer(1));
     this.settingsList = new SettingsList(
       items,
-      Math.min(items.length, 10),
+      Math.min(items.length, 16),
       settingsListTheme(theme),
       onChange,
       onCancel,
@@ -567,6 +590,11 @@ export const buildFabricSettingsItems = (
               options.modelSource,
               config.subagents.model || INHERIT_VALUE,
             ),
+          }),
+          setting("subagents.thinking", "Default thinking", thinkingLabel(config.subagents.thinking), {
+            description:
+              "Reasoning effort forwarded to spawned subagents and actors when a call does not specify one. Clamped to each model's supported levels (next highest if unsupported).",
+            submenu: thinkingSubmenu(theme, config.subagents.thinking),
           }),
           setting("subagents.maxConcurrent", "Max concurrent", String(config.subagents.maxConcurrent), {
             description: "Maximum number of subagents that may run at the same time.",

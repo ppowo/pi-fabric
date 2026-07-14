@@ -1,4 +1,5 @@
 import type { FabricSubagentTransport } from "../config.js";
+import type { FabricThinking } from "../thinking.js";
 
 export type SubagentRunStatus =
   | "queued"
@@ -13,7 +14,7 @@ export interface SubagentRunRequest {
   name?: string;
   transport?: FabricSubagentTransport;
   model?: string;
-  thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  thinking?: FabricThinking;
   tools?: string[];
   timeoutMs?: number;
   extensions?: boolean;
@@ -50,7 +51,7 @@ export interface SubagentRunRecord {
   transport: FabricSubagentTransport;
   cwd: string;
   model?: string;
-  thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  thinking?: FabricThinking;
   actorId?: string;
   actorName?: string;
   startedAt: number;
@@ -85,7 +86,7 @@ export interface SubagentHandleInfo {
   transport: FabricSubagentTransport;
   cwd: string;
   model?: string;
-  thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  thinking?: FabricThinking;
   actorId?: string;
   actorName?: string;
   sessionId?: string;

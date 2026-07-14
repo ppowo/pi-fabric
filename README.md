@@ -271,7 +271,7 @@ const handle = await agents.spawn({
 return await agents.wait({ id: handle.id });
 ```
 
-Children inherit the parent model unless `model` is specified. Their tool allowlist defaults to `subagents.defaultTools`.
+Children inherit the parent model unless `model` is specified. Their tool allowlist defaults to `subagents.defaultTools`. Their reasoning effort defaults to `subagents.thinking` (default `medium`) unless a call or actor sets `thinking`; the level is clamped to each model's supported levels, picking the next highest level when the requested one is unsupported.
 
 Supported transports:
 
@@ -306,11 +306,12 @@ Prefer silence. Reply with a directive only for material drift, a blocker, or ve
   responseMode: "directive",
   delivery: "steer",
   triggerTurn: true,
+  thinking: "high",
   tools: ["read", "grep", "find", "ls"],
 });
 ```
 
-This is the primitive behind emergent supervisors and advisors; neither requires another extension. Host events include a bounded recent-session snapshot. Actors process messages one at a time, coalesce repeated host events by default, keep model context in their own session file, and resume when the same Pi session is reopened in a trusted project.
+This is the primitive behind emergent supervisors and advisors; neither requires another extension. Host events include a bounded recent-session snapshot. Actors process messages one at a time, coalesce repeated host events by default, keep model context in their own session file, and resume when the same Pi session is reopened in a trusted project. Each actor's reasoning effort is its `thinking` level (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`), defaulting to `subagents.thinking` (`medium`) and clamped to the model's supported levels; set it at creation or change it later with `e` from the dashboard.
 
 Two response modes are available:
 
@@ -396,9 +397,9 @@ Supervisor and advisor are deliberately skills rather than hard-coded host servi
 Fabric also owns a general-purpose, theme-aware activity surface for any agent setup:
 
 - A compact widget above the chat (like `pi-supervisor`) follows the current phase and shows active agents, actors, tools, custom items, shared tasks, token use, and elapsed time. It disappears after ordinary runs become quiet, while persistent actors remain visible as a compact ambient row.
-- `/fabric dashboard` opens a responsive interactive overlay. Wide terminals use a Claude-workflow-style phase pane beside agents and work items; narrow terminals stack the same panels. Agent detail includes task, model, current tool, usage, result, worktree, and attach metadata. Actor mailboxes, mesh state, and recent mesh events use the same view rather than role-specific screens. In an actor's detail view, press `m` to open the model picker and change that actor's model (or pick Inherit to fall back to the Fabric default); the change is persisted to the actor registry and takes effect on the actor's next run.
+- `/fabric dashboard` opens a responsive interactive overlay. Wide terminals use a Claude-workflow-style phase pane beside agents and work items; narrow terminals stack the same panels. Agent detail includes task, model, current tool, usage, result, worktree, and attach metadata. Actor mailboxes, mesh state, and recent mesh events use the same view rather than role-specific screens. In an actor's detail view, press `m` to open the model picker and change that actor's model, or press `e` to open the thinking (reasoning effort) picker and change that actor's `thinking` level (or pick Inherit to fall back to the Fabric default); both changes persist to the actor registry and take effect on the actor's next run.
 - `/fabric settings` opens an inline settings view that mirrors Pi core's `/settings` (top and bottom borders, fuzzy search, section submenus) and writes changes to `fabric.json`. Trusted projects write to `<project>/.pi/fabric.json`; untrusted sessions write to the global `~/.pi/agent/fabric.json`. Full code mode, capture, executor, approvals, and UI changes apply immediately; mesh, subagent, and MCP changes persist and take effect on the next `/fabric reload`. List editors for `subagents.defaultTools` and `capture.keepVisible` toggle known tools on and off; `keepVisible` candidates include `fabric_exec` plus every captured extension tool.
-- `↑`/`↓` or `j`/`k` select, `←`/`→` or Tab switch panes, Enter drills into details, `f` cycles status filters, `[`/`]` switches retained runs, `m` changes an actor's model from its detail view, and Esc backs out or closes.
+- `↑`/`↓` or `j`/`k` select, `←`/`→` or Tab switch panes, Enter drills into details, `f` cycles status filters, `[`/`]` switches retained runs, `m` changes an actor's model and `e` its thinking level from the detail view, and Esc backs out or closes.
 
 The surface is data-driven. Fabric automatically instruments nested provider calls, subagents, persistent actors, and task-shaped mesh entries. A workflow can add domain-specific labels and arbitrary progress without adding extension UI code:
 
@@ -466,6 +467,7 @@ Project values override global values.
   "subagents": {
     "enabled": true,
     "transport": "process",
+    "thinking": "medium",
     "maxConcurrent": 4,
     "maxPerExecution": 100,
     "maxDepth": 2,

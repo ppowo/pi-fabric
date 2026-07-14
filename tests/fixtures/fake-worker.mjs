@@ -67,6 +67,7 @@ if (task.includes("HANG")) {
     exitCode: 0,
     usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, cost: 0 },
     ...(args.has("model") ? { model: args.get("model") } : {}),
+    ...(args.has("thinking") ? { thinking: args.get("thinking") } : {}),
   };
   fs.mkdirSync(path.dirname(statusFile), { recursive: true });
   fs.writeFileSync(statusFile, JSON.stringify(record));

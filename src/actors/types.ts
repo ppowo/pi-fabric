@@ -1,4 +1,5 @@
 import type { FabricSubagentTransport } from "../config.js";
+import type { FabricThinking } from "../thinking.js";
 import type { FabricLogLine, SubagentRunRecord, SubagentUsage } from "../subagents/types.js";
 
 export type FabricActorHostEvent =
@@ -22,7 +23,7 @@ export interface FabricActorRequest {
   triggerTurn?: boolean;
   coalesce?: boolean;
   model?: string;
-  thinking?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  thinking?: FabricThinking;
   tools?: string[];
   transport?: FabricSubagentTransport;
   timeoutMs?: number;
@@ -39,7 +40,7 @@ export interface FabricActorInfo {
   triggerTurn: boolean;
   coalesce: boolean;
   model?: string;
-  thinking?: FabricActorRequest["thinking"];
+  thinking?: FabricThinking;
   tools?: string[];
   queued: number;
   messages: number;

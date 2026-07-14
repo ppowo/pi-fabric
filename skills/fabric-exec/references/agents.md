@@ -15,6 +15,7 @@ Every method takes a single options object.
 
 - `transport` is one of `auto`, `process`, `tmux`, `screen`, `localterm` (default `process`). `auto` tries LocalTerm, tmux, screen, then process.
 - `model` is a `provider/id` string; use `tools.models()` to discover valid `key` values. Children inherit the parent model unless `model` is set.
+- `thinking` is the reasoning effort (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`); defaults to `subagents.thinking` (`medium`) and is clamped to the model's supported levels (next highest when unsupported).
 - `tools` defaults to `subagents.defaultTools`.
 - `schema` is a JSON Schema; the worker returns validated structured data in `result.value`.
 - `worktree: true` creates a dedicated Git worktree on branch `pi-fabric/<name>-<id>`, retained until `agents.cleanup()`.
@@ -43,6 +44,7 @@ Use `/fabric agents` to list children and `/fabric attach <id>` for the attach c
 `args` is a `FabricActorRequest`: `{ name, instructions, events?, topics?, delivery?, responseMode?, triggerTurn?, coalesce?, model?, thinking?, tools?, transport?, timeoutMs? }`.
 
 - `model` is a `provider/id` string (the canonical `key` from `tools.models()`). Omitted inherits the host session's model. The model is fixed at creation — a later `tell`/`ask` message cannot switch the underlying Pi process model, so set it here when it matters.
+- `thinking` is the reasoning effort forwarded to the actor's runs (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`). Omitted inherits `subagents.thinking` (default `medium`), clamped to the model's supported levels. Change it later with `e` from the dashboard actor detail, or by recreating the actor.
 - `events` is a subset of `input`, `turn_end`, `agent_settled`, `tool_error`, `session_compact` (host events to subscribe to).
 - `topics` lists durable mesh topics to subscribe to (see `mesh.md`).
 - `responseMode` is `text` (every non-empty response becomes an outbox message) or `directive` (validated `{ action, message?, data? }` where `action` is `silent`, `message`, or `stop`; the actor decides whether to intervene).

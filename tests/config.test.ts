@@ -85,6 +85,16 @@ describe("Fabric configuration", () => {
     expect(nonString.subagents.model).toBeUndefined();
   });
 
+  it("defaults the subagent thinking level to medium and validates the value", () => {
+    expect(DEFAULT_FABRIC_CONFIG.subagents.thinking).toBe("medium");
+    const set = normalizeFabricConfig({ subagents: { thinking: "high" } });
+    expect(set.subagents.thinking).toBe("high");
+    const invalid = normalizeFabricConfig({ subagents: { thinking: "turbo" } });
+    expect(invalid.subagents.thinking).toBe("medium");
+    const nonString = normalizeFabricConfig({ subagents: { thinking: 42 } });
+    expect(nonString.subagents.thinking).toBe("medium");
+  });
+
   it("defaults actor scope to project and validates the value", () => {
     expect(DEFAULT_FABRIC_CONFIG.mesh.actorScope).toBe("project");
     const session = normalizeFabricConfig({ mesh: { actorScope: "session" } });

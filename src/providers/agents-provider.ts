@@ -8,6 +8,7 @@ import type {
 } from "../protocol.js";
 import { SubagentManager } from "../subagents/manager.js";
 import type { SubagentRunRequest } from "../subagents/types.js";
+import { isFabricThinking } from "../thinking.js";
 
 const runProperties = {
   task: { type: "string", description: "A self-contained task for the child Pi agent" },
@@ -223,16 +224,7 @@ const runRequest = (
     args.transport === "localterm"
       ? args.transport
       : undefined;
-  const thinking =
-    args.thinking === "off" ||
-    args.thinking === "minimal" ||
-    args.thinking === "low" ||
-    args.thinking === "medium" ||
-    args.thinking === "high" ||
-    args.thinking === "xhigh" ||
-    args.thinking === "max"
-      ? args.thinking
-      : undefined;
+  const thinking = isFabricThinking(args.thinking) ? args.thinking : undefined;
   const tools = stringArray(args.tools);
   const inheritedModel = context.extensionContext.model
     ? `${context.extensionContext.model.provider}/${context.extensionContext.model.id}`
@@ -298,15 +290,7 @@ const actorRequest = (
       : inheritedModel
         ? { model: inheritedModel }
         : {}),
-    ...(args.thinking === "off" ||
-    args.thinking === "minimal" ||
-    args.thinking === "low" ||
-    args.thinking === "medium" ||
-    args.thinking === "high" ||
-    args.thinking === "xhigh" ||
-    args.thinking === "max"
-      ? { thinking: args.thinking }
-      : {}),
+    ...(isFabricThinking(args.thinking) ? { thinking: args.thinking } : {}),
     ...(tools ? { tools } : {}),
     ...(args.transport === "auto" ||
     args.transport === "process" ||

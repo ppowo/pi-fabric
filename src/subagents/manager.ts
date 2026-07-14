@@ -270,6 +270,7 @@ export class SubagentManager {
         Math.min(request.timeoutMs ?? this.config.timeoutMs, 3_600_000),
       );
       const model = request.model ?? this.config.model;
+      const thinking = request.thinking ?? this.config.thinking;
       const workerArguments = [
         "--id",
         id,
@@ -301,7 +302,7 @@ export class SubagentManager {
         adapter.kind,
         ...(request.recursive ? ["--fabric-extension", this.#fabricExtensionPath] : []),
         ...(model ? ["--model", model] : []),
-        ...(request.thinking ? ["--thinking", request.thinking] : []),
+        ...(thinking ? ["--thinking", thinking] : []),
         ...(request.systemPrompt ? ["--system-prompt", request.systemPrompt] : []),
         ...(request.sessionFile ? ["--session-file", request.sessionFile] : []),
         ...(request.actorId ? ["--actor-id", request.actorId] : []),
@@ -343,7 +344,7 @@ export class SubagentManager {
         abortSignal: signal,
         abortHandler: undefined,
         ...(model ? { model } : {}),
-        ...(request.thinking ? { thinking: request.thinking } : {}),
+        ...(thinking ? { thinking } : {}),
         ...(request.actorId ? { actorId: request.actorId } : {}),
         ...(request.actorName ? { actorName: request.actorName } : {}),
         ...(branch ? { branch } : {}),

@@ -122,6 +122,28 @@ describe("FabricSettingsComponent", () => {
     expect(parseBudgetValue("$5.00")).toBe(5);
   });
 
+  it("surfaces the default thinking level in the Subagents section as Medium by default", () => {
+    const items = buildItems();
+    const subagents = items.find((item) => item.id === "subagents");
+    expect(subagents?.submenu).toBeDefined();
+    const lines = subagents!.submenu!("", () => {}).render(80).join("\n");
+    expect(lines).toContain("Default thinking");
+    expect(lines).toContain("Medium");
+  });
+
+  it("shows a configured thinking level in the Subagents section", () => {
+    const items = buildFabricSettingsItems(
+      theme,
+      { ...DEFAULT_FABRIC_CONFIG, subagents: { ...DEFAULT_FABRIC_CONFIG.subagents, thinking: "high" } },
+      () => {},
+      { keepVisibleCandidates: ["fabric_exec"], modelSource: fakeModelSource },
+    );
+    const subagents = items.find((item) => item.id === "subagents")!;
+    const lines = subagents.submenu!("", () => {}).render(80).join("\n");
+    expect(lines).toContain("Default thinking");
+    expect(lines).toContain("High");
+  });
+
   it("surfaces the default model in the Subagents section as Inherit by default", () => {
     const items = buildItems();
     const subagents = items.find((item) => item.id === "subagents");
