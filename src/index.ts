@@ -548,9 +548,12 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
     toolCapture.setPolicy(inactiveCapturePolicy);
   };
 
-  // ESC interrupt: a lone Escape (debounced to ignore escape sequences such as
-  // arrow keys) halts every persistent actor — aborting in-flight runs and
-  // cancelling queued work — without tearing the actors down. Escape is
+  // ESC stop-the-world: a lone Escape (debounced to ignore escape sequences
+  // such as arrow keys) halts every persistent actor — aborting in-flight runs
+  // and cancelling queued work — and arms a stop-the-world gate that freezes
+  // host-event and mesh dispatch so the interrupted actors are not re-armed by
+  // the interrupt's own turn_end / agent_settled events. The gate lifts when the
+  // user resumes by sending a new message (the "input" host event). Escape is
   // observed but not consumed, so Pi's native cancel-streaming still fires;
   // single ESC therefore stops the current turn and the advisor/supervisor
   // actors at once. Disabled when mesh/actors are off or ui.haltOnEscape is
@@ -576,12 +579,13 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
       } catch {
         return;
       }
-      if (halted > 0) {
-        context.ui.notify(
-          `Fabric: halted ${halted} actor${halted === 1 ? "" : "s"} (Esc)`,
-          "warning",
-        );
-      }
+      // Always notify: the stop-the-world gate arms even when no actor had
+      // active work to abort, so the user knows Fabric is paused and that it
+      // resumes on the next message.
+      context.ui.notify(
+        `Fabric: halted ${halted} actor${halted === 1 ? "" : "s"} (Esc) · resumes on next message`,
+        "warning",
+      );
     };
     haltOnEscapeUnsubscribe = context.ui.onTerminalInput((data: string) => {
       if (data === ESC) {

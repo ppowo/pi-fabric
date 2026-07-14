@@ -68,10 +68,6 @@ const HOST_EVENTS = new Set<FabricActorHostEvent>([
   "session_compact",
 ]);
 const MESSAGE_HISTORY_LIMIT = 100;
-// After a user-triggered halt (ESC), ignore host-event dispatches for a short
-// window so the interrupt's own turn_end / agent_settled events do not
-// immediately re-arm the actors that were just stopped.
-const HOST_EVENT_HALT_COOLDOWN_MS = 1_000;
 
 const atomicWrite = (filePath: string, value: unknown): void => {
   fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
@@ -160,7 +156,11 @@ export class ActorManager {
   #meshOffset: number;
   #polling = false;
   #closing = false;
-  #haltedAt = 0;
+  // Stop-the-world gate armed by haltAll() (ESC): while true, host-event and
+  // mesh dispatch are frozen so interrupted actors are not re-armed by the
+  // interrupt's own turn_end / agent_settled events. Lifted when the user
+  // resumes by sending a new message (the "input" host event).
+  #halted = false;
 
   constructor(
     readonly sessionId: string,
@@ -405,9 +405,10 @@ export class ActorManager {
 
   dispatchHostEvent(event: FabricActorHostEvent, payload: unknown): number {
     if (this.#closing || !this.meshConfig.enabled) return 0;
-    if (this.#haltedAt > 0 && Date.now() - this.#haltedAt < HOST_EVENT_HALT_COOLDOWN_MS) {
-      return 0;
-    }
+    // The user sending a new message ends a stop-the-world halt: lift the gate
+    // before dispatching so input-subscribed actors receive this event.
+    if (event === "input") this.#halted = false;
+    if (this.#halted) return 0;
     let delivered = 0;
     for (const actor of this.#actors.values()) {
       if (actor.status === "stopped" || !actor.events.includes(event)) continue;
@@ -457,7 +458,11 @@ export class ActorManager {
   haltAll(): { halted: number } {
     if (!this.meshConfig.enabled) return { halted: 0 };
     let halted = 0;
-    this.#haltedAt = Date.now();
+    // Arm stop-the-world: freeze host-event and mesh dispatch until the user
+    // resumes with a new message. Always arm the gate (even with no active
+    // work) so an idle-but-subscribed actor is not re-armed by the interrupt's
+    // own settle events.
+    this.#halted = true;
     for (const actor of this.#actors.values()) {
       if (actor.status === "stopped") continue;
       const inFlight = actor.abortController !== undefined;
@@ -794,6 +799,9 @@ export class ActorManager {
 
   async #pollMesh(): Promise<void> {
     if (this.#polling || this.#closing || !this.meshConfig.enabled) return;
+    // Stop-the-world: do not consume mesh events while halted, so deferred
+    // events are preserved and dispatched after the user resumes.
+    if (this.#halted) return;
     this.#polling = true;
     try {
       const tail = this.mesh.tail(this.#meshOffset, this.meshConfig.maxReadEvents);
