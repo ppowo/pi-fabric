@@ -85,6 +85,16 @@ describe("Fabric configuration", () => {
     expect(nonString.subagents.model).toBeUndefined();
   });
 
+  it("defaults actor scope to project and validates the value", () => {
+    expect(DEFAULT_FABRIC_CONFIG.mesh.actorScope).toBe("project");
+    const session = normalizeFabricConfig({ mesh: { actorScope: "session" } });
+    expect(session.mesh.actorScope).toBe("session");
+    const invalid = normalizeFabricConfig({ mesh: { actorScope: "untrusted" } });
+    expect(invalid.mesh.actorScope).toBe("project");
+    const nonString = normalizeFabricConfig({ mesh: { actorScope: 42 } });
+    expect(nonString.mesh.actorScope).toBe("project");
+  });
+
   it("normalizes the ESC halt toggle for actors", () => {
     expect(DEFAULT_FABRIC_CONFIG.ui.haltOnEscape).toBe(true);
     const disabled = normalizeFabricConfig({ ui: { haltOnEscape: false } });

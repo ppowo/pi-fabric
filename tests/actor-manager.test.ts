@@ -159,6 +159,64 @@ describe("ActorManager", () => {
     });
   });
 
+  it("restores project-scoped actors across different Pi sessions", async () => {
+    // Project scope stores actors at a shared root (no sessionId segment), so a
+    // new Pi session that points at the same root picks up the roster without
+    // redefining actors.
+    const scopeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-actor-scope-"));
+    roots.push(scopeDir);
+    const sharedRoot = path.join(scopeDir, "actors");
+    const firstMesh = new MeshStore(path.join(scopeDir, "mesh"), 64 * 1024, 100);
+    const firstSubagents = new SubagentManager(
+      process.cwd(),
+      DEFAULT_FABRIC_CONFIG.subagents,
+      { workerPath: path.resolve("tests/fixtures/fake-worker.mjs"), runRoot: path.join(scopeDir, "runs") },
+    );
+    subagentManagers.push(firstSubagents);
+    const first = new ActorManager(
+      "session-a",
+      { id: "session:a", name: "main", kind: "main", sessionId: "session-a" },
+      firstMesh,
+      { ...DEFAULT_FABRIC_CONFIG.mesh, actorPollMs: 20 },
+      firstSubagents,
+      () => {},
+      { actorRoot: sharedRoot, persistent: true },
+    );
+    actorManagers.push(first);
+    const actor = await first.create({
+      name: "advisor",
+      instructions: "Watch until the goal is complete.",
+      responseMode: "directive",
+    });
+    await first.close();
+    actorManagers.splice(actorManagers.indexOf(first), 1);
+
+    // A brand-new Pi session, same shared actor root.
+    const secondMesh = new MeshStore(path.join(scopeDir, "mesh"), 64 * 1024, 100);
+    const secondSubagents = new SubagentManager(
+      process.cwd(),
+      DEFAULT_FABRIC_CONFIG.subagents,
+      { workerPath: path.resolve("tests/fixtures/fake-worker.mjs"), runRoot: path.join(scopeDir, "runs") },
+    );
+    subagentManagers.push(secondSubagents);
+    const restored = new ActorManager(
+      "session-b",
+      { id: "session:b", name: "main", kind: "main", sessionId: "session-b" },
+      secondMesh,
+      { ...DEFAULT_FABRIC_CONFIG.mesh, actorPollMs: 20 },
+      secondSubagents,
+      () => {},
+      { actorRoot: sharedRoot, persistent: true },
+    );
+    actorManagers.push(restored);
+
+    expect(restored.status(actor.id)).toMatchObject({
+      id: actor.id,
+      name: "advisor",
+      status: "idle",
+    });
+  });
+
   it("routes host events and durable topic events to subscriptions", async () => {
     const { actors, mesh } = setup();
     const actor = await actors.create({

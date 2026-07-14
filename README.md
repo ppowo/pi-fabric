@@ -486,6 +486,7 @@ Project values override global values.
   },
   "mesh": {
     "enabled": true,
+    "actorScope": "project",
     "maxEventBytes": 262144,
     "maxReadEvents": 500,
     "actorPollMs": 250,
@@ -504,6 +505,8 @@ When `mcp.disableOAuth` is true, MCP calls may use cached credentials but cannot
 The UI `widget` mode is `auto`, `always`, or `hidden`. `auto` shows active work, recent completion, and live persistent actors. The widget renders above the chat (like `pi-supervisor`); set `ui.enabled` to `false` to disable both the widget and dashboard controller.
 
 Mesh data defaults to `<project>/.pi/fabric/mesh`. Set `mesh.root` to a relative or absolute path to relocate durable topics, shared state, and actor sessions. Add `.pi/fabric/mesh/` to the project's ignore file unless the coordination log is intentionally versioned. Set `mesh.enabled` to `false` to disable both mesh actions and ambient actor restoration.
+
+`mesh.actorScope` controls where persistent actor definitions, mailboxes, and child sessions are stored and restored from. The default `"project"` keeps a single shared actor registry at `.pi/fabric/mesh/actors/`, so actors survive `/new` and carry over between Pi sessions in the same project without redefinition. Set it to `"session"` to isolate actors per Pi session (under `.pi/fabric/mesh/actors/<sessionId>/`), the previous default; use this when you run concurrent Pi sessions in one project and want each to own its own actors. With project scope, one Pi process should own the actor registry at a time — concurrent sessions sharing a registry may race on writes.
 
 ## External provider protocol
 
@@ -614,10 +617,10 @@ An external lever outside fabric's control is enabling Anthropic strict tool use
 - Child Pi processes load normal extensions by default so provider-backed models continue to work. Their active tool list is restricted by `defaultTools`; `fabric_exec` is excluded unless recursion is explicitly requested.
 - A Git worktree isolates files, not credentials, network access, processes, or external services.
 - Background one-shot children are stopped when the parent Pi session shuts down. A detached `agents.spawn()` sends a follow-up completion message unless the caller later waits for it or `notifyOnComplete` is disabled. Completed worktrees are intentionally retained.
-- Persistent actors are suspended on shutdown and restored for the same Pi session only when project trust is active. Their definitions, mailbox history, and child session files live under `.pi/fabric/mesh/actors/`; mesh topics and shared state are project-scoped. Do not place secrets in actor prompts, messages, or mesh state.
+- Persistent actors are suspended on shutdown and restored when project trust is active. By default (`mesh.actorScope: "project"`), their definitions, mailbox history, and child session files live under `.pi/fabric/mesh/actors/` and are shared across all Pi sessions in the project, so actors survive `/new`. Set `mesh.actorScope: "session"` to isolate actors per Pi session instead. Mesh topics and shared state are always project-scoped. Do not place secrets in actor prompts, messages, or mesh state.
 - Approving `agents.create()` delegates future subscribed events to that actor until it is stopped. Each activation uses the actor's fixed tool allowlist and model settings; review those settings before approving a persistent actor.
 - Actor responses can enter the main context only through the delivery policy fixed at creation. Directive output is schema-validated, but it is still untrusted model output that the main agent should weigh.
-- One Pi process should own a given session's restored actors at a time. Mesh topics are append-only and are not compacted automatically; archive or remove an old mesh root when its history is no longer useful.
+- One Pi process should own the actor registry at a time. This is especially important with project scope, where concurrent Pi sessions in the same project share one registry and may race on writes. Mesh topics are append-only and are not compacted automatically; archive or remove an old mesh root when its history is no longer useful.
 
 ## Development
 

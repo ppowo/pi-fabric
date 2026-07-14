@@ -185,7 +185,10 @@ export class FabricState {
       },
       context.isProjectTrusted() && this.#config.mesh.enabled
         ? {
-            actorRoot: path.join(meshRoot, "actors", sessionId),
+            actorRoot:
+              this.#config.mesh.actorScope === "session"
+                ? path.join(meshRoot, "actors", sessionId)
+                : path.join(meshRoot, "actors"),
             persistent: true,
           }
         : { persistent: false },

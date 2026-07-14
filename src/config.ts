@@ -6,6 +6,7 @@ import type { FabricRisk } from "./protocol.js";
 type FabricApprovalMode = "allow" | "ask" | "deny";
 export type FabricSubagentTransport = "auto" | "process" | "tmux" | "screen" | "localterm";
 export type FabricUiWidgetMode = "auto" | "always" | "hidden";
+type FabricActorScope = "project" | "session";
 
 interface FabricExecutorConfig {
   timeoutMs: number;
@@ -65,6 +66,7 @@ interface FabricUiConfig {
 export interface FabricMeshConfig {
   enabled: boolean;
   root?: string;
+  actorScope: FabricActorScope;
   maxEventBytes: number;
   maxReadEvents: number;
   actorPollMs: number;
@@ -143,6 +145,7 @@ export const DEFAULT_FABRIC_CONFIG: FabricConfig = {
   },
   mesh: {
     enabled: true,
+    actorScope: "project",
     maxEventBytes: 256 * 1024,
     maxReadEvents: 500,
     actorPollMs: 250,
@@ -230,6 +233,9 @@ const objectValue = (value: unknown): Record<string, unknown> =>
 
 const widgetModeValue = (value: unknown, fallback: FabricUiWidgetMode): FabricUiWidgetMode =>
   value === "auto" || value === "always" || value === "hidden" ? value : fallback;
+
+const actorScopeValue = (value: unknown, fallback: FabricActorScope): FabricActorScope =>
+  value === "project" || value === "session" ? value : fallback;
 
 const riskValue = (value: unknown, fallback: FabricRisk): FabricRisk =>
   value === "read" ||
@@ -384,6 +390,7 @@ export const normalizeFabricConfig = (input: Record<string, unknown>): FabricCon
     mesh: {
       enabled: booleanValue(mesh.enabled, DEFAULT_FABRIC_CONFIG.mesh.enabled),
       ...(meshRoot ? { root: meshRoot } : {}),
+      actorScope: actorScopeValue(mesh.actorScope, DEFAULT_FABRIC_CONFIG.mesh.actorScope),
       maxEventBytes: boundedInteger(
         mesh.maxEventBytes,
         DEFAULT_FABRIC_CONFIG.mesh.maxEventBytes,

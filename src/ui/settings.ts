@@ -32,6 +32,7 @@ const BOOLEANS = ["true", "false"] as const;
 const APPROVAL_MODES = ["allow", "ask", "deny"] as const;
 const TRANSPORTS = ["auto", "process", "tmux", "screen", "localterm"] as const;
 const WIDGET_MODES = ["auto", "always", "hidden"] as const;
+const ACTOR_SCOPES = ["project", "session"] as const;
 const RISKS = ["read", "write", "execute", "network", "agent"] as const;
 const CORE_RISK_TOOLS = ["read", "grep", "find", "edit", "write", "bash"] as const;
 const CORE_DEFAULT_TOOL_CANDIDATES = ["read", "bash", "edit", "write", "grep", "find", "ls"];
@@ -724,6 +725,11 @@ export const buildFabricSettingsItems = (
           setting("mesh.enabled", "Enabled", config.mesh.enabled ? "true" : "false", {
             description: "Enable the durable mesh store and actor providers.",
             values: BOOLEANS,
+          }),
+          setting("mesh.actorScope", "Actor scope", config.mesh.actorScope, {
+            description:
+              'Where persistent actor definitions, mailboxes, and sessions are stored. "project" shares actors across all Pi sessions in this project (survives /new); "session" isolates them per Pi session (the previous default).',
+            values: ACTOR_SCOPES,
           }),
           setting("mesh.maxReadEvents", "Max read events", String(config.mesh.maxReadEvents), {
             description: "Maximum events returned by a single mesh read.",
