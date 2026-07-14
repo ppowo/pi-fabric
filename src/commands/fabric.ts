@@ -268,7 +268,7 @@ export function registerFabricCommand(pi: ExtensionAPI, deps: FabricCommandDeps)
             messages.length > 0
               ? messages
                   .map((message) => {
-                    const value = message.text ?? message.action ?? message.error ?? "data";
+                    const value = message.text ?? message.error ?? message.action ?? "data";
                     const summary = truncateMiddle(value.replace(/\s+/g, " "), 500);
                     const runTag = message.runId ? ` [${message.runId.slice(0, 8)}]` : "";
                     const usageTag = message.usage

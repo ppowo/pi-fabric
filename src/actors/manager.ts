@@ -724,6 +724,7 @@ export class ActorManager {
               // actor ambient instead of erroring out. Record the run error for
               // debugging; the failed run itself is retained (see finally) so
               // agents.status(actor.lastRunId) can inspect the full output.
+              const reason = result.error || `Actor run ${result.status}`;
               const silent: FabricActorMessage = {
                 id: randomUUID(),
                 actorId: actor.id,
@@ -732,7 +733,8 @@ export class ActorManager {
                 source: item.source,
                 createdAt: Date.now(),
                 action: "silent",
-                data: { runError: result.error || `Actor run ${result.status}`, runId: result.id },
+                error: reason,
+                data: { runError: reason, runId: result.id },
                 runId: result.id,
                 usage: result.usage,
               };

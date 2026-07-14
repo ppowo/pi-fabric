@@ -1064,7 +1064,7 @@ export class FabricDashboard implements Component, Focusable {
         lines.push("");
         lines.push(this.theme.fg("accent", "Recent mailbox"));
         for (const message of actor.recentMessages) {
-          const text = message.text ?? message.action ?? message.error ?? "data";
+          const text = message.text ?? message.error ?? message.action ?? "data";
           field(
             `${message.direction === "in" ? "→" : "←"} ${formatClock(message.createdAt)} ${message.source}`,
             text,
