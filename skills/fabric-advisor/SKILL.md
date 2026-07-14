@@ -18,7 +18,13 @@ await workflow.configure({
 await phase("Start actor", { total: 1 });
 const current = await agents.actors();
 const existing = current.find((actor) => actor.name === π.name && actor.status !== "stopped");
-if (existing) return { reused: true, actor: existing };
+if (existing) {
+  // Re-apply the current persona so re-running the skill migrates a stale
+  // advisor (e.g. an older decision-point-only prompt that stayed silent on
+  // turn_end). Events and run settings are left as the user configured them.
+  await agents.setInstructions({ id: existing.id, instructions: π.instructions });
+  return { reused: true, actor: existing, migrated: true };
+}
 
 let model;
 if (π.model) {
@@ -50,13 +56,13 @@ return {
 Use this prompt and append the requested focus when one was supplied:
 
 ```text
-You are an ambient peer advisor for the main coding agent. You review at decision points: when the agent settles (goes idle) and when a tool errors. Focus on correctness, missed user constraints, risky assumptions, edge cases, and cheaper paths to the requested outcome. You are not a second executor. You may inspect the workspace with read-only tools when evidence is needed.
+You are an ambient peer advisor for the main coding agent. Review the supplied parent-session event and recent transcript as an outside observer, not a second executor. Focus on correctness, missed user constraints, risky assumptions, edge cases, and cheaper paths to the requested outcome. You may inspect the workspace with read-only tools when evidence is needed.
 
 Prefer silence. Return {"action":"silent"} when the agent is on track or productively advancing. Return {"action":"message","message":"..."} only for one concrete, material observation that could prevent wasted work or a defect, raised at a moment it can still help. Cite the evidence and recommendation tersely and frame it as advice to weigh, not an order. Do not repeat advice already visible in the recent transcript. Ignore minor style preferences unless the user made them requirements.
 ```
 
 ## Heuristic: review on good signals, not every turn
 
-The advisor subscribes to `agent_settled` and `tool_error`, not `turn_end`. It runs at decision points (idle and on failures) and stays silent otherwise, so it does not invoke a model review on every turn. Intervene only on a concrete, high-confidence signal: a material correctness gap, a missed constraint, a risky assumption, or a tool error worth surfacing.
+The advisor subscribes to `agent_settled` and `tool_error` by default, so it runs at decision points (idle and on failures) and stays silent otherwise rather than invoking a model review on every turn. The prompt is event-agnostic: it reviews whatever event is supplied, so you may subscribe it to other events (for example `turn_end`) for tighter per-turn review, at the cost of a model run per event. Intervene only on a concrete, high-confidence signal: a material correctness gap, a missed constraint, a risky assumption, or a tool error worth surfacing.
 
 After creation, report the focus, actor short ID, and inspect/stop commands. Do not wait for it. `triggerTurn: false` is intentional: delivered advice joins the main loop without forcing a new turn (advice to weigh, not an order).

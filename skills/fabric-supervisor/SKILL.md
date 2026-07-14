@@ -20,7 +20,13 @@ await workflow.configure({
 await phase("Start actor", { total: 1 });
 const current = await agents.actors();
 const existing = current.find((actor) => actor.name === π.name && actor.status !== "stopped");
-if (existing) return { reused: true, actor: existing };
+if (existing) {
+  // Re-apply the current goal/persona so re-running the skill updates a stale
+  // supervisor instead of silently reusing it. Events and run settings are
+  // left as the user configured them.
+  await agents.setInstructions({ id: existing.id, instructions: π.instructions });
+  return { reused: true, actor: existing, migrated: true };
+}
 
 const actor = await agents.create({
   name: π.name,
