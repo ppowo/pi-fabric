@@ -178,6 +178,32 @@ const descriptors: FabricActionDescriptor[] = [
     risk: "read",
   },
   {
+    name: "setEvents",
+    description: "Replace a persistent actor's host-event subscriptions",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string" },
+        events: {
+          type: "array",
+          items: {
+            type: "string",
+            enum: ["input", "turn_end", "agent_settled", "tool_error", "session_compact"],
+          },
+        },
+      },
+      required: ["id", "events"],
+      additionalProperties: false,
+    },
+    risk: "agent",
+  },
+  {
+    name: "clearMessages",
+    description: "Clear a persistent actor's recorded message history",
+    inputSchema: idSchema,
+    risk: "write",
+  },
+  {
     name: "remove",
     description: "Stop and remove a persistent actor",
     inputSchema: idSchema,
@@ -442,6 +468,21 @@ export class AgentsProvider implements FabricProvider {
           String(args.id),
           typeof args.limit === "number" ? args.limit : 50,
         );
+      case "setEvents": {
+        const events = Array.isArray(args.events)
+          ? args.events.filter(
+              (event): event is FabricActorHostEvent =>
+                event === "input" ||
+                event === "turn_end" ||
+                event === "agent_settled" ||
+                event === "tool_error" ||
+                event === "session_compact",
+            )
+          : [];
+        return this.actorManager.setEvents(String(args.id), events);
+      }
+      case "clearMessages":
+        return this.actorManager.clearMessages(String(args.id));
       case "remove":
         return this.actorManager.remove(String(args.id));
       case "log": {

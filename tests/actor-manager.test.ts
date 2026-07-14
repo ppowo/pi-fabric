@@ -493,7 +493,7 @@ describe("ActorManager", () => {
     expect(reply.text).toBe("fake worker complete");
   });
 
-  it("haltAll arms a cooldown that suppresses host-event dispatch then resumes", async () => {
+  it("haltAll arms a stop-the-world that suppresses host events until the user resumes", async () => {
     const { actors } = setup();
     const actor = await actors.create({
       name: "watcher",
@@ -506,13 +506,127 @@ describe("ActorManager", () => {
     expect(actors.dispatchHostEvent("agent_settled", { turn: 1 })).toBe(1);
     await waitFor(() => actors.status(actor.id).status === "idle");
 
-    // A halt (even with no active work) arms the cooldown.
+    // A halt arms stop-the-world: subsequent host events are suppressed...
     actors.haltAll();
     expect(actors.dispatchHostEvent("agent_settled", { turn: 2 })).toBe(0);
 
-    // After the cooldown window, host-event dispatch resumes.
-    await new Promise((resolve) => setTimeout(resolve, 1_200));
-    expect(actors.dispatchHostEvent("agent_settled", { turn: 3 })).toBe(1);
+    // ...including other event types, with no time-based expiry.
+    expect(actors.dispatchHostEvent("tool_error", { turn: 2 })).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    // The user resumes by sending a new message: the "input" host event lifts
+    // the halt. The watcher does not subscribe to input, so this dispatches to
+    // zero actors but reopens the gate.
+    expect(actors.dispatchHostEvent("input", { turn: 3 })).toBe(0);
+
+    // After resume, host-event dispatch is delivered again.
+    expect(actors.dispatchHostEvent("agent_settled", { turn: 4 })).toBe(1);
     await waitFor(() => actors.status(actor.id).status === "idle");
+  });
+
+  it("setEvents replaces an actor's host-event subscriptions and dedupes", async () => {
+    const { actors } = setup();
+    const actor = await actors.create({
+      name: "watcher",
+      instructions: "Watch parent events.",
+      events: ["agent_settled", "tool_error"],
+      responseMode: "text",
+    });
+    expect(actors.status(actor.id).events).toEqual(["agent_settled", "tool_error"]);
+
+    await actors.setEvents(actor.id, ["input", "turn_end"]);
+    expect(actors.status(actor.id).events).toEqual(["input", "turn_end"]);
+
+    // An empty set pauses host-event reactivity without stopping the actor.
+    await actors.setEvents(actor.id, []);
+    expect(actors.status(actor.id).events).toEqual([]);
+    expect(actors.status(actor.id).status).toBe("idle");
+
+    // Duplicates are deduped, preserving first-seen order.
+    await actors.setEvents(actor.id, ["agent_settled", "agent_settled"]);
+    expect(actors.status(actor.id).events).toEqual(["agent_settled"]);
+  });
+
+  it("setEvents rejects an unsupported event", async () => {
+    const { actors } = setup();
+    const actor = await actors.create({
+      name: "watcher",
+      instructions: "Watch parent events.",
+      responseMode: "text",
+    });
+    await expect(actors.setEvents(actor.id, ["bogus" as never])).rejects.toThrow(
+      "Unsupported Fabric actor event",
+    );
+    expect(actors.status(actor.id).events).toEqual([]);
+  });
+
+  it("setEvents throws for an unknown actor", async () => {
+    const { actors } = setup();
+    await expect(actors.setEvents("nope", [])).rejects.toThrow("Unknown Fabric actor");
+  });
+
+  it("clearMessages resets an actor's recorded history without stopping it", async () => {
+    const { actors } = setup();
+    const actor = await actors.create({
+      name: "reviewer",
+      instructions: "Review messages and reply concisely.",
+      responseMode: "text",
+    });
+    await actors.ask(actor.id, "Inspect auth");
+    await waitFor(() => actors.status(actor.id).status === "idle");
+    expect(actors.messages(actor.id).length).toBeGreaterThan(0);
+
+    await actors.clearMessages(actor.id);
+    expect(actors.messages(actor.id)).toEqual([]);
+    // The actor is still alive and responsive.
+    expect(actors.status(actor.id).status).toBe("idle");
+    const reply = await actors.ask(actor.id, "Inspect auth");
+    expect(reply.text).toBe("fake worker complete");
+  });
+
+  it("clearMessages throws for an unknown actor", async () => {
+    const { actors } = setup();
+    await expect(actors.clearMessages("nope")).rejects.toThrow("Unknown Fabric actor");
+  });
+
+  it("restarts the drain for successive coalesced host events without stranding an item", async () => {
+    const { actors, deliveries } = setup();
+    const actor = await actors.create({
+      name: "advisor",
+      instructions: "Advise only when useful.",
+      events: ["agent_settled"],
+      responseMode: "directive",
+      delivery: "steer",
+      coalesce: true,
+    });
+    // Each turn: the actor is idle when the event fires, so a run starts and
+    // the drain exits before the next event. A regression in drain restart
+    // (the "stuck at queue:1" race) would leave one of these stranded.
+    for (let turn = 0; turn < 5; turn++) {
+      expect(actors.dispatchHostEvent("agent_settled", { turn })).toBe(1);
+      await waitFor(() => actors.status(actor.id).status === "idle");
+    }
+    expect(deliveries.length).toBe(5);
+    expect(actors.status(actor.id)).toMatchObject({ status: "idle", queued: 0 });
+  });
+
+  it("processes a host event enqueued while a run is in flight", async () => {
+    const { actors, deliveries } = setup();
+    const actor = await actors.create({
+      name: "advisor",
+      instructions: "Advise only when useful.",
+      events: ["agent_settled"],
+      responseMode: "directive",
+      delivery: "steer",
+      coalesce: true,
+    });
+    expect(actors.dispatchHostEvent("agent_settled", { turn: 1 })).toBe(1);
+    await waitFor(() => actors.status(actor.id).status === "running");
+    // A second event arrives while the first run is in flight; the running
+    // drain must pick it up on its next loop instead of stranding it.
+    expect(actors.dispatchHostEvent("agent_settled", { turn: 2 })).toBe(1);
+    await waitFor(() => actors.status(actor.id).status === "idle");
+    expect(deliveries.length).toBe(2);
+    expect(actors.status(actor.id).queued).toBe(0);
   });
 });

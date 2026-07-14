@@ -292,6 +292,39 @@ export class ActorManager {
     return this.#publicInfo(actor);
   }
 
+  /**
+   * Replace an existing actor's host-event subscriptions. Already-queued work
+   * for a removed event still runs, but future dispatches respect the new set.
+   * Pass an empty array to pause host-event reactivity while keeping the actor
+   * alive and reachable by direct messages and mesh topics.
+   */
+  async setEvents(id: string, events: FabricActorHostEvent[]): Promise<FabricActorInfo> {
+    const actor = this.#requireActor(id);
+    const next = [...new Set(events)];
+    for (const event of next) {
+      if (!HOST_EVENTS.has(event)) throw new Error(`Unsupported Fabric actor event: ${event}`);
+    }
+    actor.events = next;
+    actor.updatedAt = Date.now();
+    this.#saveActors();
+    await this.#publishPresence(actor);
+    return this.#publicInfo(actor);
+  }
+
+  /**
+   * Clear an actor's recorded inbox/outbox history. The actor keeps running;
+   * only its bounded message log is reset — useful to declutter a long mailbox
+   * from the dashboard without stopping the actor.
+   */
+  async clearMessages(id: string): Promise<FabricActorInfo> {
+    const actor = this.#requireActor(id);
+    actor.messages = [];
+    actor.updatedAt = Date.now();
+    this.#saveActors();
+    await this.#publishPresence(actor);
+    return this.#publicInfo(actor);
+  }
+
   tell(id: string, message: string, data?: unknown): { queued: true; messageId: string } {
     this.#validateDirectMessage(message, data);
     const actor = this.#requireActiveActor(id);

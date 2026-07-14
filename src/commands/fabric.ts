@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import type { CapturedToolCatalog } from "../capture/catalog.js";
+import type { FabricActorHostEvent } from "../actors/types.js";
 import type { FabricState } from "../fabric-state.js";
 import { truncateMiddle } from "../util.js";
 import type { FabricUiController } from "../ui/controller.js";
@@ -72,6 +73,8 @@ export function registerFabricCommand(pi: ExtensionAPI, deps: FabricCommandDeps)
         "agents",
         "actors",
         "messages",
+        "clear-messages",
+        "events",
         "log",
         "export-log",
         "attach",
@@ -81,6 +84,8 @@ export function registerFabricCommand(pi: ExtensionAPI, deps: FabricCommandDeps)
       ];
       const idCommands = new Set([
         "messages",
+        "clear-messages",
+        "events",
         "log",
         "export-log",
         "attach",
@@ -340,6 +345,40 @@ export function registerFabricCommand(pi: ExtensionAPI, deps: FabricCommandDeps)
         }
         return;
       }
+      if (command === "clear-messages") {
+        const id = argumentsList[0];
+        if (!id) {
+          context.ui.notify("Usage: /fabric clear-messages <actor-id>", "warning");
+          return;
+        }
+        try {
+          const actor = state.actors.status(id);
+          await state.actors.clearMessages(actor.id);
+          context.ui.notify(`Cleared message history for ${actor.name}`, "info");
+        } catch (error) {
+          context.ui.notify(error instanceof Error ? error.message : String(error), "error");
+        }
+        return;
+      }
+      if (command === "events") {
+        const id = argumentsList[0];
+        if (!id) {
+          context.ui.notify("Usage: /fabric events <actor-id> [event...]", "warning");
+          return;
+        }
+        try {
+          const actor = state.actors.status(id);
+          const events = argumentsList.slice(1) as FabricActorHostEvent[];
+          await state.actors.setEvents(actor.id, events);
+          context.ui.notify(
+            `Set ${actor.name} events: ${events.join(", ") || "(none)"}`,
+            "info",
+          );
+        } catch (error) {
+          context.ui.notify(error instanceof Error ? error.message : String(error), "error");
+        }
+        return;
+      }
       if (command === "stop") {
         const id = argumentsList[0];
         if (!id) {
@@ -401,7 +440,7 @@ export function registerFabricCommand(pi: ExtensionAPI, deps: FabricCommandDeps)
       }
       if (command !== "status") {
         context.ui.notify(
-          "Usage: /fabric [status|dashboard|reload|providers|agents|actors|messages <id>|log <id>|export-log <id>|attach <id>|stop <id>|remove <id>|kill <id>]",
+          "Usage: /fabric [status|dashboard|reload|providers|agents|actors|messages <id>|clear-messages <id>|events <id> [event...]|log <id>|export-log <id>|attach <id>|stop <id>|remove <id>|kill <id>]",
           "warning",
         );
         return;
