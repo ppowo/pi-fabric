@@ -289,7 +289,7 @@ LocalTerm already exposes the needed tmux-parity primitives: detached creation, 
 localterm start
 ```
 
-Use `/fabric agents` to list children and `/fabric attach <id>` to display the appropriate attach command. Abort signals propagate to the transport and child Pi process.
+Use `/fabric agents` to list children and `/fabric attach <id>` to display the appropriate attach command. Abort signals propagate to the transport and child Pi process. When a program uses orchestration entry points (`agent`/`workflow.agent`, `agents.run`/`agents.wait`/`agents.ask`, `council.run`, `rlm.query`), Fabric raises the whole-program `executor.timeoutMs` to at least `subagents.timeoutMs`, so the parent deadline cannot stop children that are still within their own per-agent budget.
 
 Set `worktree: true` to create a dedicated Git worktree and `pi-fabric/<name>-<id>` branch. Worktrees are retained for inspection until `agents.cleanup()` is called.
 
@@ -499,7 +499,7 @@ Project values override global values.
     "maxConcurrent": 4,
     "maxPerExecution": 100,
     "maxDepth": 2,
-    "timeoutMs": 600000,
+    "timeoutMs": 3600000,
     "extensions": true,
     "defaultTools": ["read", "bash", "edit", "write", "grep", "find", "ls"],
     "retainRuns": false,

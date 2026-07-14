@@ -200,4 +200,97 @@ return "unreachable";
     expect(result.success).toBe(false);
     expect(result.error).toContain("agent budget exhausted (1 per execution)");
   });
+
+  it("raises the executor deadline to the subagent deadline for orchestration programs", async () => {
+    const registry = new ActionRegistry();
+    const descriptor = {
+      name: "run",
+      description: "fake agent",
+      inputSchema: {
+        type: "object",
+        properties: { task: { type: "string" } },
+        required: ["task"],
+        additionalProperties: true,
+      },
+      risk: "agent" as const,
+    };
+    registry.register({
+      name: "agents",
+      description: "fake agents",
+      async list() {
+        return [descriptor];
+      },
+      async describe(name) {
+        return name === "run" ? descriptor : undefined;
+      },
+      async invoke(_name, _args, context) {
+        return new Promise((resolve) => {
+          const timer = setTimeout(() => {
+            clearTimeout(timer);
+            resolve({ status: "completed", text: "ok", usage: { input: 0, output: 0 } });
+          }, 250);
+          context.signal?.addEventListener("abort", () => clearTimeout(timer), { once: true });
+        });
+      },
+    });
+    const config = structuredClone(DEFAULT_FABRIC_CONFIG);
+    config.fullCodeMode = false;
+    config.approvals.agent = "allow";
+    config.executor.timeoutMs = 100;
+    config.subagents.timeoutMs = 30_000;
+    const service = new FabricExecutionService(registry, config);
+    const context = { cwd: process.cwd(), hasUI: false } as ExtensionContext;
+    const result = await service.execute({
+      code: 'await agents.run({ task: "slow" }); return "ok";',
+      signal: undefined,
+      parentToolCallId: "orchestration-floor",
+      context,
+      onPartial() {},
+    });
+    expect(result.success).toBe(true);
+    expect(result.value).toBe("ok");
+  });
+
+  it("keeps the short executor deadline for non-orchestration programs", async () => {
+    const registry = new ActionRegistry();
+    const descriptor = {
+      name: "slow",
+      description: "slow call",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      risk: "read" as const,
+    };
+    registry.register({
+      name: "demo",
+      description: "demo provider",
+      async list() {
+        return [descriptor];
+      },
+      async describe(name) {
+        return name === "slow" ? descriptor : undefined;
+      },
+      async invoke(_name, _args, context) {
+        return new Promise((_resolve, reject) => {
+          context.signal?.addEventListener("abort", () => reject(new Error("aborted")), {
+            once: true,
+          });
+        });
+      },
+    });
+    const config = structuredClone(DEFAULT_FABRIC_CONFIG);
+    config.fullCodeMode = false;
+    config.approvals.read = "allow";
+    config.executor.timeoutMs = 100;
+    config.subagents.timeoutMs = 30_000;
+    const service = new FabricExecutionService(registry, config);
+    const context = { cwd: process.cwd(), hasUI: false } as ExtensionContext;
+    const result = await service.execute({
+      code: 'return tools.call({ ref: "demo.slow", args: {} });',
+      signal: undefined,
+      parentToolCallId: "no-floor",
+      context,
+      onPartial() {},
+    });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("timed out");
+  });
 });

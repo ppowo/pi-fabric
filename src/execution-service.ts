@@ -14,6 +14,7 @@ import {
 } from "./core/action-registry.js";
 import { ApprovalController } from "./core/approval-controller.js";
 import { guestTypeDeclarations } from "./runtime/guest-types.js";
+import { codeUsesOrchestration } from "./runtime/orchestration.js";
 import { QuickJsRuntime, type FabricSandboxResult } from "./runtime/quickjs-runtime.js";
 import { typeCheckFabricCode, type FabricTypeError } from "./runtime/type-checker.js";
 
@@ -133,6 +134,13 @@ export class FabricExecutionService {
       extensionContext: options.context,
       update,
     };
+    // Orchestration programs spawn/await child Pi agents whose per-agent
+    // budget (subagents.timeoutMs) can exceed the whole-program executor
+    // deadline. Floor the executor deadline at the subagent deadline so the
+    // parent cannot abort children that are still within their own budget.
+    const effectiveTimeoutMs = codeUsesOrchestration(options.code)
+      ? Math.max(this.config.executor.timeoutMs, this.config.subagents.timeoutMs)
+      : this.config.executor.timeoutMs;
     let sandboxResult: FabricSandboxResult;
     try {
       sandboxResult = await this.#runtime.execute(
@@ -259,7 +267,7 @@ export class FabricExecutionService {
           }
         },
         {
-          timeoutMs: this.config.executor.timeoutMs,
+          timeoutMs: effectiveTimeoutMs,
           memoryLimitBytes: this.config.executor.memoryLimitBytes,
           maxLogChars: this.config.executor.maxOutputChars,
           ...(options.strings ? { strings: options.strings } : {}),

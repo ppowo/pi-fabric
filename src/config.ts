@@ -116,7 +116,7 @@ export const DEFAULT_FABRIC_CONFIG: FabricConfig = {
     maxConcurrent: 4,
     maxPerExecution: 100,
     maxDepth: 2,
-    timeoutMs: 600_000,
+    timeoutMs: 3_600_000,
     extensions: true,
     defaultTools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
     retainRuns: false,
