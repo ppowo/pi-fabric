@@ -373,6 +373,31 @@ describe("SubagentManager", () => {
       delete process.env.PI_FABRIC_BUDGET_ID;
     }
   });
+
+  it("terminates a child that exceeds the per-child token limit", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-tokens-"));
+    roots.push(root);
+    const fakePi = path.resolve("tests/fixtures/fake-pi-rpc.mjs");
+    fs.chmodSync(fakePi, 0o755);
+    // The fake pi emits one assistant turn with 7 tokens (input 3 + output 4);
+    // a 5-token ceiling trips the guard after the first message_end.
+    const config = { ...DEFAULT_FABRIC_CONFIG.subagents, maxTokensPerChild: 5 };
+    const manager = new SubagentManager(process.cwd(), config, {
+      workerPath: path.resolve("src/worker.ts"),
+      piBinary: fakePi,
+      runRoot: root,
+      fullCodeMode: false,
+    });
+    managers.push(manager);
+    const result = await manager.run({
+      task: "burn tokens",
+      transport: "process",
+      timeoutMs: 5_000,
+    });
+    expect(result.status).toBe("timed_out");
+    expect(result.error ?? "").toMatch(/token limit/i);
+    expect(result.error ?? "").toMatch(/7 tokens/);
+  });
 });
 
 describe("SubagentManager steering", () => {

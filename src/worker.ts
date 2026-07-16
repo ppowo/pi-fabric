@@ -52,6 +52,7 @@ const parseOptions = (): SubagentWorkerOptions => {
   const steerFile = optional(args, "steer-file");
   const branch = optional(args, "branch");
   const worktree = optional(args, "worktree");
+  const maxTokens = optional(args, "max-tokens");
   return {
     id: required(args, "id"),
     name: required(args, "name"),
@@ -80,6 +81,7 @@ const parseOptions = (): SubagentWorkerOptions => {
     ...(steerFile ? { steerFile } : {}),
     ...(branch ? { branch } : {}),
     ...(worktree ? { worktree } : {}),
+    ...(maxTokens ? { maxTokens: Number(maxTokens) } : {}),
   };
 };
 
@@ -335,6 +337,26 @@ const main = async (): Promise<void> => {
     atomicWrite(options.statusFile, record);
   };
 
+  // Preemptive per-child token guard. timeoutMs bounds wall time and budgetUsd
+  // bounds cost, but a single runaway child can still blow its own context
+  // before Pi core compacts. When maxTokens is set and the child's cumulative
+  // token usage crosses it, terminate the child like a timeout so the run
+  // settles with a terminal status instead of burning to the hour deadline.
+  const enforceTokenLimit = (): void => {
+    if (terminalStatus || !options.maxTokens || options.maxTokens <= 0) return;
+    const total =
+      record.usage.input +
+      record.usage.output +
+      record.usage.cacheRead +
+      record.usage.cacheWrite;
+    if (total <= options.maxTokens) return;
+    terminalStatus = "timed_out";
+    terminalError = `Fabric token limit reached: ${total} tokens (limit ${options.maxTokens}); terminating child`;
+    terminateChild(child, "SIGTERM");
+    setTimeout(() => terminateChild(child, "SIGKILL"), KILL_GRACE_MS).unref();
+    child.stdin?.end();
+  };
+
   const processEvent = (line: string): void => {
     if (process.env.PI_FABRIC_INJECT_CRASH === "stream") throw new Error("simulated stream crash");
     if (!line.trim()) return;
@@ -412,12 +434,16 @@ const main = async (): Promise<void> => {
         process.stdout.write(`\n${text}\n`);
       }
       applyUsage(record, messageRecord);
+      enforceTokenLimit();
       if (messageRecord.stopReason === "error") {
         sawAgentError = true;
         terminalError = assistantError(messageRecord);
       } else {
         sawAgentError = false;
-        terminalError = undefined;
+        // Once a terminal cause is set (e.g. the per-child token guard), keep it;
+        // a later non-error message_end must not clobber the reason we are
+        // terminating for.
+        if (!terminalStatus) terminalError = undefined;
       }
       update();
       return;

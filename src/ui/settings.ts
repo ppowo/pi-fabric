@@ -38,6 +38,7 @@ const RISKS = ["read", "write", "execute", "network", "agent"] as const;
 const CORE_RISK_TOOLS = ["read", "grep", "find", "edit", "write", "bash"] as const;
 const CORE_DEFAULT_TOOL_CANDIDATES = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const BUDGET_VALUES = [0, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10];
+const TOKEN_VALUES = [0, 50_000, 100_000, 250_000, 500_000, 1_000_000, 2_000_000];
 const ROOT_ITEM_IDS = [
   "fullCodeMode",
   "executor",
@@ -82,6 +83,15 @@ const formatBytes = (bytes: number): string =>
 
 const formatUsd = (value: number): string =>
   value <= 0 ? "Off" : `$${value.toFixed(2)}`;
+
+const formatTokens = (value: number): string =>
+  value <= 0
+    ? "Off"
+    : value >= 1_000_000
+      ? `${value / 1_000_000}M`
+      : value >= 1_000
+        ? `${value / 1_000}k`
+        : String(value);
 
 const formatToolCount = (count: number): string =>
   `${count} ${count === 1 ? "tool" : "tools"}`;
@@ -635,6 +645,17 @@ export const buildFabricSettingsItems = (
               formatUsd,
               "Recursion budget",
               "Maximum USD spend for subagent work across the whole recursion tree. 0 disables the budget.",
+            ),
+          }),
+          setting("subagents.maxTokensPerChild", "Token limit", formatTokens(config.subagents.maxTokensPerChild), {
+            description:
+              "Maximum cumulative tokens a single subagent may use before it is terminated (0 disables). Caps a runaway child before the host session compacts.",
+            submenu: numericSubmenu(
+              theme,
+              TOKEN_VALUES,
+              formatTokens,
+              "Subagent token limit",
+              "Maximum cumulative tokens a single subagent may use before it is terminated (0 disables).",
             ),
           }),
           setting("subagents.timeoutMs", "Timeout", formatMs(config.subagents.timeoutMs), {

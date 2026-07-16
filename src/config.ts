@@ -46,6 +46,7 @@ export interface FabricSubagentConfig {
   retainRuns: boolean;
   notifyOnComplete: boolean;
   budgetUsd: number;
+  maxTokensPerChild: number;
 }
 
 export interface FabricToolCaptureConfig {
@@ -122,6 +123,7 @@ export const DEFAULT_FABRIC_CONFIG: FabricConfig = {
     retainRuns: false,
     notifyOnComplete: true,
     budgetUsd: 0,
+    maxTokensPerChild: 0,
   },
   capture: {
     enabled: true,
@@ -370,6 +372,12 @@ export const normalizeFabricConfig = (input: Record<string, unknown>): FabricCon
         DEFAULT_FABRIC_CONFIG.subagents.budgetUsd,
         0,
         1_000_000,
+      ),
+      maxTokensPerChild: boundedInteger(
+        subagents.maxTokensPerChild,
+        DEFAULT_FABRIC_CONFIG.subagents.maxTokensPerChild,
+        0,
+        100_000_000,
       ),
     },
     capture: {

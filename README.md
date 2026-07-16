@@ -416,6 +416,8 @@ return rlm.query({
 
 `rlm.query()` is `agents.run()` with Fabric enabled in the child. Recursion is rejected at `subagents.maxDepth`. Approval of the initial recursive call delegates only the `agent` risk capability to recursive children; network, execution, and write approvals are not inherited. Each Fabric process enforces its own configured concurrency and timeout limits. When `subagents.budgetUsd` is set, a shared append-only cost ledger bounds total spend across the whole recursion tree: every node records the cost of the children it spawns into one ledger file inherited via environment, and each node rejects a new child when the accumulated spend reaches the budget. The check is best-effort (concurrent children can each pass before any cost lands, so a tree may slightly overshoot); the race-free ceiling remains `subagents.maxPerExecution`. The result and live status of every recursive child carry a `budget` summary (`limit`, `spent`, `remaining`, `tokens`).
 
+`subagents.maxTokensPerChild` (0 = disabled) bounds each child's cumulative token usage. The wall-clock `timeoutMs` and the cost `budgetUsd` bound time and money; this bounds a single runaway child's context before the host session compacts, terminating it with the same `timed_out` status and a `token limit` error.
+
 ## Included skills
 
 Pi discovers these package skills automatically:
@@ -520,7 +522,8 @@ Project values override global values.
     "defaultTools": ["read", "bash", "edit", "write", "grep", "find", "ls"],
     "retainRuns": false,
     "notifyOnComplete": true,
-    "budgetUsd": 0
+    "budgetUsd": 0,
+    "maxTokensPerChild": 0
   },
   "ui": {
     "enabled": true,
@@ -620,6 +623,17 @@ async invoke(actionName, args, context) {
 /fabric attach <subagent-id>
 /fabric stop <actor-or-subagent-id>
 ```
+
+## Headless focused agents
+
+Pi already runs one-shot, non-interactive agents with `pi -p` (`--print`), and it reads piped stdin as part of the prompt — so a focused agent composes with pipes, cron, git hooks, and CI like a Unix program, with no wrapper needed:
+
+```bash
+git diff | pi -p --no-session -t read,grep "Review this diff for concrete defects."
+pi -p --no-session --mode json -e <path-to-pi-fabric> "Map the persistence layer."
+```
+
+`--no-session` keeps the run ephemeral, `-t` restricts the tool allowlist, `--mode json` emits a structured event stream for scripting (`| jq`), and `-e <pi-fabric>` loads Fabric so the agent can use `fabric_exec`. The process exits non-zero on failure. See `pi --help` for the full flag list.
 
 ## Architecture
 

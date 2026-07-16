@@ -322,6 +322,9 @@ export class SubagentManager {
         JSON.stringify(tools),
         "--granted-risks",
         JSON.stringify(request.recursive ? ["agent"] : []),
+        ...(this.config.maxTokensPerChild > 0
+          ? ["--max-tokens", String(this.config.maxTokensPerChild)]
+          : []),
         "--transport",
         adapter.kind,
         ...(request.recursive ? ["--fabric-extension", this.#fabricExtensionPath] : []),

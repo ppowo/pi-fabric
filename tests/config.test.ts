@@ -260,4 +260,14 @@ describe("Fabric configuration", () => {
       normalizeFabricConfig({ subagents: { timeoutMs: 1_200_000 } }).subagents.timeoutMs,
     ).toBe(1_200_000);
   });
+
+  it("normalizes the per-child token limit and treats zero as disabled", () => {
+    expect(DEFAULT_FABRIC_CONFIG.subagents.maxTokensPerChild).toBe(0);
+    const set = normalizeFabricConfig({ subagents: { maxTokensPerChild: 50_000 } });
+    expect(set.subagents.maxTokensPerChild).toBe(50_000);
+    const negative = normalizeFabricConfig({ subagents: { maxTokensPerChild: -5 } });
+    expect(negative.subagents.maxTokensPerChild).toBe(0);
+    const huge = normalizeFabricConfig({ subagents: { maxTokensPerChild: Number.MAX_VALUE } });
+    expect(huge.subagents.maxTokensPerChild).toBe(100_000_000);
+  });
 });

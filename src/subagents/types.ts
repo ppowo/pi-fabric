@@ -111,6 +111,7 @@ export interface SubagentWorkerOptions {
   extensions: boolean;
   tools: string[];
   grantedRisks: string[];
+  maxTokens?: number;
   fabricExtensionPath?: string;
   model?: string;
   thinking?: string;

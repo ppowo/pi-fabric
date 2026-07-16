@@ -185,4 +185,26 @@ describe("FabricSettingsComponent", () => {
     const lines = captureSub.render(80).join("\n");
     expect(lines).toContain("Keep visible");
   });
+
+  it("surfaces the per-child token limit in the Subagents section", () => {
+    const items = buildItems();
+    const subagents = items.find((item) => item.id === "subagents");
+    expect(subagents?.submenu).toBeDefined();
+    const lines = subagents!.submenu!("", () => {}).render(80).join("\n");
+    expect(lines).toContain("Token limit");
+    expect(lines).toContain("Off");
+  });
+
+  it("shows a configured token limit formatted compactly", () => {
+    const items = buildFabricSettingsItems(
+      theme,
+      { ...DEFAULT_FABRIC_CONFIG, subagents: { ...DEFAULT_FABRIC_CONFIG.subagents, maxTokensPerChild: 500_000 } },
+      () => {},
+      { keepVisibleCandidates: ["fabric_exec"], modelSource: fakeModelSource },
+    );
+    const subagents = items.find((item) => item.id === "subagents")!;
+    const lines = subagents.submenu!("", () => {}).render(80).join("\n");
+    expect(lines).toContain("Token limit");
+    expect(lines).toContain("500k");
+  });
 });
