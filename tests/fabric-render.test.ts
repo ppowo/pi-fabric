@@ -1,11 +1,23 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import { initHighlighting } from "../src/ui/highlight.js";
-import { modelReadHint, nestedCallTitle, nestedEditDiff } from "../src/ui/fabric-render.js";
+import {
+  compactProgressPreview,
+  modelReadHint,
+  nestedCallTitle,
+  nestedEditDiff,
+  renderFabricMulticallPartial,
+} from "../src/ui/fabric-render.js";
 
 const theme = {
   fg: (color: string, text: string) => `\x1b[${color}]${text}\x1b[0m`,
   bold: (text: string) => `\x1b[1m${text}\x1b[22m`,
+} as unknown as Theme;
+
+const plainTheme = {
+  fg: (_color: string, text: string) => text,
+  bold: (text: string) => text,
 } as unknown as Theme;
 
 describe("fabric nested rendering", () => {
@@ -146,5 +158,61 @@ b`, theme)).toBe("");
     );
     expect(title).toContain("no_args");
     expect(title).not.toContain("3");
+  });
+
+  it("keeps multicall progress inline without adding completion-only rows", () => {
+    const audits = [
+      {
+        ref: "pi.read",
+        provider: "pi",
+        tool: "read",
+        args: { path: "src/index.ts" },
+        success: true,
+      },
+      {
+        ref: "pi.ls",
+        provider: "pi",
+        tool: "ls",
+        args: { path: "src" },
+      },
+    ];
+    const component = renderFabricMulticallPartial(
+      {
+        audits,
+        phases: ["Inspect"],
+        progress: "bash: one\ntwo\nthree\nfour",
+        expanded: false,
+      },
+      plainTheme,
+    );
+
+    const wide = component.render(120);
+    expect(wide).toHaveLength(4); // header + phase + two calls
+    expect(wide[0]).toContain("… 3 lines · four");
+    expect(wide.slice(1)).not.toContain("four");
+
+    const narrow = component.render(24);
+    expect(narrow).toHaveLength(wide.length);
+    expect(narrow.every((line) => visibleWidth(line) <= 24)).toBe(true);
+  });
+
+  it("uses the completed-render call cap while a multicall is partial", () => {
+    const audits = Array.from({ length: 12 }, (_, index) => ({
+      ref: "pi.read",
+      provider: "pi",
+      tool: "read",
+      args: { path: `file-${index}.ts` },
+    }));
+    const lines = renderFabricMulticallPartial(
+      { audits, phases: [], progress: "Calling pi.read", expanded: false },
+      plainTheme,
+    ).render(100);
+
+    expect(lines).toHaveLength(10); // header + eight calls + hidden marker
+    expect(lines.at(-1)).toContain("4 nested calls hidden");
+  });
+
+  it("compacts multiline progress to its latest line", () => {
+    expect(compactProgressPreview("one\ntwo\nthree")).toBe("… 2 lines · three");
   });
 });

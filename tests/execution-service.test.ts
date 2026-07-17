@@ -143,6 +143,7 @@ return {
       const activity = new FabricActivityStore();
       const service = new FabricExecutionService(registry, config, activity);
       const context = { cwd, hasUI: false } as ExtensionContext;
+      const partials: Array<{ phases: string[] }> = [];
       const result = await service.execute({
         code: `
 await workflow.configure({ name: "File audit", description: "Read one fixture" });
@@ -156,10 +157,13 @@ return text.trim();
         signal: undefined,
         parentToolCallId: "activity-test",
         context,
-        onPartial() {},
+        onPartial(snapshot) {
+          partials.push(snapshot);
+        },
       });
 
       expect(result.success).toBe(true);
+      expect(partials.some((partial) => partial.phases.includes("Inspect"))).toBe(true);
       expect(activity.get("activity-test")).toMatchObject({
         name: "File audit",
         description: "Read one fixture",

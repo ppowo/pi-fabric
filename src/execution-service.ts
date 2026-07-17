@@ -38,6 +38,7 @@ export interface FabricExecutionResult {
 
 interface FabricExecutionPartial {
   audits: FabricCallAudit[];
+  phases: string[];
   progress?: string | undefined;
 }
 
@@ -115,7 +116,11 @@ export class FabricExecutionService {
     };
     let currentProgress: string | undefined;
     const emit = (): void => {
-      options.onPartial({ audits: audits.slice(), progress: currentProgress });
+      options.onPartial({
+        audits: audits.slice(),
+        phases: phases.slice(),
+        progress: currentProgress,
+      });
     };
     const update = (message: string): void => {
       currentProgress = message;

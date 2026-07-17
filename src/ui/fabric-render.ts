@@ -1,5 +1,5 @@
 import type { AppKeybinding, Theme } from "@earendil-works/pi-coding-agent";
-import { getKeybindings } from "@earendil-works/pi-tui";
+import { getKeybindings, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import { highlightCode, languageFromPath } from "./highlight.js";
 import { headlineArg } from "../core/call-preview.js";
 
@@ -16,6 +16,30 @@ export interface FabricRenderAudit {
 
 const EXPAND_KEYBINDING = "app.tools.expand" as AppKeybinding;
 const NUMBERED_TOOLS = new Set(["read", "grep", "find", "ls"]);
+const COLLAPSED_MULTICALL_LIMIT = 8;
+const EXPANDED_MULTICALL_LIMIT = 30;
+
+export const safeTerminalText = (value: string): string =>
+  value.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, (character) => {
+    const code = character.codePointAt(0)?.toString(16).padStart(2, "0") ?? "00";
+    return `\\x${code}`;
+  });
+
+class BoundedLineList implements Component {
+  constructor(readonly lines: string[]) {}
+
+  render(width: number): string[] {
+    if (width <= 0) return [];
+    return this.lines.map((line) => truncateToWidth(line, width, ""));
+  }
+
+  invalidate(): void {}
+}
+
+export const renderBoundedLines = (lines: string[]): Component => new BoundedLineList(lines);
+
+export const fabricMulticallCallLimit = (expanded: boolean): number =>
+  expanded ? EXPANDED_MULTICALL_LIMIT : COLLAPSED_MULTICALL_LIMIT;
 
 /** Render the "keybinding to expand" hint, mirroring pi core's native tool previews. */
 export function expandHint(theme: Theme): string {
@@ -144,6 +168,71 @@ export function nestedCallTitle(
   else detail = headlineArg(args) ?? "";
   return detail ? `${title} ${theme.fg("accent", detail)}` : title;
 }
+
+export interface FabricMulticallPartialInput {
+  audits: FabricRenderAudit[];
+  phases: string[];
+  progress?: string | undefined;
+  expanded: boolean;
+}
+
+export const compactProgressPreview = (progress: string): string => {
+  const lines = safeTerminalText(progress)
+    .split("\n")
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  const latest = lines[lines.length - 1] ?? "";
+  if (lines.length <= 1) return latest;
+  return `… ${lines.length - 1} ${lines.length === 2 ? "line" : "lines"} · ${latest}`;
+};
+
+export const renderFabricMulticallPartial = (
+  input: FabricMulticallPartialInput,
+  theme: Theme,
+  invalidate?: () => void,
+): Component => {
+  const done = input.audits.filter((audit) => audit.success !== undefined).length;
+  let header = theme.fg(
+    "warning",
+    `◆ Fabric running · ${done}/${input.audits.length} calls`,
+  );
+  const progress = input.progress ? compactProgressPreview(input.progress) : "";
+  if (progress) header += theme.fg("dim", ` · ${progress}`);
+
+  const rows = [header];
+  if (input.phases.length > 0) {
+    rows.push(theme.fg("dim", input.phases.map((phase) => `◆ ${phase}`).join("  ")));
+  }
+
+  const callLimit = fabricMulticallCallLimit(input.expanded);
+  const callsShown = input.audits.slice(0, callLimit);
+  for (let index = 0; index < callsShown.length; index++) {
+    const audit = callsShown[index]!;
+    if (input.expanded && index > 0) rows.push("");
+    const glyph =
+      audit.success === undefined
+        ? theme.fg("warning", "◐")
+        : audit.success === false
+          ? theme.fg("error", "✗")
+          : theme.fg("dim", "›");
+    rows.push(`${glyph} ${nestedCallTitle(audit, theme, invalidate)}`);
+    if (audit.success === false && audit.error) {
+      for (const line of safeTerminalText(audit.error).split("\n")) {
+        rows.push(`  ${theme.fg("error", line)}`);
+      }
+    }
+  }
+
+  const callsHidden = input.audits.length - callsShown.length;
+  if (callsHidden > 0) {
+    const label = `… ${callsHidden} nested ${callsHidden === 1 ? "call" : "calls"} hidden`;
+    rows.push(
+      theme.fg("dim", label) +
+        (input.expanded ? "" : theme.fg("dim", " · ") + expandHint(theme)),
+    );
+  }
+  return renderBoundedLines(rows);
+};
 
 /** Extract the human-readable body text from a nested call result, if any. */
 export function nestedCallBody(audit: FabricRenderAudit): string | undefined {

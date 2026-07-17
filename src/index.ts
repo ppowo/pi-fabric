@@ -2,7 +2,6 @@ import {
   defineTool,
   type ExtensionAPI,
   type ExtensionContext,
-  type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { loadCodePreviewSettings, withCodePreviewShell } from "pi-code-previews";
@@ -17,12 +16,16 @@ import { FABRIC_PROVIDER_REGISTER_EVENT, type FabricMediaBlock, type FabricProvi
 import { FabricUiController } from "./ui/controller.js";
 import {
   expandHint,
+  fabricMulticallCallLimit,
   isNumberedTool,
   modelReadHint,
   nestedCallBody,
   nestedCallCode,
   nestedCallTitle,
   nestedEditDiff,
+  renderBoundedLines,
+  renderFabricMulticallPartial,
+  safeTerminalText,
   type FabricRenderAudit,
 } from "./ui/fabric-render.js";
 import { highlightCode, initHighlighting } from "./ui/highlight.js";
@@ -53,28 +56,8 @@ const FABRIC_SKILLS_DIR = path.resolve(
 const FABRIC_TEMPLATE_LITERAL_CAVEAT =
   "Caveat: when a fabric_exec program builds a string containing literal `${...}` (shell snippets, tool args, grep patterns), avoid TS template literals — TS interpolates `${var}` into a 'Cannot find name' type error, or substitutes silently if a same-named variable exists. Use a plain quoted string or pass the content via the `strings` param and reference it as `π.key`.";
 
-const safeTerminalText = (value: string): string =>
-  value.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, (character) => {
-    const code = character.codePointAt(0)?.toString(16).padStart(2, "0") ?? "00";
-    return `\\x${code}`;
-  });
-
 const countLabel = (count: number, singular: string): string =>
   `${count} ${count === 1 ? singular : `${singular}s`}`;
-
-const PROGRESS_PREVIEW_LINES = 3;
-
-// A streaming bash call can dump many lines of stdout into `progress`. In a
-// multitool partial render that shoves the rest of the call list around, so
-// tail-window the progress to a fixed line count and keep the height stable.
-const tailProgressPreview = (progress: string, theme: Theme): string => {
-  const escaped = safeTerminalText(progress);
-  const lines = escaped.split("\n");
-  if (lines.length <= PROGRESS_PREVIEW_LINES) return theme.fg("dim", escaped);
-  const hidden = lines.length - PROGRESS_PREVIEW_LINES;
-  const tail = lines.slice(lines.length - PROGRESS_PREVIEW_LINES);
-  return theme.fg("dim", `… ${hidden} lines streaming\n${tail.join("\n")}`);
-};
 
 const formatValue = (value: unknown, format: ResultFormat): string => {
   if (value === undefined) return "";
@@ -311,27 +294,11 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
             if (progress) text += nl + theme.fg("dim", safeTerminalText(progress));
             return new Text(text, 0, 0);
           }
-          const done = audits.filter(
-            (audit) => audit.success !== undefined,
-          ).length;
-          let text = theme.fg(
-            "warning",
-            `◆ Fabric running · ${done}/${audits.length} calls`,
+          return renderFabricMulticallPartial(
+            { audits, phases, progress, expanded },
+            theme,
+            context?.invalidate,
           );
-          for (const audit of audits) {
-            const glyph =
-              audit.success === undefined
-                ? theme.fg("warning", "◐")
-                : audit.success === false
-                  ? theme.fg("error", "✗")
-                  : theme.fg("dim", "›");
-            text += nl + `${glyph} ${nestedCallTitle(audit, theme, context?.invalidate)}`;
-            if (audit.success === false && audit.error) {
-              text += nl + `  ${theme.fg("error", safeTerminalText(audit.error))}`;
-            }
-          }
-          if (progress) text += nl + tailProgressPreview(progress, theme);
-          return new Text(text, 0, 0);
         }
 
         const output = result.content
@@ -414,7 +381,7 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
         if (phases.length > 0)
           text += nl + theme.fg("dim", phases.map((phase) => `◆ ${phase}`).join("  "));
 
-        const callLimit = expanded ? 30 : 8;
+        const callLimit = fabricMulticallCallLimit(expanded);
         const callsShown = audits.slice(0, callLimit);
         const callsHidden = audits.length - callsShown.length;
         let firstNested = true;
@@ -457,7 +424,9 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
             }
           }
         }
-        return new Text(text, 0, 0);
+        return !expanded && !showOutput
+          ? renderBoundedLines(text.split(nl))
+          : new Text(text, 0, 0);
       },
       async execute(toolCallId, params, signal, onUpdate, context) {
         await state.ensure(context);
@@ -488,6 +457,7 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
               details: {
                 progress: snapshot.progress,
                 audits: snapshot.audits,
+                phases: snapshot.phases,
               },
             });
           },
