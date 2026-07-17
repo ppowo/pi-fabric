@@ -8,6 +8,7 @@ type FabricApprovalMode = "allow" | "ask" | "deny";
 export type FabricSubagentTransport = "auto" | "process" | "tmux" | "screen" | "localterm";
 export type FabricAgentRunner = "pi" | "claude";
 export type FabricUiWidgetMode = "auto" | "always" | "hidden";
+type FabricCompactionEngine = "pi" | "fabric";
 type FabricActorScope = "project" | "session";
 
 interface FabricExecutorConfig {
@@ -74,6 +75,10 @@ interface FabricUiConfig {
   haltOnEscape: boolean;
 }
 
+interface FabricCompactionConfig {
+  engine: FabricCompactionEngine;
+}
+
 export interface FabricMeshConfig {
   enabled: boolean;
   root?: string;
@@ -94,6 +99,7 @@ export interface FabricConfig {
   subagents: FabricSubagentConfig;
   capture: FabricToolCaptureConfig;
   ui: FabricUiConfig;
+  compaction: FabricCompactionConfig;
   mesh: FabricMeshConfig;
 }
 
@@ -160,6 +166,9 @@ export const DEFAULT_FABRIC_CONFIG: FabricConfig = {
     refreshMs: 500,
     eventHistory: 80,
     haltOnEscape: true,
+  },
+  compaction: {
+    engine: "pi",
   },
   mesh: {
     enabled: true,
@@ -258,6 +267,12 @@ const objectValue = (value: unknown): Record<string, unknown> =>
 const widgetModeValue = (value: unknown, fallback: FabricUiWidgetMode): FabricUiWidgetMode =>
   value === "auto" || value === "always" || value === "hidden" ? value : fallback;
 
+const compactionEngineValue = (
+  value: unknown,
+  fallback: FabricCompactionEngine,
+): FabricCompactionEngine =>
+  value === "pi" || value === "fabric" ? value : fallback;
+
 const actorScopeValue = (value: unknown, fallback: FabricActorScope): FabricActorScope =>
   value === "project" || value === "session" ? value : fallback;
 
@@ -278,6 +293,7 @@ export const normalizeFabricConfig = (input: Record<string, unknown>): FabricCon
   const claude = objectValue(subagents.claude);
   const capture = objectValue(input.capture);
   const ui = objectValue(input.ui);
+  const compaction = objectValue(input.compaction);
   const mesh = objectValue(input.mesh);
   const configuredTools = Array.isArray(subagents.defaultTools)
     ? subagents.defaultTools.filter(
@@ -426,6 +442,9 @@ export const normalizeFabricConfig = (input: Record<string, unknown>): FabricCon
         500,
       ),
       haltOnEscape: booleanValue(ui.haltOnEscape, DEFAULT_FABRIC_CONFIG.ui.haltOnEscape),
+    },
+    compaction: {
+      engine: compactionEngineValue(compaction.engine, DEFAULT_FABRIC_CONFIG.compaction.engine),
     },
     mesh: {
       enabled: booleanValue(mesh.enabled, DEFAULT_FABRIC_CONFIG.mesh.enabled),

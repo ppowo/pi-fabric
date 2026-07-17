@@ -10,6 +10,7 @@ import { CapturedToolCatalog } from "./capture/catalog.js";
 import { installRegisteredToolCapture } from "./capture/interceptor.js";
 import { registerFabricCommand } from "./commands/fabric.js";
 import { DEFAULT_FABRIC_CONFIG, effectiveToolCaptureConfig } from "./config.js";
+import { registerCompactionHook } from "./compaction/hook.js";
 import { FabricToolOwnership } from "./core/tool-ownership.js";
 import { FabricState } from "./fabric-state.js";
 import { FABRIC_PROVIDER_REGISTER_EVENT, type FabricMediaBlock, type FabricProviderRegistration } from "./protocol.js";
@@ -682,6 +683,14 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
 
   pi.on("session_compact", async (event, context) => {
     if (state.initialized) state.dispatchHostEvent("session_compact", event, context);
+  });
+
+  // Deterministic, LLM-free compaction (ships dark: only active when
+  // compaction.engine === "fabric"). Default "pi" leaves pi-core's own
+  // summarization untouched. Registered unconditionally; the handler returns
+  // early for the default engine so pi-core proceeds normally.
+  registerCompactionHook(pi, {
+    getEngine: () => (state.initialized ? state.config.compaction.engine : "pi"),
   });
 
   pi.on("before_agent_start", async (event) => {
