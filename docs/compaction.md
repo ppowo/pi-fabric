@@ -120,3 +120,26 @@ To go back to pi-core's LLM summarization, set it to `"pi"` (or remove the block
 - It does not parse prose. The `bash` "exit code" signal is `isError` for the bash tool and the typed `exitCode` field for `!`-prefixed user bash; nothing regexes the output text.
 - It does not chain summaries. Each compaction is recomputed from the raw live window.
 - It does not store content. Files are recorded as paths (addresses), not their contents.
+
+## Reconstruction-QA
+
+Deterministic serialization is necessary but not sufficient: a stable summary can still stably erase the wrong fact. `src/compaction/qa.ts` makes erasure falsifiable with Taelin's reconstruction recipe: compress the typed event stream, ask questions derived from ground truth, and test whether the projection preserves what a continuation needs.
+
+`generateProbes(events, cutIndex)` computes two probe classes directly from normalized events up to the cut:
+
+- **Content probes** require answers in the summary: the first user goal under the same three-line truncation rule as the projection, successful modified/created file addresses, unresolved error signatures, commit hashes, the last file-modifying call's path, and one independently generated one-liner for each earlier turn. The per-turn probes certify the earlier-turn count without depending on a rendered count field.
+- **Address probes** require expansion routes rather than copied content: an earlier-turn one-liner for each turn that fell beyond the 120-event brief-transcript window, plus the footer's `memory.recall / vcc_recall-style` pointer back to the append-only session log.
+
+The non-circularity rule is strict: probes are generated from `CompactionEvent[]`, never from `Sections` or rendered output. Otherwise QA would merely prove that rendering contains the projection it was given. `checkProbes` uses deterministic string containment, favoring essential tokens such as path leaves, commit hashes, and error signature lines over complete rendered lines, so section-format refactors do not create false failures. `qaReport` returns overall, content, and address scores in `[0, 1]` plus the failed probes and reasons.
+
+The mutation tests are the proof that the metric has teeth. They delete `[Outstanding Context]`, remove one modified file, drop the recall footer, and truncate `[Earlier Turns]`; each erasure causes its corresponding ground-truth probe to fail. The unmodified real `normalize → project → render` output scores `1` for representative history, and repeated evaluation is byte-for-byte deterministic at the object level.
+
+Run the reconstruction suite with:
+
+```sh
+pnpm vitest run tests/compaction-qa.test.ts
+```
+
+Run the full certification with `pnpm typecheck && pnpm test`. Under a nested Fabric environment, unset the recursion marker for the full suite: `env -u PI_FABRIC_DEPTH pnpm test`.
+
+This is continuation-relevant losslessness, not literal transcript preservation. The summary must directly answer the questions needed to continue safely; everything else may be erased only when an address remains that can expand back into the discarded log.
