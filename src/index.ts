@@ -691,12 +691,14 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
     if (state.initialized) state.dispatchHostEvent("session_compact", event, context);
   });
 
-  // Deterministic, LLM-free compaction (ships dark: only active when
-  // compaction.engine === "fabric"). Default "pi" leaves pi-core's own
-  // summarization untouched. Registered unconditionally; the handler returns
-  // early for the default engine so pi-core proceeds normally.
+  // Deterministic, LLM-free compaction is registered unconditionally and is
+  // active by default. The documented "pi" escape hatch returns early so
+  // pi-core's own summarization proceeds normally.
   registerCompactionHook(pi, {
-    getEngine: () => (state.initialized ? state.config.compaction.engine : "pi"),
+    getEngine: () =>
+      state.initialized
+        ? state.config.compaction.engine
+        : DEFAULT_FABRIC_CONFIG.compaction.engine,
   });
 
   pi.on("before_agent_start", async (event) => {

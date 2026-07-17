@@ -255,15 +255,21 @@ export interface CompactionHookOptions {
 
 export const registerCompactionHook = (pi: ExtensionAPI, options: CompactionHookOptions): void => {
   pi.on("session_before_compact", (event: SessionBeforeCompactEvent) => {
-    if (options.getEngine() !== "fabric") return; // ship dark: default "pi" passthrough
+    if (event.customInstructions === "__pi_vcc__") return;
+    if (options.getEngine() !== "fabric") return;
     const { preparation, branchEntries } = event;
-    if (!branchEntries || branchEntries.length === 0) return;
     const result = compileFabricSummary(
-      branchEntries,
+      branchEntries ?? [],
       preparation.tokensBefore,
       options.enrichers,
     );
-    if ("cancel" in result) return { cancel: true };
+    if ("cancel" in result) {
+      if ((event as SessionBeforeCompactEvent & { _piVccOverriding?: unknown })._piVccOverriding) {
+        return;
+      }
+      return { cancel: true };
+    }
+    (event as SessionBeforeCompactEvent & { _fabricCompaction?: boolean })._fabricCompaction = true;
     return { compaction: result.compaction };
   });
 };

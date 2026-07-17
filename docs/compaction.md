@@ -2,15 +2,15 @@
 
 Pi Fabric ships a from-first-principles, LLM-free, regex-free compaction engine as a `session_before_compact` hook. It is the redistilled counterpart of the deterministic compaction proven in pi-vcc, rebuilt native to fabric without that dependency and without its accumulated prose heuristics.
 
-This engine is **dark by default**: `compaction.engine` defaults to `"pi"`, so pi-core's own summarization runs unchanged. Set it to `"fabric"` to opt in.
+This engine is **default-on**: `compaction.engine` defaults to `"fabric"`. Set it to `"pi"` to use pi-core's own LLM summarization instead.
 
 ```json
 {
-  "compaction": { "engine": "fabric" }
+  "compaction": { "engine": "pi" }
 }
 ```
 
-Put it in `~/.pi/agent/fabric.json` (global) or `<project>/.pi/fabric.json` (trusted project).
+Put the escape hatch in `~/.pi/agent/fabric.json` (global) or `<project>/.pi/fabric.json` (trusted project).
 
 ## Why a deterministic compactor
 
@@ -104,15 +104,33 @@ Contract: an enricher must be **deterministic** — the same event stream must y
 
 Because the cut always lands at a turn boundary (a user message), a tool call and its result are always on the same side of the cut — the cut never orphans a `tool_result` from its `tool_call`. Empty history cancels; tiny history falls back to compact-all and still produces a stable summary.
 
-## Flipping the engine
+## Selecting the engine
 
-Set `compaction.engine` to `"fabric"`:
+The deterministic Fabric engine is the default:
 
 ```json
 { "compaction": { "engine": "fabric" } }
 ```
 
-To go back to pi-core's LLM summarization, set it to `"pi"` (or remove the block). The hook returns early for the default engine, so pi-core proceeds normally — there is no behavioral change unless you opt in.
+To use pi-core's LLM summarization, explicitly set the documented escape hatch:
+
+```json
+{ "compaction": { "engine": "pi" } }
+```
+
+With `"pi"`, Fabric's hook returns early and pi-core proceeds normally.
+
+## Interop with pi-vcc
+
+Fabric and pi-vcc coordinate when both extensions handle Pi's mutable `session_before_compact` event:
+
+- After every Fabric session config resolution, `PI_FABRIC_COMPACTION_ENGINE` is set to `"fabric"` when the resolved engine is Fabric and deleted when it is `"pi"`. This lets pi-vcc suppress its default compactor for the session.
+- When Fabric returns a compaction result, it sets `event._fabricCompaction = true` so a later pi-vcc handler can observe that Fabric claimed the event.
+- `customInstructions === "__pi_vcc__"` is the explicit `/pi-vcc` sentinel. Fabric always defers for this event, so the command uses pi-vcc's own engine.
+- Precedence is: explicit `/pi-vcc` sentinel, then the Fabric engine, then pi-vcc's default behavior.
+- Fabric normally returns `{ cancel: true }` when there is nothing to compact. If an earlier pi-vcc handler already produced a summary and marked `event._piVccOverriding`, Fabric returns `undefined` instead, avoiding Pi's cancel short-circuit and preserving that summary.
+
+The `"pi"` escape hatch remains a full passthrough: Fabric neither claims nor cancels the compaction event.
 
 ## What this engine does *not* do
 

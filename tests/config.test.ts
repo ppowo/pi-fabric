@@ -11,6 +11,7 @@ import {
 } from "../src/config.js";
 
 const temporaryDirectories: string[] = [];
+const originalCompactionEngineEnv = process.env.PI_FABRIC_COMPACTION_ENGINE;
 
 const temporaryDirectory = (): string => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-config-"));
@@ -21,6 +22,11 @@ const temporaryDirectory = (): string => {
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) {
     fs.rmSync(directory, { recursive: true, force: true });
+  }
+  if (originalCompactionEngineEnv === undefined) {
+    delete process.env.PI_FABRIC_COMPACTION_ENGINE;
+  } else {
+    process.env.PI_FABRIC_COMPACTION_ENGINE = originalCompactionEngineEnv;
   }
 });
 
@@ -173,6 +179,23 @@ describe("Fabric configuration", () => {
     expect(config.approvals.network).toBe("allow");
     expect(config.subagents.maxConcurrent).toBe(2);
     expect(config.subagents.transport).toBe("localterm");
+  });
+
+  it("updates the compaction engine environment across config re-initialization", () => {
+    const root = temporaryDirectory();
+    const cwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    const projectConfig = path.join(cwd, ".pi", "fabric.json");
+    fs.mkdirSync(path.dirname(projectConfig), { recursive: true });
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.writeFileSync(projectConfig, JSON.stringify({ compaction: { engine: "fabric" } }));
+
+    loadFabricConfig({ cwd, agentDir, projectTrusted: true });
+    expect(process.env.PI_FABRIC_COMPACTION_ENGINE).toBe("fabric");
+
+    fs.writeFileSync(projectConfig, JSON.stringify({ compaction: { engine: "pi" } }));
+    loadFabricConfig({ cwd, agentDir, projectTrusted: true });
+    expect(process.env.PI_FABRIC_COMPACTION_ENGINE).toBeUndefined();
   });
 
   it("ignores project configuration when the project is untrusted", () => {

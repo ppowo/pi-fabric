@@ -1,11 +1,17 @@
 import { performance } from "node:perf_hooks";
 import { describe, expect, it } from "vitest";
 import { normalizeFabricConfig, DEFAULT_FABRIC_CONFIG } from "../src/config.js";
-import { computeCut, compileFabricSummary } from "../src/compaction/hook.js";
+import {
+  computeCut,
+  compileFabricSummary,
+  registerCompactionHook,
+} from "../src/compaction/hook.js";
 import { normalizeEntries } from "../src/compaction/normalize.js";
 import { project, projectOutstanding } from "../src/compaction/projections.js";
 import type {
   CompactionEntry,
+  ExtensionAPI,
+  SessionBeforeCompactEvent,
   SessionEntry,
   SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
@@ -108,14 +114,95 @@ const nextCallId = (): string => callId(++callCounter);
 const buildSession = (...entries: SessionEntry[]): SessionEntry[] => entries;
 
 describe("compaction config", () => {
-  it("defaults to the pi engine (ships dark)", () => {
-    expect(DEFAULT_FABRIC_CONFIG.compaction.engine).toBe("pi");
+  it("defaults to the fabric engine", () => {
+    expect(DEFAULT_FABRIC_CONFIG.compaction.engine).toBe("fabric");
   });
 
-  it("normalizes a fabric engine override and rejects unknown values", () => {
-    expect(normalizeFabricConfig({ compaction: { engine: "fabric" } }).compaction.engine).toBe("fabric");
-    expect(normalizeFabricConfig({ compaction: { engine: "bogus" } }).compaction.engine).toBe("pi");
-    expect(normalizeFabricConfig({}).compaction.engine).toBe("pi");
+  it("normalizes a pi engine escape hatch and rejects unknown values", () => {
+    expect(normalizeFabricConfig({ compaction: { engine: "pi" } }).compaction.engine).toBe("pi");
+    expect(normalizeFabricConfig({ compaction: { engine: "bogus" } }).compaction.engine).toBe("fabric");
+    expect(normalizeFabricConfig({}).compaction.engine).toBe("fabric");
+  });
+});
+
+type InteropCompactionEvent = SessionBeforeCompactEvent & {
+  _fabricCompaction?: boolean;
+  _piVccOverriding?: boolean;
+};
+
+const compactionHandler = (
+  engine: "pi" | "fabric",
+): ((event: SessionBeforeCompactEvent) => unknown) => {
+  let handler: ((event: SessionBeforeCompactEvent) => unknown) | undefined;
+  const pi = {
+    on(name: string, candidate: unknown) {
+      if (name === "session_before_compact") {
+        handler = candidate as (event: SessionBeforeCompactEvent) => unknown;
+      }
+    },
+  } as unknown as ExtensionAPI;
+  registerCompactionHook(pi, { getEngine: () => engine });
+  if (!handler) throw new Error("compaction hook was not registered");
+  return handler;
+};
+
+const compactionEvent = (
+  branchEntries: SessionEntry[],
+  customInstructions?: string,
+): InteropCompactionEvent => ({
+  preparation: { tokensBefore: 1000 },
+  branchEntries,
+  ...(customInstructions === undefined ? {} : { customInstructions }),
+}) as unknown as InteropCompactionEvent;
+
+describe("compaction pi-vcc interop", () => {
+  it("defers to an explicit /pi-vcc sentinel", () => {
+    resetIds();
+    resetClock();
+    const event = compactionEvent(
+      buildSession(user("compact this"), assistant(textPart("done"))),
+      "__pi_vcc__",
+    );
+
+    expect(compactionHandler("fabric")(event)).toBeUndefined();
+    expect(event._fabricCompaction).toBeUndefined();
+  });
+
+  it("marks the mutable event when fabric claims compaction", () => {
+    resetIds();
+    resetClock();
+    const event = compactionEvent(
+      buildSession(user("compact this"), assistant(textPart("done"))),
+    );
+
+    expect(compactionHandler("fabric")(event)).toHaveProperty("compaction");
+    expect(event._fabricCompaction).toBe(true);
+  });
+
+  it("does not cancel a pi-vcc summary when there is nothing to compact", () => {
+    const event = compactionEvent([]);
+    event._piVccOverriding = true;
+
+    expect(compactionHandler("fabric")(event)).toBeUndefined();
+    expect(event._fabricCompaction).toBeUndefined();
+  });
+
+  it("cancels empty compaction when pi-vcc has not produced a summary", () => {
+    const event = compactionEvent([]);
+
+    expect(compactionHandler("fabric")(event)).toEqual({ cancel: true });
+    expect(event._fabricCompaction).toBeUndefined();
+  });
+
+  it("leaves the pi engine passthrough unchanged", () => {
+    resetIds();
+    resetClock();
+    const event = compactionEvent(
+      buildSession(user("use pi core"), assistant(textPart("done"))),
+    );
+
+    expect(compactionHandler("pi")(event)).toBeUndefined();
+    expect(event._fabricCompaction).toBeUndefined();
   });
 });
 

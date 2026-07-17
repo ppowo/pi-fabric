@@ -588,6 +588,9 @@ Project values override global values.
     "lingerMs": 10000,
     "eventHistory": 80
   },
+  "compaction": {
+    "engine": "fabric"
+  },
   "mesh": {
     "enabled": true,
     "actorScope": "project",
@@ -599,6 +602,8 @@ Project values override global values.
   }
 }
 ```
+
+The deterministic, LLM-free compaction engine is default-on. Set `compaction.engine` to `"pi"` to restore pi-core compaction. When pi-vcc is also installed, Fabric takes precedence for automatic compaction, while an explicit `/pi-vcc` command always uses pi-vcc's engine.
 
 `subagents.runner` selects the default harness (`"pi"` or `"claude"`). `subagents.model` is the optional Pi `provider/id` override; `subagents.claude.model` is the optional canonical Claude runtime key. `subagents.claude.binary` defaults to `claude` and can be an absolute path or wrapper; `PI_FABRIC_CLAUDE_BINARY` overrides it for the current process. `/fabric settings` enumerates Claude models from that binary and stores the two runner defaults independently.
 

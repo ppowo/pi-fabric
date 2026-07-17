@@ -178,7 +178,7 @@ export const DEFAULT_FABRIC_CONFIG: FabricConfig = {
     haltOnEscape: true,
   },
   compaction: {
-    engine: "pi",
+    engine: "fabric",
   },
   mesh: {
     enabled: true,
@@ -572,7 +572,13 @@ export const loadFabricConfig = (options: {
   if (inheritedFullCodeMode === "true" || inheritedFullCodeMode === "false") {
     merged.fullCodeMode = inheritedFullCodeMode === "true";
   }
-  return normalizeFabricConfig(merged);
+  const config = normalizeFabricConfig(merged);
+  if (config.compaction.engine === "fabric") {
+    process.env.PI_FABRIC_COMPACTION_ENGINE = "fabric";
+  } else {
+    delete process.env.PI_FABRIC_COMPACTION_ENGINE;
+  }
+  return config;
 };
 
 export const saveFabricConfig = (
