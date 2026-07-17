@@ -180,6 +180,28 @@ return tools.call({ ref, args: { task: "slow" } });
     expect(result.value).toMatchObject({ status: "completed", text: "ok" });
   });
 
+  it("extends a late blocking host call from the call start", async () => {
+    const result = await new QuickJsRuntime().execute(
+      `
+await tools.call({ ref: "demo.delay" });
+return tools.call({ ref: "agents.run", args: { task: "late" } });
+`,
+      async () =>
+        new Promise((resolve) => {
+          setTimeout(() => resolve({ status: "completed" }), 70);
+        }),
+      {
+        ...options,
+        timeoutMs: 100,
+        minimumTimeoutMsForHostCall(ref) {
+          return ref === "fabric.$call" ? 100 : undefined;
+        },
+      },
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.value).toMatchObject({ status: "completed" });
+  });
+
   it("aborts sibling host calls when guest workflow code fails", async () => {
     let hostCallAborted = false;
     const result = await new QuickJsRuntime().execute(
@@ -232,7 +254,7 @@ await Promise.all([
       ...options,
       timeoutMs: 50,
     });
-    expect(result.error).toBeDefined();
+    expect(result.error).toContain("Execution timed out after 50ms");
   });
 
   it("exposes named strings via π and throws a clear error for unprovided keys", async () => {

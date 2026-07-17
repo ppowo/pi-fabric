@@ -34,6 +34,7 @@ export class FabricUiController {
   #widgetTui: TUI | undefined;
   #widgetMounted = false;
   #widget: FabricWidget | undefined;
+  #lastRefreshErrorAt = 0;
   readonly #transcripts = new AgentTranscriptReader();
 
   constructor(readonly state: FabricState) {}
@@ -69,6 +70,7 @@ export class FabricUiController {
     this.#events = [];
     this.#meshOffset = 0;
     this.#snapshot = emptySnapshot();
+    this.#lastRefreshErrorAt = 0;
     this.#transcripts.clear();
   }
 
@@ -222,8 +224,13 @@ export class FabricUiController {
       this.#snapshot = createDashboardSnapshot(this.state, this.#events);
       this.#renderWidget(context);
       if (this.#widgetTui && this.#widget?.hasChanged()) this.#widgetTui.requestRender();
-    } catch {
-      return;
+    } catch (error) {
+      const now = Date.now();
+      if (now - this.#lastRefreshErrorAt >= 10_000) {
+        this.#lastRefreshErrorAt = now;
+        const message = error instanceof Error ? error.message : String(error);
+        context.ui.notify(`Fabric dashboard refresh failed: ${message}`, "warning");
+      }
     }
   }
 

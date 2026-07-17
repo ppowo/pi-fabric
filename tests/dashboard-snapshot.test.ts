@@ -125,6 +125,18 @@ describe("dashboard snapshot agent ownership", () => {
     });
   });
 
+  it("bounds historical one-shot agents while retaining attention-first rows", () => {
+    const records = Array.from({ length: 300 }, (_, index) => ({
+      ...record(`agent-${index}`),
+      status: (index === 299 ? "running" : "completed") as "running" | "completed",
+      updatedAt: index,
+    }));
+
+    const snapshot = createDashboardSnapshot(fakeState([], records), []);
+    expect(snapshot.agents).toHaveLength(240);
+    expect(snapshot.agents[0]?.id).toBe("agent-299");
+  });
+
   it("prefers an active actor worker over a newer retained failure", () => {
     const failed = {
       ...record("actor-failed"),

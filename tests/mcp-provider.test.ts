@@ -49,6 +49,15 @@ describe("McpProvider", () => {
       await expect(provider.invoke("test.echo_value", { value: "again" }, context)).resolves.toMatchObject({
         text: "echo:again",
       });
+      const controller = new AbortController();
+      const cancelled = provider.invoke(
+        "test.echo_value",
+        { value: "__delay__" },
+        { ...context, signal: controller.signal },
+      );
+      setTimeout(() => controller.abort(), 20);
+      await expect(cancelled).rejects.toThrow("MCP call cancelled");
+
       await expect(
         provider.invoke(
           "$register",

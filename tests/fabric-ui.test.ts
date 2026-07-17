@@ -205,6 +205,26 @@ describe("Fabric dynamic UI", () => {
     expect(lines.join("\n")).toContain("advisor");
   });
 
+  it("keeps a bounded terminal agent result cue until settle", () => {
+    const current = snapshot();
+    const run = current.runs[0]!;
+    run.status = "completed";
+    run.finishedAt = current.now;
+    current.actors = [];
+    current.state = [];
+    current.agents[0]!.status = "completed";
+    current.agents[0]!.finishedAt = current.now;
+    delete current.agents[0]!.currentTool;
+    current.agents[0]!.text = "Found a concrete regression";
+
+    const lines = new FabricWidget(theme, () => current, 5).render(72).join("\n");
+    expect(lines).toContain("security-reviewer");
+    expect(lines).toContain("result: Found a concrete regression");
+
+    current.widgetDismissedAt = current.now;
+    expect(shouldShowFabricWidget(current, "auto")).toBe(false);
+  });
+
   it("hides dismissed runs and resurfaces later ones", () => {
     const current = snapshot();
     const run = current.runs[0];
@@ -886,7 +906,7 @@ describe("Fabric dynamic UI", () => {
     try {
       dashboard.render(120);
       dashboard.handleInput("l");
-      expect(dashboard.render(120).join("\n")).toContain("space live peek");
+      expect(dashboard.render(120).join("\n")).toContain("space live transcript peek");
       dashboard.handleInput(" ");
       const transcript = dashboard.render(80).join("\n");
       expect(transcript).toContain("transcript · live");
@@ -901,11 +921,68 @@ describe("Fabric dynamic UI", () => {
       expect(transcript).toContain("G follow:on");
 
       dashboard.handleInput("k");
-      expect(dashboard.render(80).join("\n")).toContain("G follow:off");
+      expect(dashboard.render(80).join("\n")).toContain("G follow:on");
       dashboard.handleInput("G");
       expect(dashboard.render(80).join("\n")).toContain("G follow:on");
       dashboard.handleInput("t");
       expect(dashboard.render(80).join("\n")).toContain("Review the migration for security defects");
+    } finally {
+      dashboard.dispose();
+    }
+  });
+
+  it("pauses only after real transcript scrolling and resumes at the growing tail", () => {
+    const entries = Array.from({ length: 30 }, (_, index) => ({
+      id: `message-${index}`,
+      kind: "assistant" as const,
+      label: "Agent",
+      text: `streamed update ${index}`,
+      status: "completed" as const,
+    }));
+    const dashboard = new FabricDashboard(
+      { requestRender: vi.fn(), terminal: { rows: 12 } } as unknown as TUI,
+      theme,
+      snapshot,
+      vi.fn(),
+      { agentTranscript: () => ({ entries, truncated: false }) },
+    );
+    try {
+      dashboard.render(120);
+      dashboard.handleInput("l");
+      dashboard.handleInput(" ");
+      expect(dashboard.render(80).join("\n")).toContain("streamed update 29");
+
+      dashboard.handleInput("k");
+      const paused = dashboard.render(80).join("\n");
+      expect(paused).toContain("G follow:off");
+      entries.push({ id: "message-30", kind: "assistant", label: "Agent", text: "new tail update", status: "completed" });
+      expect(dashboard.render(80).join("\n")).not.toContain("new tail update");
+
+      dashboard.handleInput("G");
+      const followed = dashboard.render(80).join("\n");
+      expect(followed).toContain("G follow:on");
+      expect(followed).toContain("new tail update");
+    } finally {
+      dashboard.dispose();
+    }
+  });
+
+  it("includes error status in the failed filter", () => {
+    const current = snapshot();
+    current.agents[0]!.status = "error";
+    const dashboard = new FabricDashboard(
+      { requestRender: vi.fn() } as unknown as TUI,
+      theme,
+      () => current,
+      vi.fn(),
+    );
+    try {
+      dashboard.render(120);
+      dashboard.handleInput("l");
+      dashboard.handleInput("f");
+      dashboard.handleInput("f");
+      dashboard.handleInput("f");
+      expect(dashboard.render(120).join("\n")).toContain("security-reviewer");
     } finally {
       dashboard.dispose();
     }
@@ -940,6 +1017,10 @@ describe("Fabric dynamic UI", () => {
       const refreshed = dashboard.render(120).join("\n");
       expect(refreshed).toContain("Review the migration for security defects");
       expect(refreshed).not.toContain("Later live run");
+
+      dashboard.handleInput("\x1b");
+      const resumed = dashboard.render(120).join("\n");
+      expect(resumed).toContain("Later live run");
     } finally {
       dashboard.dispose();
     }
@@ -951,13 +1032,23 @@ describe("Fabric dynamic UI", () => {
       theme,
       snapshot,
       vi.fn(),
-      { onAgentSteer: vi.fn() },
+      {
+        onAgentSteer: vi.fn(),
+        agentTranscript: () => ({
+          entries: [{ id: "narrow", kind: "assistant", label: "Agent", text: "narrow live transcript", status: "running" }],
+          truncated: false,
+        }),
+      },
     );
     try {
       dashboard.render(120);
       dashboard.handleInput("l");
       dashboard.handleInput("\r");
-      expect(dashboard.render(20).join("\n")).toContain("esc back");
+      const narrow = dashboard.render(20).join("\n");
+      expect(narrow).toContain("migration for");
+      expect(narrow).toContain("esc");
+      dashboard.handleInput("t");
+      expect(dashboard.render(20).join("\n")).toContain("narrow live");
       dashboard.handleInput("s");
       const editor = dashboard.render(20).join("\n");
       expect(editor).toContain("steer");
@@ -986,6 +1077,8 @@ describe("Fabric dynamic UI", () => {
     const lines = wrapPlainText(value, 4);
     expect(lines.every((line) => visibleWidth(line) <= 4)).toBe(true);
     expect(lines.join("").replaceAll(" ", "")).toBe(value.replaceAll(" ", ""));
+    expect(wrapPlainText("界", 1)).toEqual(["…"]);
+    expect(wrapPlainText("👩‍💻x", 2)).toEqual(["👩‍💻", "x"]);
   });
 
 });

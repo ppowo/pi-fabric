@@ -9,6 +9,8 @@ import {
   type FabricUiStateEntry,
 } from "./types.js";
 
+const MAX_UI_AGENTS = 240;
+
 const isRunRecord = (
   value: SubagentRunRecord | SubagentHandleInfo,
 ): value is SubagentRunRecord => "startedAt" in value;
@@ -183,7 +185,7 @@ export const createDashboardSnapshot = (
         (numberFrom(right.updatedAt) ?? numberFrom(right.startedAt) ?? 0) -
         (numberFrom(left.updatedAt) ?? numberFrom(left.startedAt) ?? 0);
       return recency || left.id.localeCompare(right.id);
-    }),
+    }).slice(0, MAX_UI_AGENTS),
     actors: actors.sort((left, right) => {
       const leftActive = activeStatuses.has(left.status) ? 1 : 0;
       const rightActive = activeStatuses.has(right.status) ? 1 : 0;

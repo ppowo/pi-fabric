@@ -37,6 +37,7 @@ export interface MeshStateEntry {
 interface MeshStateFile {
   format: 1;
   entries: Record<string, MeshStateEntry>;
+  versions?: Record<string, number>;
 }
 
 const TOPIC_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/;
@@ -276,8 +277,13 @@ export class MeshStore {
     return this.#withLock(() => {
       const state = readState(this.#statePath);
       const existing = state.entries[input.key];
+      const storedVersion = state.versions?.[input.key];
+      const actualVersion =
+        existing?.version ??
+        (typeof storedVersion === "number" && Number.isSafeInteger(storedVersion)
+          ? storedVersion
+          : 0);
       if (input.ifVersion !== undefined) {
-        const actualVersion = existing?.version ?? 0;
         if (actualVersion !== input.ifVersion) {
           throw new Error(
             `Mesh compare-and-swap failed for ${input.key}: expected version ${input.ifVersion}, found ${actualVersion}`,
@@ -287,11 +293,13 @@ export class MeshStore {
       const entry: MeshStateEntry = {
         key: input.key,
         value,
-        version: (existing?.version ?? 0) + 1,
+        version: actualVersion + 1,
         updatedAt: Date.now(),
         updatedBy: jsonClone(input.identity),
       };
       state.entries[input.key] = entry;
+      state.versions ??= {};
+      state.versions[input.key] = entry.version;
       atomicWrite(this.#statePath, state);
       return jsonClone(entry);
     });
@@ -305,10 +313,16 @@ export class MeshStore {
     return this.#withLock(() => {
       const state = readState(this.#statePath);
       const existing = state.entries[input.key];
+      const storedVersion = state.versions?.[input.key];
+      const actualVersion =
+        existing?.version ??
+        (typeof storedVersion === "number" && Number.isSafeInteger(storedVersion)
+          ? storedVersion
+          : 0);
       if (!existing) {
-        if (input.ifVersion !== undefined && input.ifVersion !== 0) {
+        if (input.ifVersion !== undefined && input.ifVersion !== actualVersion) {
           throw new Error(
-            `Mesh compare-and-swap failed for ${input.key}: expected version ${input.ifVersion}, found 0`,
+            `Mesh compare-and-swap failed for ${input.key}: expected version ${input.ifVersion}, found ${actualVersion}`,
           );
         }
         return { deleted: false };
@@ -319,6 +333,8 @@ export class MeshStore {
         );
       }
       delete state.entries[input.key];
+      state.versions ??= {};
+      state.versions[input.key] = existing.version;
       atomicWrite(this.#statePath, state);
       return { deleted: true, version: existing.version };
     });
@@ -327,10 +343,21 @@ export class MeshStore {
   async #withLock<T>(operation: () => T): Promise<T> {
     fs.mkdirSync(this.root, { recursive: true, mode: 0o700 });
     const deadline = Date.now() + LOCK_TIMEOUT_MS;
+    const token = randomUUID();
+    const ownerPath = path.join(this.#lockPath, "owner");
+    const processAlive = (pid: number): boolean => {
+      if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
     while (true) {
       try {
         fs.mkdirSync(this.#lockPath, { mode: 0o700 });
-        fs.writeFileSync(path.join(this.#lockPath, "owner"), `${process.pid}\n${Date.now()}\n`, {
+        fs.writeFileSync(ownerPath, `${token}\n${process.pid}\n${Date.now()}\n`, {
           encoding: "utf8",
           mode: 0o600,
         });
@@ -338,10 +365,15 @@ export class MeshStore {
       } catch (error) {
         if (errorCode(error) !== "EEXIST") throw error;
         try {
-          const age = Date.now() - fs.statSync(this.#lockPath).mtimeMs;
-          if (age > STALE_LOCK_MS) {
-            fs.rmSync(this.#lockPath, { recursive: true, force: true });
-            continue;
+          const firstOwner = fs.readFileSync(ownerPath, "utf8");
+          const [, pidText, createdText] = firstOwner.trim().split("\n");
+          const age = Date.now() - Number(createdText);
+          if (age > STALE_LOCK_MS && !processAlive(Number(pidText))) {
+            const secondOwner = fs.readFileSync(ownerPath, "utf8");
+            if (secondOwner === firstOwner) {
+              fs.rmSync(this.#lockPath, { recursive: true, force: true });
+              continue;
+            }
           }
         } catch { /* stale lock already gone or unreadable; retry */ }
         if (Date.now() >= deadline) throw new Error("Timed out waiting for the Fabric mesh lock");
@@ -351,7 +383,14 @@ export class MeshStore {
     try {
       return operation();
     } finally {
-      fs.rmSync(this.#lockPath, { recursive: true, force: true });
+      try {
+        const owner = fs.readFileSync(ownerPath, "utf8");
+        if (owner.startsWith(`${token}\n`)) {
+          fs.rmSync(this.#lockPath, { recursive: true, force: true });
+        }
+      } catch {
+        // Another process already recovered or removed this lock.
+      }
     }
   }
 

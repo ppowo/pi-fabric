@@ -48,14 +48,20 @@ export const wrapPlainText = (value: string, width: number, maxLines = 100): str
     while (visibleWidth(current) > width && lines.length < maxLines) {
       let chunk = "";
       let consumed = 0;
-      for (const character of current) {
-        const candidate = chunk + character;
+      const segments = [
+        ...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(current),
+      ];
+      for (const { segment } of segments) {
+        const candidate = chunk + segment;
         if (visibleWidth(candidate) > width) {
-          if (!chunk) consumed += character.length;
+          if (!chunk) {
+            chunk = "…";
+            consumed += segment.length;
+          }
           break;
         }
         chunk = candidate;
-        consumed += character.length;
+        consumed += segment.length;
       }
       if (chunk) lines.push(chunk);
       current = current.slice(consumed);

@@ -46,6 +46,34 @@ describe.skipIf(!hasWorker)("SubagentManager real worker e2e", () => {
       },
     },
     {
+      behavior: "split-utf8",
+      check: (r) => {
+        expect(r.status).toBe("completed");
+        expect(r.text).toBe("界面 🚀");
+        expect(r.text).not.toContain("�");
+      },
+    },
+    {
+      behavior: "stderr-framing",
+      check: (r) => {
+        expect(r.status).toBe("completed");
+        expect(r.text).toBe("trusted");
+        const events = fs
+          .readFileSync(r.logFile!, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as Record<string, unknown>);
+        expect(events.some((event) => event.type === "worker_stderr")).toBe(true);
+        expect(
+          events.some(
+            (event) =>
+              event.type === "message_end" &&
+              (event.message as { content?: string } | undefined)?.content === "spoofed",
+          ),
+        ).toBe(false);
+      },
+    },
+    {
       behavior: "exit-clean",
       check: (r) => {
         expect(r.status).toBe("completed");

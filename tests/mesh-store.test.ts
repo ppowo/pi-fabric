@@ -90,6 +90,22 @@ describe("MeshStore", () => {
     expect(claimed.version).toBe(2);
     expect(store.get("tasks/task-1")?.value).toEqual({ status: "claimed", owner: "worker" });
     expect(store.list("tasks/")).toHaveLength(1);
+
+    await store.delete({ key: "tasks/task-1", ifVersion: claimed.version });
+    const recreated = await store.put({
+      key: "tasks/task-1",
+      value: { status: "ready-again" },
+      identity,
+    });
+    expect(recreated.version).toBe(3);
+    await expect(
+      store.put({
+        key: "tasks/task-1",
+        value: { status: "stale-owner" },
+        identity,
+        ifVersion: created.version,
+      }),
+    ).rejects.toThrow("compare-and-swap failed");
     expect(() => store.get("tasks/__proto__")).toThrow("Invalid Fabric mesh key");
   });
 });

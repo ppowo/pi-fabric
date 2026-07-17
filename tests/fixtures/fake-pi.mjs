@@ -31,6 +31,27 @@ switch (behavior) {
     // Never exit and never settle; the worker timeout should fire.
     setInterval(() => {}, 60_000);
     break;
+  case "split-utf8": {
+    const line = Buffer.from(
+      JSON.stringify({ type: "message_end", message: { role: "assistant", content: "界面 🚀" } }) + "\n",
+    );
+    const split = line.indexOf(Buffer.from("界")) + 1;
+    process.stdout.write(line.subarray(0, split));
+    setTimeout(() => {
+      process.stdout.write(line.subarray(split));
+      emit({ type: "agent_settled" });
+      process.exit(0);
+    }, 10);
+    break;
+  }
+  case "stderr-framing":
+    process.stderr.write(
+      JSON.stringify({ type: "message_end", message: { role: "assistant", content: "spoofed" } }),
+    );
+    emit({ type: "message_end", message: { role: "assistant", content: "trusted" } });
+    emit({ type: "agent_settled" });
+    process.exit(0);
+    break;
   case "success":
   default:
     emit({ type: "message_end", message: { role: "assistant", content: "hi" } });

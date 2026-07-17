@@ -57,7 +57,15 @@ const totalTokens = (
 
 const agentLine = (theme: Theme, agent: FabricUiAgent, now: number): string => {
   const status = colorStatus(theme, agent.status, statusGlyph(agent.status));
-  const activity = agent.currentTool ?? (agent.status === "running" ? "thinking" : agent.status);
+  const activity =
+    agent.currentTool ??
+    (agent.error
+      ? `error: ${truncateToWidth(safeText(agent.error), 48)}`
+      : agent.text && !isActiveStatus(agent.status)
+        ? `result: ${truncateToWidth(safeText(agent.text), 48)}`
+        : agent.status === "running"
+          ? "thinking"
+          : agent.status);
   const metrics = [
     agent.toolCalls !== undefined ? `${agent.toolCalls} calls` : undefined,
     agent.usage ? `${formatTokens(agent.usage.input + agent.usage.output)} tok` : undefined,
@@ -155,6 +163,12 @@ export class FabricWidget implements Component {
         ? candidateRun
         : undefined;
     const activeAgents = snapshot.agents.filter((agent) => isActiveStatus(agent.status));
+    const terminalAgents =
+      run && run.status !== "running" && activeAgents.length === 0
+        ? snapshot.agents
+            .filter((agent) => agent.runId === run.id && !isActiveStatus(agent.status))
+            .slice(0, 2)
+        : [];
     const visibleActors = snapshot.actors.filter((actor) => actor.status !== "stopped");
     const activeState = snapshot.state.filter((entry) => isActiveStatus(entry.status));
     const nestedCalls =
@@ -197,6 +211,7 @@ export class FabricWidget implements Component {
     const lines = [header];
 
     for (const agent of activeAgents) lines.push(agentLine(this.theme, agent, snapshot.now));
+    for (const agent of terminalAgents) lines.push(agentLine(this.theme, agent, snapshot.now));
     for (const actor of visibleActors) lines.push(actorLine(this.theme, actor));
     for (const item of runningItems) {
       const current = item.current ?? item.detail;

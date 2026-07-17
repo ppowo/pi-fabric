@@ -71,7 +71,7 @@ const spinnerFrames = ["◐", "◓", "◑", "◒"];
 
 const statusGlyph = (status: string): string => {
   if (status === "completed" || status === "done") return "✓";
-  if (status === "failed" || status === "timed_out") return "✗";
+  if (status === "failed" || status === "timed_out" || status === "error") return "✗";
   if (status === "blocked") return "!";
   if (status === "stopped" || status === "cancelled") return "■";
   if (status === "queued" || status === "pending" || status === "ready") return "○";
@@ -347,7 +347,7 @@ const matchesFilter = (status: string, filter: StatusFilter): boolean => {
   if (filter === "all") return true;
   if (filter === "active") return isActiveStatus(status);
   if (filter === "completed") return status === "completed" || status === "done";
-  return status === "failed" || status === "timed_out" || status === "blocked";
+  return status === "failed" || status === "timed_out" || status === "blocked" || status === "error";
 };
 
 const tokensFor = (
@@ -447,6 +447,10 @@ export class FabricDashboard implements Component, Focusable {
   private selectedPhaseId: string | undefined;
   private detailId: string | undefined;
   private detailScroll = 0;
+  private detailMaxScroll = 0;
+  private detailSelectionRestore:
+    | { runSelectionTouched: boolean; phaseSelectionTouched: boolean }
+    | undefined;
   private detailView: "summary" | "transcript" = "summary";
   private transcriptFollowing = true;
   private readonly transcriptMarkdown = new Map<string, { text: string; component: Markdown }>();
@@ -599,10 +603,7 @@ export class FabricDashboard implements Component, Focusable {
         matchesKey(data, Key.left) ||
         data === "h"
       ) {
-        this.detailId = undefined;
-        this.detailScroll = 0;
-        this.detailView = "summary";
-        this.transcriptFollowing = true;
+        this.closeDetail();
       } else if (data === "t") {
         const detail = allEntities.find((entity) => entity.id === this.detailId);
         if (detail?.kind === "agent" && this.agentTranscript) {
@@ -611,16 +612,22 @@ export class FabricDashboard implements Component, Focusable {
           this.transcriptFollowing = true;
         }
       } else if (matchesKey(data, Key.up) || data === "k") {
-        if (this.detailView === "transcript") this.transcriptFollowing = false;
-        this.detailScroll = Math.max(0, this.detailScroll - 1);
+        if (this.detailScroll > 0) {
+          if (this.detailView === "transcript") this.transcriptFollowing = false;
+          this.detailScroll--;
+        }
       } else if (matchesKey(data, Key.down) || data === "j") {
-        if (this.detailView === "transcript") this.transcriptFollowing = false;
-        this.detailScroll++;
+        if (this.detailScroll < this.detailMaxScroll) {
+          if (this.detailView === "transcript") this.transcriptFollowing = false;
+          this.detailScroll++;
+        }
       } else if (data === "G" && this.detailView === "transcript") {
         this.transcriptFollowing = true;
       } else if (matchesKey(data, Key.home) || data === "g") {
-        if (this.detailView === "transcript") this.transcriptFollowing = false;
-        this.detailScroll = 0;
+        if (this.detailScroll > 0) {
+          if (this.detailView === "transcript") this.transcriptFollowing = false;
+          this.detailScroll = 0;
+        }
       } else if (data === "s" || data === "u") {
         const detail = allEntities.find((entity) => entity.id === this.detailId);
         if (detail?.kind === "agent") {
@@ -774,12 +781,7 @@ export class FabricDashboard implements Component, Focusable {
       } else this.entityIndex = 0;
     }
     if (this.phaseSelectionTouched) this.selectedPhaseId = panels[this.phaseIndex]?.id;
-    if (this.detailId) {
-      this.runSelectionTouched = true;
-      this.selectedRunId = run?.id;
-      this.phaseSelectionTouched = true;
-      this.selectedPhaseId = panel?.id;
-    }
+    if (this.detailId) this.pinDetailSelection(run, panel);
     if (this.pane === "entities") {
       this.selectedEntityId = entities[this.entityIndex]?.id;
     }
@@ -812,7 +814,7 @@ export class FabricDashboard implements Component, Focusable {
     if (this.detailId) {
       const detail = allEntities.find((entity) => entity.id === this.detailId);
       if (detail) return this.renderDetail(width, snapshot, detail);
-      this.detailId = undefined;
+      this.closeDetail();
     }
     return this.renderOverview(width, snapshot, run, panels, panel, entities);
   }
@@ -890,7 +892,7 @@ export class FabricDashboard implements Component, Focusable {
     if (width < 24) return this.renderNarrowFallback(width, "dashboard help", "? or esc close");
     const lines = [this.topBorder(width, "Fabric dashboard help")];
     const agentActions = [
-      this.agentTranscript ? "space live peek" : undefined,
+      this.agentTranscript ? "space transcript peek" : undefined,
       this.onAgentSteer ? "s steer now" : undefined,
       this.onAgentFollowUp ? "u queue follow-up" : undefined,
       this.onAgentStop ? "x twice stop" : undefined,
@@ -915,7 +917,7 @@ export class FabricDashboard implements Component, Focusable {
       ...(agentActions.length > 1 ? [["Agents", agentActions.join(" · ")]] : []),
       ...(actorActions.length > 0 ? [["Actors", actorActions.join(" · ")]] : []),
       ...(templateActions.length > 0 ? [["Templates", templateActions.join(" · ")]] : []),
-      ["Details", "↑↓/jk scroll · g top · ? close help"],
+      ["Details", "↑↓/jk scroll · g top · t transcript/summary · G resume follow · ? close help"],
     ];
     for (const [label, value] of help) {
       const prefix = `${this.theme.fg("accent", `${label}:`)} `;
@@ -1264,7 +1266,9 @@ export class FabricDashboard implements Component, Focusable {
     if (entity.kind === "agent") {
       const armed = this.pendingStop?.id === entity.value.id && this.pendingStop.expiresAt > Date.now();
       const actions = [
-        this.agentTranscript ? "space live peek" : undefined,
+        this.agentTranscript
+          ? `space ${isActiveStatus(entity.status) ? "live " : ""}transcript peek`
+          : undefined,
         isActiveStatus(entity.status) && this.onAgentSteer ? "s steer" : undefined,
         this.onAgentFollowUp ? "u follow-up" : undefined,
         isActiveStatus(entity.status) && this.onAgentStop
@@ -1372,7 +1376,7 @@ export class FabricDashboard implements Component, Focusable {
     snapshot: FabricDashboardSnapshot,
     entity: Entity,
   ): string[] {
-    if (width < 24) return this.renderNarrowFallback(width, entity.label, "esc back · ? help");
+    if (width < 24) return this.renderNarrowDetail(width, snapshot, entity);
     const innerWidth = width - 2;
     const transcriptView = entity.kind === "agent" && this.detailView === "transcript";
     const actionLines = wrapPlainText(this.detailActionHint(entity), Math.max(1, innerWidth - 2), 3);
@@ -1386,6 +1390,7 @@ export class FabricDashboard implements Component, Focusable {
     const terminalRows = this.tui.terminal?.rows ?? process.stdout.rows ?? 28;
     const maxBody = Math.max(1, Math.min(24, terminalRows - 8 - actionLines.length));
     const maxScroll = Math.max(0, content.length - maxBody);
+    this.detailMaxScroll = maxScroll;
     if (transcriptView && this.transcriptFollowing) this.detailScroll = maxScroll;
     else this.detailScroll = Math.max(0, Math.min(this.detailScroll, maxScroll));
     const visible = content.slice(this.detailScroll, this.detailScroll + maxBody);
@@ -1718,9 +1723,62 @@ export class FabricDashboard implements Component, Focusable {
     this.selectedPhaseId = undefined;
     this.detailId = undefined;
     this.detailScroll = 0;
+    this.detailMaxScroll = 0;
+    this.detailSelectionRestore = undefined;
     this.detailView = "summary";
     this.transcriptFollowing = true;
     this.pane = "phases";
+  }
+
+  private pinDetailSelection(
+    run: FabricActivityRun | undefined,
+    panel: PhasePanel | undefined,
+  ): void {
+    this.detailSelectionRestore ??= {
+      runSelectionTouched: this.runSelectionTouched,
+      phaseSelectionTouched: this.phaseSelectionTouched,
+    };
+    this.runSelectionTouched = true;
+    this.selectedRunId = run?.id;
+    this.phaseSelectionTouched = true;
+    this.selectedPhaseId = panel?.id;
+  }
+
+  private closeDetail(): void {
+    const restore = this.detailSelectionRestore;
+    if (restore) {
+      this.runSelectionTouched = restore.runSelectionTouched;
+      this.phaseSelectionTouched = restore.phaseSelectionTouched;
+    }
+    this.detailSelectionRestore = undefined;
+    this.detailId = undefined;
+    this.detailScroll = 0;
+    this.detailMaxScroll = 0;
+    this.detailView = "summary";
+    this.transcriptFollowing = true;
+  }
+
+  private renderNarrowDetail(
+    width: number,
+    snapshot: FabricDashboardSnapshot,
+    entity: Entity,
+  ): string[] {
+    const transcriptView = entity.kind === "agent" && this.detailView === "transcript";
+    const content = transcriptView
+      ? this.transcriptLines(entity.value, width)
+      : this.detailLines(entity, width, snapshot.now);
+    const terminalRows = this.tui.terminal?.rows ?? process.stdout.rows ?? 28;
+    const maxBody = Math.max(1, terminalRows - 2);
+    this.detailMaxScroll = Math.max(0, content.length - maxBody);
+    if (transcriptView && this.transcriptFollowing) this.detailScroll = this.detailMaxScroll;
+    else this.detailScroll = Math.max(0, Math.min(this.detailScroll, this.detailMaxScroll));
+    const title = `${entity.label}${transcriptView ? " · transcript" : ""}`;
+    const hint = transcriptView
+      ? `G follow:${this.transcriptFollowing ? "on" : "off"} · t summary · esc`
+      : `${entity.kind === "agent" && this.agentTranscript ? "t transcript · " : ""}esc`;
+    return [title, ...content.slice(this.detailScroll, this.detailScroll + maxBody), hint]
+      .map((line) => truncateToWidth(line, width, ""))
+      .filter((line) => visibleWidth(line) > 0);
   }
 
   private renderNarrowFallback(width: number, label: string, hint: string): string[] {

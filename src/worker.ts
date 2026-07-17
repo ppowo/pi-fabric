@@ -3,6 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import { Value } from "typebox/value";
 import type {
   SubagentRunRecord,
@@ -324,9 +325,10 @@ const main = async (): Promise<void> => {
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
-
   let stderr = "";
   let outputBuffer = "";
+  const outputDecoder = new StringDecoder("utf8");
+  const stderrDecoder = new StringDecoder("utf8");
   let terminalStatus: SubagentRunStatus | undefined;
   let terminalError: string | undefined;
   let sawAgentError = false;
@@ -430,7 +432,7 @@ const main = async (): Promise<void> => {
       if (messageRecord.role !== "assistant") return;
       const text = extractText(messageRecord);
       if (text) {
-        record.text = text.slice(-MAX_TEXT_CHARS);
+        record.text = Array.from(text).slice(-MAX_TEXT_CHARS).join("");
         process.stdout.write(`\n${text}\n`);
       }
       applyUsage(record, messageRecord);
@@ -474,6 +476,7 @@ const main = async (): Promise<void> => {
   // poller is best-effort: a closed or ended stdin (settled/stopped child) is
   // swallowed so a late steer never crashes the worker.
   let steerOffset = 0;
+  let steerRemainder = Buffer.alloc(0);
   const pollSteer = (): void => {
     if (!options.steerFile || terminalStatus) return;
     let descriptor: number | undefined;
@@ -484,13 +487,23 @@ const main = async (): Promise<void> => {
     }
     try {
       const size = fs.fstatSync(descriptor).size;
-      if (size < steerOffset) steerOffset = 0;
+      if (size < steerOffset) {
+        steerOffset = 0;
+        steerRemainder = Buffer.alloc(0);
+      }
       if (size <= steerOffset) return;
       const length = size - steerOffset;
-      const buffer = Buffer.allocUnsafe(length);
-      fs.readSync(descriptor, buffer, 0, length, steerOffset);
-      steerOffset = size;
-      for (const raw of buffer.toString("utf8").split("\n")) {
+      const buffer = Buffer.alloc(length);
+      const bytesRead = fs.readSync(descriptor, buffer, 0, length, steerOffset);
+      steerOffset += bytesRead;
+      const combined = Buffer.concat([steerRemainder, buffer.subarray(0, bytesRead)]);
+      const newline = combined.lastIndexOf(0x0a);
+      if (newline < 0) {
+        steerRemainder = combined;
+        return;
+      }
+      steerRemainder = Buffer.from(combined.subarray(newline + 1));
+      for (const raw of combined.subarray(0, newline + 1).toString("utf8").split("\n")) {
         const line = raw.trim();
         if (!line) continue;
         let command: { type?: string; message?: string; mode?: string };
@@ -521,7 +534,7 @@ const main = async (): Promise<void> => {
   steerTimer?.unref?.();
 
   child.stdout?.on("data", (chunk: Buffer) => {
-    outputBuffer += chunk.toString("utf8");
+    outputBuffer += outputDecoder.write(chunk);
     while (true) {
       const newline = outputBuffer.indexOf("\n");
       if (newline < 0) break;
@@ -530,11 +543,14 @@ const main = async (): Promise<void> => {
       processEvent(line);
     }
   });
-  child.stderr?.on("data", (chunk: Buffer) => {
-    const text = chunk.toString("utf8");
-    logStream.write(text);
+  const recordStderr = (text: string): void => {
+    if (!text) return;
+    logStream.write(`${JSON.stringify({ type: "worker_stderr", text })}\n`);
     process.stderr.write(text);
     stderr = `${stderr}${text}`.slice(-MAX_STDERR_CHARS);
+  };
+  child.stderr?.on("data", (chunk: Buffer) => {
+    recordStderr(stderrDecoder.write(chunk));
   });
   child.stderr?.on("error", () => {});
 
@@ -569,6 +585,8 @@ const main = async (): Promise<void> => {
   if (steerTimer) clearInterval(steerTimer);
   clearTimeout(timeout);
   if (process.env.PI_FABRIC_INJECT_CRASH === "close") throw new Error("simulated close crash");
+  outputBuffer += outputDecoder.end();
+  recordStderr(stderrDecoder.end());
   if (outputBuffer.trim()) processEvent(outputBuffer);
   record.exitCode = exitCode;
   record.stderr = stderr.slice(-MAX_STDERR_CHARS);

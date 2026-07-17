@@ -441,8 +441,14 @@ export class QuickJsRuntime {
     const executionStartedAt = Date.now();
     let effectiveTimeoutMs = options.timeoutMs;
     let executionDeadlineAt = executionStartedAt + effectiveTimeoutMs;
+    let interruptedByDeadline = false;
     runtime.setMemoryLimit(options.memoryLimitBytes);
-    runtime.setInterruptHandler(() => Date.now() > executionDeadlineAt);
+    runtime.setInterruptHandler(() => {
+      if (options.signal?.aborted === true) return true;
+      if (Date.now() <= executionDeadlineAt) return false;
+      interruptedByDeadline = true;
+      return true;
+    });
     const logs: string[] = [];
     const maxLogChars = options.maxLogChars ?? 100_000;
     let logChars = 0;
@@ -500,8 +506,9 @@ export class QuickJsRuntime {
       ) {
         return;
       }
-      const nextTimeoutMs = Math.max(1, Math.floor(requestedTimeoutMs));
-      const nextDeadlineAt = executionStartedAt + nextTimeoutMs;
+      const requestedDurationMs = Math.max(1, Math.floor(requestedTimeoutMs));
+      const nextDeadlineAt = Date.now() + requestedDurationMs;
+      const nextTimeoutMs = nextDeadlineAt - executionStartedAt;
       if (nextDeadlineAt <= executionDeadlineAt) return;
       effectiveTimeoutMs = nextTimeoutMs;
       executionDeadlineAt = nextDeadlineAt;
@@ -585,7 +592,9 @@ export class QuickJsRuntime {
 
       const setupResult = context.evalCode(guestSetup, "pi-fabric-setup.js");
       if (setupResult.error) {
-        const error = formatValue(context.dump(setupResult.error));
+        const error = options.signal?.aborted
+          ? "Execution cancelled"
+          : formatValue(context.dump(setupResult.error));
         setupResult.error.dispose();
         abortHostCalls(error);
         return { value: undefined, logs, error };
@@ -598,7 +607,13 @@ export class QuickJsRuntime {
       const evaluation = context.evalCode(wrappedCode, "pi-fabric-guest.js");
       runtime.executePendingJobs();
       if (evaluation.error) {
-        const error = formatValue(context.dump(evaluation.error));
+        const deadlineExceeded = interruptedByDeadline || Date.now() > executionDeadlineAt;
+        if (deadlineExceeded) timedOut = true;
+        const error = options.signal?.aborted
+          ? "Execution cancelled"
+          : deadlineExceeded
+            ? timeoutMessage()
+            : formatValue(context.dump(evaluation.error));
         evaluation.error.dispose();
         abortHostCalls(error);
         return { value: undefined, logs, error };
@@ -627,10 +642,17 @@ export class QuickJsRuntime {
         () => executionDeadlineAt + 5_000,
       );
       const resolution = await Promise.race([pendingResolution, deadline, cancellation]);
+      pendingResolution = undefined;
       activePromiseHandle.dispose();
       activePromiseHandle = undefined;
       if (resolution.error) {
-        const error = formatValue(context.dump(resolution.error));
+        const deadlineExceeded = interruptedByDeadline || Date.now() > executionDeadlineAt;
+        if (deadlineExceeded) timedOut = true;
+        const error = options.signal?.aborted
+          ? "Execution cancelled"
+          : deadlineExceeded
+            ? timeoutMessage()
+            : formatValue(context.dump(resolution.error));
         resolution.error.dispose();
         abortHostCalls(error);
         return { value: undefined, logs, error };

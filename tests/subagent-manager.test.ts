@@ -54,6 +54,41 @@ describe("SubagentManager", () => {
     expect(types).toContain("agent_settled");
   });
 
+  it("derives trusted log paths and recursively discovers bounded nested runs", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-manager-"));
+    roots.push(root);
+    const manager = new SubagentManager(process.cwd(), DEFAULT_FABRIC_CONFIG.subagents, {
+      workerPath: path.resolve("tests/fixtures/fake-worker.mjs"),
+      runRoot: root,
+    });
+    managers.push(manager);
+    const result = await manager.run({ task: "Inspect nesting", transport: "process" });
+    const runDirectory = manager.runDirectory(result.id)!;
+    const topStatus = JSON.parse(fs.readFileSync(path.join(runDirectory, "status.json"), "utf8"));
+    fs.writeFileSync(
+      path.join(runDirectory, "status.json"),
+      JSON.stringify({ ...topStatus, logFile: "/tmp/untrusted-top.jsonl" }),
+    );
+    const childDirectory = path.join(runDirectory, "nested", "child");
+    const grandchildDirectory = path.join(childDirectory, "nested", "grandchild");
+    fs.mkdirSync(grandchildDirectory, { recursive: true });
+    fs.writeFileSync(
+      path.join(childDirectory, "status.json"),
+      JSON.stringify({ ...result, id: "child", name: "child", logFile: "/tmp/untrusted-child.jsonl" }),
+    );
+    fs.writeFileSync(
+      path.join(grandchildDirectory, "status.json"),
+      JSON.stringify({ ...result, id: "grandchild", name: "grandchild", logFile: "/tmp/untrusted-grandchild.jsonl" }),
+    );
+
+    const status = manager.status(result.id) as SubagentRunRecord;
+    expect(status.logFile).toBe(path.join(runDirectory, "events.jsonl"));
+    expect(status.nestedAgents?.[0]?.logFile).toBe(path.join(childDirectory, "events.jsonl"));
+    expect(status.nestedAgents?.[0]?.nestedAgents?.[0]?.logFile).toBe(
+      path.join(grandchildDirectory, "events.jsonl"),
+    );
+  });
+
   it("keeps direct tools native for ordinary children and full code mode for recursion", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-manager-"));
     roots.push(root);
@@ -513,6 +548,37 @@ describe("SubagentManager steering", () => {
         const status = manager.status(handle.id) as SubagentRunRecord;
         return Boolean(status.pendingMessages?.steering.includes("redirect to session expiry"));
       }, 3_000);
+      await manager.stop(handle.id);
+    } finally {
+      delete process.env.FAKE_PI_STEER_LOG;
+    }
+  });
+
+  it("preserves a partial UTF-8 steering record across worker polls", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-steer-"));
+    roots.push(root);
+    fs.chmodSync(fakePiSteer, 0o755);
+    const received = path.join(root, "received.jsonl");
+    process.env.FAKE_PI_STEER_LOG = received;
+    try {
+      const manager = new SubagentManager(process.cwd(), DEFAULT_FABRIC_CONFIG.subagents, {
+        workerPath: path.resolve("src/worker.ts"),
+        piBinary: fakePiSteer,
+        runRoot: root,
+      });
+      managers.push(manager);
+      const handle = await manager.spawn({ task: "STEER_ME", transport: "process" });
+      await waitFor(() => manager.status(handle.id).status === "running");
+      const steerFile = path.join(manager.runDirectory(handle.id)!, "steer.jsonl");
+      const line = Buffer.from(`${JSON.stringify({ type: "steer", message: "转向界面 🚀" })}\n`);
+      const split = line.indexOf(Buffer.from("界")) + 1;
+      fs.appendFileSync(steerFile, line.subarray(0, split));
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      fs.appendFileSync(steerFile, line.subarray(split));
+      await waitFor(
+        () => fs.existsSync(received) && fs.readFileSync(received, "utf8").includes("转向界面 🚀"),
+        3_000,
+      );
       await manager.stop(handle.id);
     } finally {
       delete process.env.FAKE_PI_STEER_LOG;

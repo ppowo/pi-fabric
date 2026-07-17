@@ -161,7 +161,7 @@ export class McpProvider implements FabricProvider {
   async invoke(
     actionName: string,
     args: Record<string, unknown>,
-    _context: FabricInvocationContext,
+    context: FabricInvocationContext,
   ): Promise<unknown> {
     if (!this.config.enabled) throw new Error("MCP support is disabled in Fabric configuration");
     if (actionName === "$servers") {
@@ -195,18 +195,24 @@ export class McpProvider implements FabricProvider {
         typeof args.args === "object" && args.args !== null && !Array.isArray(args.args)
           ? (args.args as Record<string, unknown>)
           : {};
-      return this.#call(server, tool, toolArgs);
+      return this.#call(server, tool, toolArgs, context.signal);
     }
     const parsed = this.#parseToolName(actionName);
     if (!parsed) throw new Error(`Invalid MCP action: ${actionName}`);
-    return this.#call(parsed.server, parsed.tool, args);
+    return this.#call(parsed.server, parsed.tool, args, context.signal);
   }
 
   async close(): Promise<void> {
     await this.#resetRuntime();
   }
 
-  async #call(serverName: string, toolName: string, args: Record<string, unknown>): Promise<unknown> {
+  async #call(
+    serverName: string,
+    toolName: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    if (signal?.aborted) throw new Error("MCP call cancelled");
     const runtime = await this.#getRuntime();
     const server = this.#resolveServerName(runtime, serverName);
     if (!server) throw new Error(`Unknown MCP server: ${serverName}`);
@@ -214,14 +220,42 @@ export class McpProvider implements FabricProvider {
       includeSchema: true,
       disableOAuth: this.config.disableOAuth,
     });
+    if (signal?.aborted) throw new Error("MCP call cancelled");
     const tool = this.#resolveTool(tools, toolName);
     if (!tool) throw new Error(`Unknown MCP tool: ${serverName}.${toolName}`);
-    const result = await runtime.callTool(server, tool.name, {
+    const operation = runtime.callTool(server, tool.name, {
       args,
       timeoutMs: this.config.callTimeoutMs,
       disableOAuth: this.config.disableOAuth,
     });
+    const result = await this.#withAbort(operation, signal, () => runtime.close(server));
     return normalizeMcpResult(result);
+  }
+
+  async #withAbort<T>(
+    operation: Promise<T>,
+    signal: AbortSignal | undefined,
+    abort: () => void | Promise<void>,
+  ): Promise<T> {
+    if (!signal) return operation;
+    if (signal.aborted) throw new Error("MCP call cancelled");
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = (): void => {
+        void Promise.resolve(abort()).catch(() => undefined);
+        reject(new Error("MCP call cancelled"));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      void operation.then(
+        (value) => {
+          signal.removeEventListener("abort", onAbort);
+          resolve(value);
+        },
+        (error) => {
+          signal.removeEventListener("abort", onAbort);
+          reject(error);
+        },
+      );
+    });
   }
 
   async #getRuntime(): Promise<Runtime> {

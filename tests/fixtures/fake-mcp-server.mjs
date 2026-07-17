@@ -35,9 +35,12 @@ input.on("line", (line) => {
     return;
   }
   if (request.method === "tools/call") {
-    respond(request.id, {
-      content: [{ type: "text", text: `echo:${request.params.arguments.value}` }],
-    });
+    const sendResult = () =>
+      respond(request.id, {
+        content: [{ type: "text", text: `echo:${request.params.arguments.value}` }],
+      });
+    if (request.params.arguments.value === "__delay__") setTimeout(sendResult, 5_000);
+    else sendResult();
     return;
   }
   if (request.id !== undefined) respond(request.id, {});

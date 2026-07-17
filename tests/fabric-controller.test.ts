@@ -96,4 +96,31 @@ describe("FabricUiController dashboard wiring", () => {
       controller.stop();
     }
   });
+
+  it("surfaces dashboard refresh failures while retaining the last snapshot", async () => {
+    const state = stubState();
+    vi.mocked(state.activity.runs).mockImplementation(() => {
+      throw new Error("corrupt activity state");
+    });
+    const notify = vi.fn();
+    const context = {
+      mode: "tui",
+      modelRegistry: { getAvailable: () => [] },
+      ui: {
+        custom: vi.fn(async () => undefined),
+        notify,
+        setWidget: vi.fn(),
+      },
+    } as unknown as ExtensionContext;
+    const controller = new FabricUiController(state);
+    try {
+      await controller.openDashboard(context);
+      expect(notify).toHaveBeenCalledWith(
+        "Fabric dashboard refresh failed: corrupt activity state",
+        "warning",
+      );
+    } finally {
+      controller.stop();
+    }
+  });
 });

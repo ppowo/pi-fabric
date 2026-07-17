@@ -87,7 +87,8 @@ const readRecord = (filePath: string): SubagentRunRecord | undefined => {
   }
 };
 
-const readNestedAgents = (runDirectory: string): SubagentRunRecord[] => {
+const readNestedAgents = (runDirectory: string, depth = 0): SubagentRunRecord[] => {
+  if (depth >= 8) return [];
   const nestedRoot = path.join(runDirectory, "nested");
   let entries: string[];
   try {
@@ -96,9 +97,17 @@ const readNestedAgents = (runDirectory: string): SubagentRunRecord[] => {
     return [];
   }
   const agents: SubagentRunRecord[] = [];
-  for (const entry of entries) {
-    const record = readRecord(path.join(nestedRoot, entry, "status.json"));
-    if (record) agents.push(record);
+  for (const entry of entries.slice(0, 200)) {
+    const runDirectory = path.join(nestedRoot, entry);
+    const record = readRecord(path.join(runDirectory, "status.json"));
+    if (!record) continue;
+    const nestedAgents = readNestedAgents(runDirectory, depth + 1);
+    const { logFile: _logFile, nestedAgents: _nestedAgents, ...safeRecord } = record;
+    agents.push({
+      ...safeRecord,
+      logFile: path.join(runDirectory, "events.jsonl"),
+      ...(nestedAgents.length > 0 ? { nestedAgents } : {}),
+    });
   }
   return agents;
 };
@@ -202,6 +211,7 @@ export class SubagentManager {
   readonly #onBackgroundComplete: ((result: SubagentRunResult) => void) | undefined;
   readonly #budget: BudgetLedgerState | undefined;
   readonly #budgetOwned: boolean;
+  #budgetSummaryCache: { at: number; value: FabricBudgetSummary } | undefined;
   #closing = false;
 
   constructor(
@@ -447,8 +457,13 @@ export class SubagentManager {
       return result;
     }
     await managed.transport.stop();
-    const record = failedRecord(managed, "stopped", "Subagent stopped");
-    writeRecord(managed.statusFile, record);
+    await this.#waitForTransportExit(managed);
+    const terminal = readRecord(managed.statusFile);
+    const record =
+      terminal && terminalStatuses.has(terminal.status)
+        ? (this.#withTransportMetadata(terminal, managed) as SubagentRunResult)
+        : failedRecord(managed, "stopped", "Subagent stopped");
+    if (!terminal || !terminalStatuses.has(terminal.status)) writeRecord(managed.statusFile, record);
     this.#settle(managed, record);
     return record;
   }
@@ -520,7 +535,7 @@ export class SubagentManager {
   }
 
   async #waitForTransportExit(managed: ManagedSubagent): Promise<void> {
-    const deadline = Date.now() + TRANSPORT_EXIT_GRACE_MS * 5;
+    const deadline = Date.now() + TRANSPORT_EXIT_GRACE_MS * 7;
     while (Date.now() < deadline && (await managed.transport.isAlive())) {
       await delay(STATUS_POLL_MS);
     }
@@ -537,6 +552,15 @@ export class SubagentManager {
       }
       if (Date.now() >= deadline) {
         await managed.transport.stop();
+        await this.#waitForTransportExit(managed);
+        const completed = readRecord(managed.statusFile);
+        if (completed && terminalStatuses.has(completed.status)) {
+          this.#settle(
+            managed,
+            this.#withTransportMetadata(completed, managed) as SubagentRunResult,
+          );
+          return;
+        }
         const timedOut = failedRecord(
           managed,
           "timed_out",
@@ -588,6 +612,7 @@ export class SubagentManager {
           result.usage.cacheWrite,
         ts: Date.now(),
       });
+      this.#budgetSummaryCache = undefined;
       const summary = this.#budgetSummary();
       if (summary) result.budget = summary;
     }
@@ -614,13 +639,19 @@ export class SubagentManager {
 
   #budgetSummary(): FabricBudgetSummary | undefined {
     if (!this.#budget) return undefined;
+    const now = Date.now();
+    if (this.#budgetSummaryCache && now - this.#budgetSummaryCache.at < STATUS_POLL_MS) {
+      return this.#budgetSummaryCache.value;
+    }
     const { cost, tokens } = readBudgetLedger(this.#budget.file);
-    return {
+    const value = {
       limit: this.#budget.budget,
       spent: cost,
       remaining: Math.max(0, this.#budget.budget - cost),
       tokens,
     };
+    this.#budgetSummaryCache = { at: now, value };
+    return value;
   }
 
   async #resolveTransport(requested: FabricSubagentTransport): Promise<SubagentTransportAdapter> {
@@ -667,8 +698,10 @@ export class SubagentManager {
   #withTransportMetadata(record: SubagentRunRecord, managed: ManagedSubagent): SubagentRunRecord {
     const nestedAgents = readNestedAgents(managed.runDirectory);
     const budget = this.#budgetSummary();
+    const { logFile: _logFile, nestedAgents: _nestedAgents, ...safeRecord } = record;
     return {
-      ...record,
+      ...safeRecord,
+      logFile: path.join(managed.runDirectory, "events.jsonl"),
       ...(nestedAgents.length > 0 ? { nestedAgents } : {}),
       ...(budget ? { budget } : {}),
       ...(managed.model ? { model: managed.model } : {}),
