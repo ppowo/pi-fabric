@@ -139,7 +139,7 @@ describe("compaction reconstruction QA", () => {
 
   it("fails a file probe when a modified file is removed from Files And Changes", () => {
     const fixture = buildFixture();
-    const mutated = fixture.summary.replace("  docs/compaction.md\n", "");
+    const mutated = fixture.summary.replace("  docs/compaction.md [entry qa-e4]\n", "");
     const failure = qaReport(fixture.events, fixture.events.length, mutated).failures.find(
       ({ probe }) => probe.question.includes("docs/compaction.md"),
     );
@@ -156,10 +156,36 @@ describe("compaction reconstruction QA", () => {
 
   it("fails turn-count and address probes when Earlier Turns is truncated", () => {
     const fixture = buildFixture();
-    const mutated = fixture.summary.replace('"Add mutation tests"\n', "");
+    const mutated = fixture.summary.replace('"Add mutation tests" [entry qa-e12]\n', "");
     const failures = qaReport(fixture.events, fixture.events.length, mutated).failures;
     expect(failures.some(({ probe }) => probe.id.startsWith("earlier-turn-count:") && probe.answer === '"Add mutation tests"')).toBe(true);
     expect(failures.some(({ probe }) => probe.id.startsWith("earlier-turn-address:") && probe.answer === '"Add mutation tests"')).toBe(true);
+  });
+
+  it("scores bounded omission ranges instead of requiring every large-list item inline", () => {
+    entryId = 0;
+    messageClock = 0;
+    const entries: SessionEntry[] = [user("Bounded cumulative QA goal")];
+    for (let index = 0; index < 48; index++) {
+      const id = `bounded-edit-${index}`;
+      entries.push(
+        assistant(toolCallPart(id, "edit", { path: `src/bounded/file-${index}.ts` })),
+        toolResult(id, "edit", `edited ${index}`),
+        user(`Scope change ${index}`),
+      );
+    }
+    const events = normalizeEntries(entries);
+    const summary = renderSummary(project(events), {
+      firstEntryId: entries[0]!.id,
+      lastEntryId: entries.at(-1)!.id,
+      lastTimestamp: entries.at(-1)!.timestamp,
+    });
+    const probes = generateProbes(events, events.length);
+    expect(summary).toContain("omitted 24 file addresses");
+    expect(summary).toContain("omitted 16 earlier turns");
+    expect(probes.some((probe) => probe.id.startsWith("modified-file-omission:"))).toBe(true);
+    expect(probes.some((probe) => probe.id.startsWith("earlier-turn-omission:"))).toBe(true);
+    expect(qaReport(events, events.length, summary).failures).toEqual([]);
   });
 
   it("generates identical probes and reports for identical inputs", () => {

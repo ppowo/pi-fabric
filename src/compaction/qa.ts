@@ -1,4 +1,13 @@
+import { sampleAddressed } from "./bounds.js";
 import { firstLine, type CompactionEvent, type ToolCallEvent } from "./normalize.js";
+import {
+  MAX_COMMITS,
+  MAX_EARLIER_TURNS,
+  MAX_FILES_PER_KIND,
+  MAX_UNRESOLVED,
+  MAX_USER_GOAL_LINE,
+  MAX_USER_GOAL_LINES,
+} from "./projections.js";
 
 type ProbeClass = "content" | "address";
 
@@ -26,10 +35,9 @@ export interface QaReport {
   failures: ProbeFailure[];
 }
 
-const MAX_USER_GOAL_LINES = 3;
 const MAX_EARLIER_USER = 80;
 const MAX_ERROR_SIGNATURE = 140;
-const TRANSCRIPT_WINDOW = 120;
+const TRANSCRIPT_WINDOW = 40;
 const FILE_TOOLS = new Set(["read", "edit", "write", "grep", "find", "ls"]);
 const MODIFYING_TOOLS = new Set(["edit", "write"]);
 
@@ -54,7 +62,7 @@ const essentialPathToken = (path: string): string => {
 const goalAnswer = (text: string): string => {
   const lines = text.split("\n").filter((line, index, all) =>
     line.trim() !== "" || (index === 0 && all.length === 1),
-  );
+  ).map((line) => truncate(line, MAX_USER_GOAL_LINE));
   if (lines.length <= MAX_USER_GOAL_LINES) return lines.join("\n");
   return [...lines.slice(0, MAX_USER_GOAL_LINES), "…"].join("\n");
 };
@@ -141,25 +149,45 @@ export const generateProbes = (events: CompactionEvent[], cutIndex: number): Pro
   for (const event of source) {
     if (event.kind === "toolResult") resultError.set(event.toolCallId, event.isError);
   }
-  const seenPaths = new Set<string>();
+  const modifyingByKind = new Map<string, { entryId: string; event: ToolCallEvent; path: string }[]>();
+  const seenPathsByKind = new Map<string, Set<string>>();
   for (const event of source) {
     if (event.kind !== "toolCall" || !MODIFYING_TOOLS.has(event.name)) continue;
     const path = pathOf(event.args);
+    const seenPaths = seenPathsByKind.get(event.name) ?? new Set<string>();
+    seenPathsByKind.set(event.name, seenPaths);
     if (!path || resultError.get(event.toolCallId) !== false || seenPaths.has(path)) continue;
     seenPaths.add(path);
-    probes.push({
-      id: `modified-file:${event.index}:${path}`,
-      class: "content",
-      question: `Which file-modification address must remain available for ${path}?`,
-      answer: essentialPathToken(path),
-    });
+    const values = modifyingByKind.get(event.name) ?? [];
+    values.push({ entryId: event.entryId, event, path });
+    modifyingByKind.set(event.name, values);
+  }
+  for (const values of modifyingByKind.values()) {
+    const sampled = sampleAddressed(values, MAX_FILES_PER_KIND);
+    for (const { event, path } of sampled.values) {
+      probes.push({
+        id: `modified-file:${event.index}:${path}`,
+        class: "content",
+        question: `Which file-modification address must remain available for ${path}?`,
+        answer: essentialPathToken(path),
+      });
+    }
+    if (sampled.omitted > 0) {
+      probes.push({
+        id: `modified-file-omission:${sampled.omittedFirstEntryId}`,
+        class: "address",
+        question: `Which source range addresses ${sampled.omitted} omitted file modifications?`,
+        answer: `source entries ${sampled.omittedFirstEntryId} → ${sampled.omittedLastEntryId}`,
+      });
+    }
   }
 
   const calls = new Map<string, ToolCallEvent>();
   for (const event of source) {
     if (event.kind === "toolCall") calls.set(event.toolCallId, event);
   }
-  for (const event of unresolvedErrors(source)) {
+  const sampledErrors = sampleAddressed(unresolvedErrors(source), MAX_UNRESOLVED);
+  for (const event of sampledErrors.values) {
     if (event.kind === "toolResult") {
       const call = event.toolCallId ? calls.get(event.toolCallId) : undefined;
       const path = call ? pathOf(call.args) : undefined;
@@ -181,9 +209,21 @@ export const generateProbes = (events: CompactionEvent[], cutIndex: number): Pro
       });
     }
   }
+  if (sampledErrors.omitted > 0) {
+    probes.push({
+      id: `unresolved-error-omission:${sampledErrors.omittedFirstEntryId}`,
+      class: "address",
+      question: `Which source range addresses ${sampledErrors.omitted} omitted open errors?`,
+      answer: `source entries ${sampledErrors.omittedFirstEntryId} → ${sampledErrors.omittedLastEntryId}`,
+    });
+  }
 
-  for (const event of source) {
-    if (event.kind !== "bash" || event.isError || !event.command.trimStart().startsWith("git commit")) continue;
+  const commits = source.filter(
+    (event): event is Extract<CompactionEvent, { kind: "bash" }> =>
+      event.kind === "bash" && !event.isError && event.command.trimStart().startsWith("git commit"),
+  );
+  const sampledCommits = sampleAddressed(commits, MAX_COMMITS);
+  for (const event of sampledCommits.values) {
     const hash = commitHashOf(event.output);
     if (!hash) continue;
     probes.push({
@@ -191,6 +231,14 @@ export const generateProbes = (events: CompactionEvent[], cutIndex: number): Pro
       class: "content",
       question: `Which commit hash was produced by commit event #${event.index}?`,
       answer: hash,
+    });
+  }
+  if (sampledCommits.omitted > 0) {
+    probes.push({
+      id: `commit-omission:${sampledCommits.omittedFirstEntryId}`,
+      class: "address",
+      question: `Which source range addresses ${sampledCommits.omitted} omitted commits?`,
+      answer: `source entries ${sampledCommits.omittedFirstEntryId} → ${sampledCommits.omittedLastEntryId}`,
     });
   }
 
@@ -211,18 +259,27 @@ export const generateProbes = (events: CompactionEvent[], cutIndex: number): Pro
   }
 
   const earlierUsers = users.slice(0, -1);
-  for (let index = 0; index < earlierUsers.length; index++) {
-    const user = earlierUsers[index]!;
+  const sampledEarlierUsers = sampleAddressed(earlierUsers, MAX_EARLIER_TURNS);
+  for (let index = 0; index < sampledEarlierUsers.values.length; index++) {
+    const user = sampledEarlierUsers.values[index]!;
     probes.push({
       id: `earlier-turn-count:${user.index}`,
       class: "content",
-      question: `Which one-liner accounts for earlier turn ${index + 1} of ${earlierUsers.length}?`,
+      question: `Which sampled one-liner accounts for earlier turn ${index + 1}?`,
       answer: `"${truncate(firstLine(user.text), MAX_EARLIER_USER)}"`,
+    });
+  }
+  if (sampledEarlierUsers.omitted > 0) {
+    probes.push({
+      id: `earlier-turn-omission:${sampledEarlierUsers.omittedFirstEntryId}`,
+      class: "address",
+      question: `Which source range addresses ${sampledEarlierUsers.omitted} omitted earlier turns?`,
+      answer: `source entries ${sampledEarlierUsers.omittedFirstEntryId} → ${sampledEarlierUsers.omittedLastEntryId}`,
     });
   }
 
   const transcriptStart = source.slice(-TRANSCRIPT_WINDOW)[0]?.index ?? Number.POSITIVE_INFINITY;
-  for (const user of earlierUsers) {
+  for (const user of sampledEarlierUsers.values) {
     if (user.index >= transcriptStart) continue;
     probes.push({
       id: `earlier-turn-address:${user.index}`,

@@ -1,11 +1,14 @@
 import { performance } from "node:perf_hooks";
+import { Buffer } from "node:buffer";
 import { describe, expect, it } from "vitest";
 import { normalizeFabricConfig, DEFAULT_FABRIC_CONFIG } from "../src/config.js";
 import {
   computeCut,
   compileFabricSummary,
+  fabricCompactionVersion,
   registerCompactionHook,
 } from "../src/compaction/hook.js";
+import { encodeCompactionRequest, FABRIC_COMPACTION_REQUEST_PREFIX } from "../src/compaction/instructions.js";
 import { normalizeEntries } from "../src/compaction/normalize.js";
 import { project, projectOutstanding } from "../src/compaction/projections.js";
 import type {
@@ -94,15 +97,26 @@ const bashExec = (command: string, exitCode: number | undefined, output: string)
   } as SessionMessageEntry["message"],
 });
 
-const compactionEntry = (firstKeptEntryId: string): CompactionEntry => ({
+const compactionEntry = (
+  firstKeptEntryId: string,
+  summary = "(prior)",
+  details?: unknown,
+): CompactionEntry => ({
   type: "compaction",
   id: nextId(),
   parentId: null,
   timestamp: iso(clock),
-  summary: "(prior)",
+  summary,
   firstKeptEntryId,
   tokensBefore: 1000,
-});
+  ...(details === undefined ? {} : { details }),
+} as CompactionEntry);
+
+const appendLinked = (branch: SessionEntry[], ...entries: SessionEntry[]): void => {
+  for (const entry of entries) {
+    branch.push({ ...entry, parentId: branch.at(-1)?.id ?? null } as SessionEntry);
+  }
+};
 
 const callId = (n: number): string => `call_${n}`;
 let callCounter = 0;
@@ -206,6 +220,64 @@ describe("compaction pi-vcc interop", () => {
   });
 });
 
+describe("compaction instruction parity", () => {
+  const summaryFor = (instructions: string): { summary: string; details: { instructionPolicy: { mode: string; truncated: boolean } } } => {
+    resetIds();
+    resetClock();
+    const result = compileFabricSummary(
+      buildSession(user("Keep the original goal"), assistant(textPart("done"))),
+      1000,
+      [],
+      instructions,
+    );
+    if (!("compaction" in result)) throw new Error("expected compaction");
+    return result.compaction as unknown as ReturnType<typeof summaryFor>;
+  };
+
+  it("preserves canonicalized manual free text without semantic parsing", () => {
+    const result = summaryFor("  Keep   EXACT_fact\n and scope  ");
+    expect(result.summary).toContain("[Compaction Request]");
+    expect(result.summary).toContain("Keep EXACT_fact and scope");
+    expect(result.details.instructionPolicy.mode).toBe("plain");
+  });
+
+  it("decodes typed compact.request instructions and preserve items", () => {
+    const encoded = encodeCompactionRequest({
+      instructions: "Keep the plan",
+      preserve: ["rare pinned fact", "src/critical.ts"],
+    });
+    const result = summaryFor(encoded);
+    expect(result.summary).toContain("Keep the plan");
+    expect(result.summary).toContain("rare pinned fact");
+    expect(result.summary).toContain("src/critical.ts");
+    expect(result.details.instructionPolicy.mode).toBe("typed-v1");
+  });
+
+  it("bounds long instructions and records truncation", () => {
+    const result = summaryFor(`keep ${"x".repeat(50_000)}`);
+    expect(Buffer.byteLength(result.summary, "utf8")).toBeLessThanOrEqual(32 * 1024);
+    expect(result.details.instructionPolicy.truncated).toBe(true);
+  });
+
+  it("treats a malformed typed prefix as plain text", () => {
+    const malformed = `${FABRIC_COMPACTION_REQUEST_PREFIX}{not-json}`;
+    const result = summaryFor(malformed);
+    expect(result.summary).toContain(malformed);
+    expect(result.details.instructionPolicy.mode).toBe("malformed-typed-prefix");
+  });
+
+  it("retains exact pi-vcc sentinel precedence", () => {
+    resetIds();
+    resetClock();
+    const event = compactionEvent(
+      buildSession(user("compact this"), assistant(textPart("done"))),
+      "__pi_vcc__",
+    );
+    expect(compactionHandler("fabric")(event)).toBeUndefined();
+    expect(event._fabricCompaction).toBeUndefined();
+  });
+});
+
 describe("compaction golden determinism", () => {
   it("produces byte-identical output across repeated compiles of the same fixture", () => {
     resetIds();
@@ -257,8 +329,8 @@ describe("compaction golden determinism", () => {
   });
 });
 
-describe("compaction double-compaction stability", () => {
-  it("recomputes the second summary from the live window only — no drift from the first summary", () => {
+describe("compaction cumulative stability", () => {
+  it("recomputes cumulative truth from raw branch entries while advancing the live cut", () => {
     resetIds();
     resetCallIds();
     resetClock();
@@ -291,18 +363,132 @@ describe("compaction double-compaction stability", () => {
       compaction: { summary: string; firstKeptEntryId: string };
     };
 
-    // The second summary is computed from the live window (kept turn + new
-    // batch). It must NOT carry the first goal, which lived only in the
-    // pre-compaction entries — proving the summary is a function of the raw
-    // live window, never of the previous summary.
-    expect(second.compaction.summary).not.toContain("First goal");
+    // The live cut advances, while the summary source remains every raw,
+    // content-bearing entry before the new boundary.
+    expect(second.compaction.summary).toContain("First goal");
     expect(second.compaction.summary).toContain("Second goal");
     expect(second.compaction.summary).toContain("Third goal");
     expect(second.compaction.summary).not.toContain("Fourth goal");
-    // Files come from the second window only.
-    expect(second.compaction.summary).toContain("src/b.ts");
-    expect(second.compaction.summary).not.toContain("src/a.ts");
+    // Successful file addresses are cumulative raw truth.
+    expect(second.compaction.summary).toContain("b.ts");
+    expect(second.compaction.summary).toContain("a.ts");
     expect(second.compaction.firstKeptEntryId).not.toBe(keptId);
+  });
+});
+
+describe("compaction cumulative endurance", () => {
+  it("retains raw cumulative truth through 100 parent-linked compaction cycles", () => {
+    resetIds();
+    resetCallIds();
+    resetClock();
+    const branch: SessionEntry[] = [];
+    const initialRead = nextCallId();
+    const initialError = nextCallId();
+    appendLinked(
+      branch,
+      user("Original First goal: preserve PINNED_RARE_FACT_7 and finish the module."),
+      assistant(toolCallPart(initialRead, "read", { path: "src/a.ts" })),
+      toolResult(initialRead, "read", "a contents"),
+      assistant(toolCallPart(initialError, "read", { path: "src/never-existed.ts" })),
+      toolResult(initialError, "read", "ENOENT pinned open error", true),
+      user("Cycle scope 0"),
+    );
+
+    const sizes: number[] = [];
+    let previousKept = "";
+    for (let cycle = 0; cycle < 100; cycle++) {
+      const first = compileFabricSummary(branch, 10_000);
+      const second = compileFabricSummary(branch, 10_000);
+      if (!("compaction" in first) || !("compaction" in second)) throw new Error("expected compaction");
+      expect(second.compaction.summary).toBe(first.compaction.summary);
+      expect(first.compaction.summary).toContain("Original First goal");
+      expect(first.compaction.summary).toContain("PINNED_RARE_FACT_7");
+      expect(first.compaction.summary).toContain("a.ts");
+      expect(first.compaction.summary).toContain("never-existed.ts");
+      expect(first.compaction.summary).toContain("ENOENT pinned open error");
+      expect(first.compaction.summary).not.toContain("PRIOR_SUMMARY_POISON_991");
+      expect(first.compaction.details).toMatchObject({ compactor: "fabric", version: 2 });
+      expect(first.compaction.firstKeptEntryId === "" || branch.some((entry) => entry.id === first.compaction.firstKeptEntryId)).toBe(true);
+      if (previousKept) expect(first.compaction.firstKeptEntryId).not.toBe(previousKept);
+      previousKept = first.compaction.firstKeptEntryId;
+      sizes.push(Buffer.byteLength(first.compaction.summary, "utf8"));
+      expect(sizes.at(-1)).toBeLessThanOrEqual(32 * 1024);
+
+      appendLinked(
+        branch,
+        compactionEntry(
+          first.compaction.firstKeptEntryId,
+          first.compaction.summary,
+          first.compaction.details,
+        ),
+      );
+      const writeId = nextCallId();
+      appendLinked(
+        branch,
+        assistant(toolCallPart(writeId, "write", { path: `src/cycles/file-${cycle}.ts` })),
+        toolResult(writeId, "write", `wrote cycle ${cycle}`),
+        user(`Cycle scope ${cycle + 1}`),
+      );
+    }
+
+    for (let index = 1; index < branch.length; index++) {
+      expect(branch[index]!.parentId).toBe(branch[index - 1]!.id);
+    }
+    expect(branch.filter((entry) => entry.type === "compaction")).toHaveLength(100);
+    const steady = sizes.slice(-20);
+    expect(Math.max(...steady) - Math.min(...steady)).toBeLessThan(512);
+  });
+});
+
+describe("compaction raw branch truth", () => {
+  it("strictly recognizes only structurally valid Fabric v1/v2 details", () => {
+    expect(fabricCompactionVersion({ compactor: "fabric", version: 1 })).toBeUndefined();
+    expect(fabricCompactionVersion({ compactor: "fabric", version: 3 })).toBeUndefined();
+    expect(fabricCompactionVersion({ compactor: "other", version: 2 })).toBeUndefined();
+  });
+
+  it("migrates v1 details and excludes prior rendered-summary poison", () => {
+    resetIds();
+    resetClock();
+    const branch: SessionEntry[] = [];
+    const first = user("Original v1 goal");
+    const kept = user("Continue after v1");
+    appendLinked(branch, first, assistant(textPart("old work")), kept);
+    appendLinked(branch, compactionEntry(kept.id, "PRIOR_SUMMARY_POISON_991", {
+      compactor: "fabric",
+      version: 1,
+      sections: ["[Session Goal]"],
+      summarizedEntryRange: { first: first.id, last: first.id },
+      sourceEntryCount: 1,
+      firstKeptEntryId: kept.id,
+      timestamp: first.timestamp,
+    }));
+    appendLinked(branch, assistant(textPart("new work")), user("Next boundary"));
+
+    const result = compileFabricSummary(branch, 2000);
+    if (!("compaction" in result)) throw new Error("expected compaction");
+    expect(result.compaction.details?.version).toBe(2);
+    expect(result.compaction.details?.counts.priorFabricV1).toBe(1);
+    expect(result.compaction.summary).toContain("Original v1 goal");
+    expect(result.compaction.summary).not.toContain("PRIOR_SUMMARY_POISON_991");
+  });
+
+  it("uses only the supplied active branch path", () => {
+    resetIds();
+    resetClock();
+    const root = user("Active root goal");
+    const active = [root, assistant(textPart("active work")), user("Active boundary")];
+    const inactive = [
+      root,
+      user("INACTIVE_BRANCH_POISON"),
+      assistant(textPart("inactive work")),
+      user("Inactive boundary"),
+    ];
+    const activeResult = compileFabricSummary(active, 1000);
+    const inactiveResult = compileFabricSummary(inactive, 1000);
+    if (!("compaction" in activeResult) || !("compaction" in inactiveResult)) throw new Error("expected compaction");
+    expect(activeResult.compaction.summary).not.toContain("INACTIVE_BRANCH_POISON");
+    expect(inactiveResult.compaction.summary).toContain("INACTIVE_BRANCH_POISON");
   });
 });
 
@@ -367,30 +553,33 @@ describe("compaction cut never orphans a tool_result from its tool_call", () => 
     const cut = computeCut(branchEntries);
     expect(cut.ok).toBe(true);
     if (!cut.ok) return;
-    const summarizedIds = new Set(cut.summarized.map((e) => e.id));
-    // toolCallId → result entry id, across the whole branch.
-    const callToResultEntry = new Map<string, string>();
-    for (const e of branchEntries) {
-      if (e.type !== "message") continue;
-      const msg = e.message as { role?: string; toolCallId?: string };
-      if (msg.role === "toolResult" && msg.toolCallId) callToResultEntry.set(msg.toolCallId, e.id);
-    }
-    // For every toolCall in the summarized part, its result (if it exists in
-    // the branch) must also be in the summarized part — never in the kept tail.
-    for (const e of cut.summarized) {
-      if (e.type !== "message") continue;
-      const content = (e.message as { content?: unknown }).content;
-      if (!Array.isArray(content)) continue;
-      for (const part of content) {
-        if (part && typeof part === "object" && (part as { type?: string }).type === "toolCall") {
+    const boundaryIndex = cut.firstKeptEntryId
+      ? branchEntries.findIndex((entry) => entry.id === cut.firstKeptEntryId)
+      : branchEntries.length;
+    const sides = new Map<string, { call?: "summary" | "kept"; result?: "summary" | "kept" }>();
+    for (let index = 0; index < branchEntries.length; index++) {
+      const entry = branchEntries[index]!;
+      if (entry.type !== "message") continue;
+      const side = index < boundaryIndex ? "summary" : "kept";
+      const message = entry.message as { role?: string; toolCallId?: string; content?: unknown };
+      if (Array.isArray(message.content)) {
+        for (const part of message.content) {
+          if (!part || typeof part !== "object" || (part as { type?: string }).type !== "toolCall") continue;
           const id = (part as { id?: string }).id;
           if (!id) continue;
-          const resultEntryId = callToResultEntry.get(id);
-          if (resultEntryId && !summarizedIds.has(resultEntryId)) {
-            throw new Error(`orphan: toolCall ${id} summarized but its result is in the kept tail`);
-          }
+          const pair = sides.get(id) ?? {};
+          pair.call = side;
+          sides.set(id, pair);
         }
       }
+      if (message.role === "toolResult" && message.toolCallId) {
+        const pair = sides.get(message.toolCallId) ?? {};
+        pair.result = side;
+        sides.set(message.toolCallId, pair);
+      }
+    }
+    for (const [id, pair] of sides) {
+      if (pair.call && pair.result) expect(pair.call, `closure for ${id}`).toBe(pair.result);
     }
   };
 
@@ -442,6 +631,50 @@ describe("compaction cut never orphans a tool_result from its tool_call", () => 
       return content.some((p) => p && typeof p === "object" && (p as { id?: string }).id === c3);
     });
     expect(summarizedHasCall3).toBe(false);
+  });
+
+  it("recovers a safe cut after an orphan prior kept boundary", () => {
+    resetIds();
+    resetClock();
+    const branch = buildSession(
+      user("raw goal before malformed boundary"),
+      compactionEntry("missing-kept-id", "PRIOR_SUMMARY_POISON_991"),
+      user("recovered turn"),
+      assistant(toolCallPart("recovered-call", "read", { path: "recovered.ts" })),
+      toolResult("recovered-call", "read", "ok"),
+      user("recovered boundary"),
+    );
+    assertNoOrphan(branch);
+    const result = compileFabricSummary(branch, 1000);
+    if (!("compaction" in result)) throw new Error("expected compaction");
+    expect(result.compaction.summary).toContain("raw goal before malformed boundary");
+    expect(result.compaction.summary).not.toContain("PRIOR_SUMMARY_POISON_991");
+  });
+
+  it("closes parallel delayed pairs in both call/result directions", () => {
+    resetIds();
+    resetClock();
+    const forward = buildSession(
+      user("turn one"),
+      assistant(
+        toolCallPart("parallel-a", "read", { path: "a.ts" }),
+        toolCallPart("parallel-b", "read", { path: "b.ts" }),
+      ),
+      toolResult("parallel-a", "read", "a"),
+      user("turn two"),
+      toolResult("parallel-b", "read", "delayed b"),
+    );
+    assertNoOrphan(forward);
+
+    resetIds();
+    const reverse = buildSession(
+      user("malformed turn one"),
+      toolResult("reverse-pair", "read", "early result"),
+      user("turn two"),
+      assistant(toolCallPart("reverse-pair", "read", { path: "later.ts" })),
+    );
+    assertNoOrphan(reverse);
+    expect(computeCut(reverse)).toMatchObject({ ok: true, firstKeptEntryId: "" });
   });
 });
 

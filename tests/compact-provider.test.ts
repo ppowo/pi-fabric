@@ -50,12 +50,18 @@ describe("CompactProvider", () => {
     const { controller, provider } = setup();
     const result = (await provider.invoke(
       "request",
-      { reason: "big file reads", instructions: "Keep the plan", requestedBy: "skill" },
+      {
+        reason: "big file reads",
+        instructions: "Keep the plan",
+        preserve: ["rare fact"],
+        requestedBy: "skill",
+      },
       context,
-    )) as { requested: true; intent: { reason?: string; instructions?: string; requestedBy: string } };
+    )) as { requested: true; intent: { reason?: string; instructions?: string; preserve?: string[]; requestedBy: string } };
     expect(result.requested).toBe(true);
     expect(result.intent.reason).toBe("big file reads");
     expect(result.intent.instructions).toBe("Keep the plan");
+    expect(result.intent.preserve).toEqual(["rare fact"]);
     expect(result.intent.requestedBy).toBe("skill");
     expect(controller.status().pending?.instructions).toBe("Keep the plan");
   });
@@ -90,7 +96,7 @@ describe("CompactProvider", () => {
     await expect(provider.invoke("bogus", {}, context)).rejects.toThrow(/Unknown compact action/);
   });
 
-  it("request inputSchema requires no fields and accepts optional reason/instructions/requestedBy", async () => {
+  it("request inputSchema accepts optional reason/instructions/preserve/requestedBy", async () => {
     const { provider } = setup();
     const descriptor = await provider.describe("request", context);
     const schema = descriptor?.inputSchema as {
@@ -100,6 +106,7 @@ describe("CompactProvider", () => {
     };
     expect(schema.properties).toHaveProperty("reason");
     expect(schema.properties).toHaveProperty("instructions");
+    expect(schema.properties).toHaveProperty("preserve");
     expect(schema.properties).toHaveProperty("requestedBy");
     expect(schema.required ?? []).toEqual([]);
     expect(schema.additionalProperties).toBe(false);

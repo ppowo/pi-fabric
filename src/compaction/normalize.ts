@@ -88,9 +88,9 @@ interface PendingCall {
 
 type DistributiveOmit<T, K extends keyof any> = T extends T ? Omit<T, K> : never;
 
-// Normalize a window of SessionEntries into a flat, typed event stream.
-// `entries` must already be the live window to summarize (post last-compaction
-// boundary, up to the cut). Tool results are paired back to their tool calls by
+// Normalize a SessionEntry source prefix into a flat, typed event stream.
+// The caller selects the cumulative raw active-branch prefix before the new
+// kept boundary. Tool results are paired back to their tool calls by
 // id so a bash result can carry the command from the originating call; this
 // pairing is structural (id match), never prose-based.
 export const normalizeEntries = (entries: SessionEntry[]): CompactionEvent[] => {

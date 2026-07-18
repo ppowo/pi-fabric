@@ -5,25 +5,23 @@ import type {
   SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { NO_BUILTIN_ENRICHERS, runEnrichers, type CompactionEnricher } from "./enrichers.js";
+import {
+  decodeCompactionInstructions,
+  type CompactionInstructionPolicy,
+} from "./instructions.js";
 import { normalizeEntries } from "./normalize.js";
-import { project, type Sections } from "./projections.js";
+import {
+  projectWithMetadata,
+  type ProjectionOmittedCounts,
+  type Sections,
+} from "./projections.js";
 import { renderSummary } from "./render.js";
-
-// The cut is recomputed from the raw branch entries (principle 1) — never from
-// the previous summary and never from pi-core's prepared slice, which may
-// already reflect a split turn. We cut at a complete-turn boundary: the last
-// user message, pushed back to the previous user message when the following
-// turn is still in flight (unmatched tool calls). This guarantees the cut
-// never orphans a tool_result from its tool_call (the summarized part always
-// ends at a complete turn). When no earlier boundary exists we fall back to
-// the compact-all sentinel (firstKeptEntryId = ""), which pi-core treats as
-// "keep nothing from before"; the deterministic summary then stands in for
-// the whole window.
 
 type CompactionEngine = "pi" | "fabric";
 
 interface MessageEntry {
   entry: SessionEntry;
+  branchIndex: number;
   message: {
     role?: unknown;
     content?: unknown;
@@ -47,98 +45,107 @@ const toolCallIdsOf = (message: { content?: unknown }): string[] => {
   if (!Array.isArray(content)) return [];
   const ids: string[] = [];
   for (const part of content) {
-    if (part && typeof part === "object" && "type" in part && (part as { type: string }).type === "toolCall") {
-      const id = (part as { id?: unknown }).id;
-      if (typeof id === "string") ids.push(id);
-    }
+    if (!part || typeof part !== "object" || !("type" in part) || part.type !== "toolCall") continue;
+    const id = (part as { id?: unknown }).id;
+    if (typeof id === "string") ids.push(id);
   }
   return ids;
 };
 
 const findLastCompaction = (entries: SessionEntry[]): { index: number; firstKeptEntryId: string } | undefined => {
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const entry = entries[i]!;
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index]!;
     if (entry.type === "compaction") {
-      return { index: i, firstKeptEntryId: entry.firstKeptEntryId };
+      return { index, firstKeptEntryId: entry.firstKeptEntryId };
     }
   }
   return undefined;
 };
 
-// Collect the live message entries — the raw window this compaction works on —
-// starting from the last compaction's kept boundary (or right after the last
-// compaction entry when the kept id is missing or the compact-all sentinel).
+const collectMessages = (entries: SessionEntry[], startIndex: number): MessageEntry[] => {
+  const messages: MessageEntry[] = [];
+  for (let index = Math.max(0, startIndex); index < entries.length; index++) {
+    const entry = entries[index]!;
+    if (!isMessageEntry(entry) || isHiddenEmptyCustom(entry.message)) continue;
+    messages.push({
+      entry,
+      branchIndex: index,
+      message: entry.message as MessageEntry["message"],
+    });
+  }
+  return messages;
+};
+
 const collectLive = (entries: SessionEntry[]): MessageEntry[] => {
   const last = findLastCompaction(entries);
-  const live: MessageEntry[] = [];
-  if (!last) {
-    for (const entry of entries) {
-      if (!isMessageEntry(entry)) continue;
-      if (isHiddenEmptyCustom(entry.message)) continue;
-      live.push({ entry, message: entry.message as MessageEntry["message"] });
-    }
-    return live;
+  if (!last) return collectMessages(entries, 0);
+  if (last.firstKeptEntryId) {
+    const keptIndex = entries.findIndex((entry) => entry.id === last.firstKeptEntryId);
+    if (keptIndex >= 0) return collectMessages(entries, keptIndex);
   }
-  const keptId = last.firstKeptEntryId;
-  const orphan = !keptId || !entries.some((e) => e.id === keptId);
-  if (orphan) {
-    for (let i = last.index + 1; i < entries.length; i++) {
-      const entry = entries[i]!;
-      if (!isMessageEntry(entry)) continue;
-      if (isHiddenEmptyCustom(entry.message)) continue;
-      live.push({ entry, message: entry.message as MessageEntry["message"] });
-    }
-    return live;
+  return collectMessages(entries, last.index + 1);
+};
+
+const previousUserAtOrBefore = (live: MessageEntry[], branchIndex: number): number => {
+  for (let index = live.length - 1; index >= 0; index--) {
+    const item = live[index]!;
+    if (item.branchIndex <= branchIndex && item.message.role === "user") return index;
   }
-  let foundKept = false;
-  for (const entry of entries) {
-    if (!foundKept && entry.id === keptId) foundKept = true;
-    if (!foundKept) continue;
-    if (!isMessageEntry(entry)) continue;
-    if (isHiddenEmptyCustom(entry.message)) continue;
-    live.push({ entry, message: entry.message as MessageEntry["message"] });
-  }
-  return live;
+  return -1;
 };
 
 const lastUserIndex = (live: MessageEntry[]): number => {
-  for (let i = live.length - 1; i >= 0; i--) {
-    if (live[i]!.message.role === "user") return i;
+  for (let index = live.length - 1; index >= 0; index--) {
+    if (live[index]!.message.role === "user") return index;
   }
   return -1;
 };
 
-// True when the turn starting at `cutIdx` has tool calls without matching
-// results in the live window (assistant emitted a call but no result landed
-// before compaction). Structural: id match only.
-const turnIncomplete = (live: MessageEntry[], cutIdx: number): boolean => {
-  const calls = new Set<string>();
-  const results = new Set<string>();
-  for (let i = cutIdx + 1; i < live.length; i++) {
-    const message = live[i]!.message;
-    if (message.role === "user") break;
-    if (message.role === "toolResult" && typeof message.toolCallId === "string") {
-      results.add(message.toolCallId);
-      continue;
+const callResultSpans = (entries: SessionEntry[]): Map<string, { first: number; last: number }> => {
+  const spans = new Map<string, { first: number; last: number }>();
+  const record = (id: string, index: number): void => {
+    if (!id) return;
+    const span = spans.get(id);
+    if (span) {
+      span.first = Math.min(span.first, index);
+      span.last = Math.max(span.last, index);
+    } else {
+      spans.set(id, { first: index, last: index });
     }
-    for (const id of toolCallIdsOf(message)) {
-      calls.add(id);
-      if (!results.has(id)) {
-        // unmatched so far; keep scanning in case a later result matches
+  };
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index]!;
+    if (!isMessageEntry(entry)) continue;
+    const message = entry.message as MessageEntry["message"];
+    for (const id of toolCallIdsOf(message)) record(id, index);
+    if (message.role === "toolResult" && typeof message.toolCallId === "string") {
+      record(message.toolCallId, index);
+    }
+  }
+  return spans;
+};
+
+const closeCut = (
+  branchEntries: SessionEntry[],
+  live: MessageEntry[],
+  candidateLiveIndex: number,
+): number => {
+  const spans = callResultSpans(branchEntries);
+  let liveIndex = candidateLiveIndex;
+  while (liveIndex > 0) {
+    const boundaryIndex = live[liveIndex]!.branchIndex;
+    let earliestCrossing = boundaryIndex;
+    for (const span of spans.values()) {
+      if (span.first < boundaryIndex && span.last >= boundaryIndex) {
+        earliestCrossing = Math.min(earliestCrossing, span.first);
       }
     }
+    if (earliestCrossing === boundaryIndex) return liveIndex;
+    const closed = previousUserAtOrBefore(live, earliestCrossing);
+    if (closed < 0 || closed >= liveIndex) return 0;
+    liveIndex = closed;
   }
-  for (const id of calls) {
-    if (!results.has(id)) return true;
-  }
-  return false;
-};
-
-const previousUserIndex = (live: MessageEntry[], before: number): number => {
-  for (let i = before - 1; i >= 0; i--) {
-    if (live[i]!.message.role === "user") return i;
-  }
-  return -1;
+  return 0;
 };
 
 export type CutResult =
@@ -152,35 +159,10 @@ export type CutResult =
     }
   | { ok: false; reason: "empty" };
 
-// Pure cut over the raw branch entries. Exported for deterministic testing.
-export const computeCut = (branchEntries: SessionEntry[]): CutResult => {
-  const live = collectLive(branchEntries);
-  if (live.length === 0) return { ok: false, reason: "empty" };
-
-  let cutIdx = lastUserIndex(live);
-  if (cutIdx > 0 && turnIncomplete(live, cutIdx)) {
-    const prev = previousUserIndex(live, cutIdx);
-    cutIdx = prev; // may be -1 / 0
-  }
-
-  if (cutIdx <= 0) {
-    // No earlier complete-turn boundary to cut at — compact the whole window.
-    const summarized = live.map((l) => l.entry);
-    return boundary(summarized, "");
-  }
-
-  const summarized = live.slice(0, cutIdx).map((l) => l.entry);
-  const firstKeptEntryId = live[cutIdx]!.entry.id;
-  return boundary(summarized, firstKeptEntryId);
-};
-
-const boundary = (
-  summarized: SessionEntry[],
-  firstKeptEntryId: string,
-): CutResult => {
+const boundary = (summarized: SessionEntry[], firstKeptEntryId: string): CutResult => {
   if (summarized.length === 0) return { ok: false, reason: "empty" };
   const first = summarized[0]!;
-  const last = summarized[summarized.length - 1]!;
+  const last = summarized.at(-1)!;
   return {
     ok: true,
     summarized,
@@ -191,7 +173,22 @@ const boundary = (
   };
 };
 
-export interface FabricCompactionDetails {
+export const computeCut = (branchEntries: SessionEntry[]): CutResult => {
+  const live = collectLive(branchEntries);
+  if (live.length === 0) return { ok: false, reason: "empty" };
+
+  const lastUser = lastUserIndex(live);
+  if (lastUser <= 0) return boundary(live.map((item) => item.entry), "");
+  const closed = closeCut(branchEntries, live, lastUser);
+  if (closed <= 0) return boundary(live.map((item) => item.entry), "");
+
+  return boundary(
+    live.slice(0, closed).map((item) => item.entry),
+    live[closed]!.entry.id,
+  );
+};
+
+interface FabricCompactionDetailsV1 {
   compactor: "fabric";
   version: 1;
   sections: string[];
@@ -201,32 +198,196 @@ export interface FabricCompactionDetails {
   timestamp: string;
 }
 
+interface EntryRange {
+  first: string;
+  last: string;
+}
+
+export interface FabricCompactionDetailsV2 {
+  compactor: "fabric";
+  version: 2;
+  sections: string[];
+  coverage: {
+    cumulativeSourceRange: EntryRange;
+    liveCutRange: EntryRange;
+  };
+  counts: {
+    branchEntries: number;
+    cumulativeSourceEntries: number;
+    sourceEvents: number;
+    liveCutEntries: number;
+    priorFabricV1: number;
+    priorFabricV2: number;
+  };
+  omittedCounts: ProjectionOmittedCounts & { preserve: number };
+  instructionPolicy: CompactionInstructionPolicy;
+  stableAddresses: {
+    firstKeptEntryId: string;
+    cumulativeSourceRange: EntryRange;
+    recall: "session-entry-id-range";
+  };
+  timestamp: string;
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
+const isEntryRange = (value: unknown): boolean =>
+  isRecord(value) && typeof value.first === "string" && typeof value.last === "string";
+
+const isStringArray = (value: unknown): boolean =>
+  Array.isArray(value) && value.every((item) => typeof item === "string");
+
+const isFabricV1Details = (value: Record<string, unknown>): boolean =>
+  isStringArray(value.sections)
+  && isEntryRange(value.summarizedEntryRange)
+  && typeof value.sourceEntryCount === "number"
+  && Number.isFinite(value.sourceEntryCount)
+  && typeof value.firstKeptEntryId === "string"
+  && typeof value.timestamp === "string";
+
+const hasFiniteNumbers = (value: Record<string, unknown>, keys: readonly string[]): boolean =>
+  keys.every((key) => typeof value[key] === "number" && Number.isFinite(value[key]));
+
+const isFabricV2Details = (value: Record<string, unknown>): boolean => {
+  if (!isStringArray(value.sections) || !isRecord(value.coverage) || !isRecord(value.counts)) return false;
+  if (!isRecord(value.omittedCounts) || !isRecord(value.instructionPolicy) || !isRecord(value.stableAddresses)) {
+    return false;
+  }
+  const instructionModes = new Set(["none", "plain", "typed-v1", "malformed-typed-prefix"]);
+  return isEntryRange(value.coverage.cumulativeSourceRange)
+    && isEntryRange(value.coverage.liveCutRange)
+    && hasFiniteNumbers(value.counts, [
+      "branchEntries",
+      "cumulativeSourceEntries",
+      "sourceEvents",
+      "liveCutEntries",
+      "priorFabricV1",
+      "priorFabricV2",
+    ])
+    && hasFiniteNumbers(value.omittedCounts, [
+      "goal",
+      "files",
+      "commits",
+      "outstanding",
+      "earlierTurns",
+      "transcript",
+      "preserve",
+    ])
+    && typeof value.instructionPolicy.mode === "string"
+    && instructionModes.has(value.instructionPolicy.mode)
+    && typeof value.instructionPolicy.canonicalized === "boolean"
+    && typeof value.instructionPolicy.truncated === "boolean"
+    && hasFiniteNumbers(value.instructionPolicy, [
+      "sourceBytes",
+      "preserveCount",
+      "omittedPreserveCount",
+    ])
+    && typeof value.stableAddresses.firstKeptEntryId === "string"
+    && isEntryRange(value.stableAddresses.cumulativeSourceRange)
+    && value.stableAddresses.recall === "session-entry-id-range"
+    && typeof value.timestamp === "string";
+};
+
+export const fabricCompactionVersion = (details: unknown): 1 | 2 | undefined => {
+  if (!isRecord(details) || details.compactor !== "fabric") return undefined;
+  if (details.version === 1 && isFabricV1Details(details)) return 1;
+  if (details.version === 2 && isFabricV2Details(details)) return 2;
+  return undefined;
+};
+
+const cumulativeSource = (
+  branchEntries: SessionEntry[],
+  firstKeptEntryId: string,
+): { entries: SessionEntry[]; events: ReturnType<typeof normalizeEntries>; range: EntryRange; timestamp: string } => {
+  const boundaryIndex = firstKeptEntryId
+    ? branchEntries.findIndex((entry) => entry.id === firstKeptEntryId)
+    : branchEntries.length;
+  const prefix = branchEntries.slice(0, boundaryIndex >= 0 ? boundaryIndex : branchEntries.length);
+  const events = normalizeEntries(prefix);
+  const contentEntryIds = new Set(events.map((event) => event.entryId));
+  const entries = prefix.filter((entry) => contentEntryIds.has(entry.id));
+  return {
+    entries,
+    events,
+    range: {
+      first: entries[0]?.id ?? "",
+      last: entries.at(-1)?.id ?? "",
+    },
+    timestamp: entries.at(-1)?.timestamp ?? "",
+  };
+};
+
+const priorFabricVersions = (entries: SessionEntry[]): { v1: number; v2: number } => {
+  let v1 = 0;
+  let v2 = 0;
+  for (const entry of entries) {
+    if (entry.type !== "compaction") continue;
+    const version = fabricCompactionVersion((entry as SessionEntry & { details?: unknown }).details);
+    if (version === 1) v1 += 1;
+    if (version === 2) v2 += 1;
+  }
+  return { v1, v2 };
+};
+
 export const compileFabricSummary = (
   branchEntries: SessionEntry[],
   tokensBefore: number,
   enrichers: readonly CompactionEnricher[] = NO_BUILTIN_ENRICHERS,
-): { compaction: CompactionResult<FabricCompactionDetails> } | { cancel: true; reason: string } => {
+  customInstructions?: string,
+): { compaction: CompactionResult<FabricCompactionDetailsV2> } | { cancel: true; reason: string } => {
   const cut = computeCut(branchEntries);
   if (!cut.ok) return { cancel: true, reason: "fabric: nothing to compact" };
 
-  const events = normalizeEntries(cut.summarized);
-  const sections: Sections = project(events);
-  runEnrichers(enrichers, events, sections);
+  const source = cumulativeSource(branchEntries, cut.firstKeptEntryId);
+  if (source.events.length === 0) return { cancel: true, reason: "fabric: no raw cumulative source" };
+  const projected = projectWithMetadata(source.events);
+  const sections: Sections = projected.sections;
+  runEnrichers(enrichers, source.events, sections);
+  const instructions = decodeCompactionInstructions(customInstructions);
 
   const summary = renderSummary(sections, {
-    firstEntryId: cut.firstSummarizedEntryId,
-    lastEntryId: cut.lastSummarizedEntryId,
-    lastTimestamp: cut.lastTimestamp,
+    firstEntryId: source.range.first,
+    lastEntryId: source.range.last,
+    lastTimestamp: source.timestamp,
+    requestLines: instructions.requestLines,
   });
+  const versions = priorFabricVersions(branchEntries);
+  const sectionHeaders = SECTION_HEADERS
+    .filter(({ key }) => sections[key].length > 0)
+    .map(({ header }) => header);
+  if (instructions.requestLines.length > 0) sectionHeaders.splice(1, 0, "[Compaction Request]");
 
-  const details: FabricCompactionDetails = {
+  const details: FabricCompactionDetailsV2 = {
     compactor: "fabric",
-    version: 1,
-    sections: SECTION_HEADERS.filter(({ key }) => sections[key].length > 0).map(({ header }) => header),
-    summarizedEntryRange: { first: cut.firstSummarizedEntryId, last: cut.lastSummarizedEntryId },
-    sourceEntryCount: events.length,
-    firstKeptEntryId: cut.firstKeptEntryId,
-    timestamp: cut.lastTimestamp,
+    version: 2,
+    sections: sectionHeaders,
+    coverage: {
+      cumulativeSourceRange: source.range,
+      liveCutRange: {
+        first: cut.firstSummarizedEntryId,
+        last: cut.lastSummarizedEntryId,
+      },
+    },
+    counts: {
+      branchEntries: branchEntries.length,
+      cumulativeSourceEntries: source.entries.length,
+      sourceEvents: source.events.length,
+      liveCutEntries: cut.summarized.length,
+      priorFabricV1: versions.v1,
+      priorFabricV2: versions.v2,
+    },
+    omittedCounts: {
+      ...projected.omittedCounts,
+      preserve: instructions.policy.omittedPreserveCount,
+    },
+    instructionPolicy: instructions.policy,
+    stableAddresses: {
+      firstKeptEntryId: cut.firstKeptEntryId,
+      cumulativeSourceRange: source.range,
+      recall: "session-entry-id-range",
+    },
+    timestamp: source.timestamp,
   };
 
   return {
@@ -262,6 +423,7 @@ export const registerCompactionHook = (pi: ExtensionAPI, options: CompactionHook
       branchEntries ?? [],
       preparation.tokensBefore,
       options.enrichers,
+      event.customInstructions,
     );
     if ("cancel" in result) {
       if ((event as SessionBeforeCompactEvent & { _piVccOverriding?: unknown })._piVccOverriding) {
