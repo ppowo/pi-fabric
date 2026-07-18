@@ -19,7 +19,10 @@ import { McpProvider } from "./providers/mcp-provider.js";
 import { MemoryProvider, type MemoryProviderContext } from "./providers/memory-provider.js";
 import { MeshProvider } from "./providers/mesh-provider.js";
 import { PiToolsProvider } from "./providers/pi-tools-provider.js";
+import { SchemaProvider } from "./providers/schema-provider.js";
 import { StateProvider } from "./providers/state-provider.js";
+import { SchemaController } from "./schema/controller.js";
+import { StateStore } from "./state/store.js";
 import {
   FABRIC_PROVIDER_DISCOVER_EVENT,
   type FabricProvider,
@@ -43,6 +46,7 @@ export class FabricState {
   #mesh: MeshStore | undefined;
   #identity: MeshIdentity | undefined;
   #compact: CompactController | undefined;
+  #schema: SchemaController | undefined;
   #cwd: string | undefined;
   readonly #externalProviders = new Map<string, FabricProvider>();
   readonly activity = new FabricActivityStore();
@@ -119,13 +123,19 @@ export class FabricState {
       projectTrusted: context.isProjectTrusted(),
     });
     this.#registry = new ActionRegistry();
+    const enforceSchema = this.#config.schema.mode === "enforce";
+    const effectiveFullCodeMode = this.#config.fullCodeMode || enforceSchema;
     const capturedToolsProvider =
-      this.#config.fullCodeMode && this.#config.capture.enabled
+      effectiveFullCodeMode && this.#config.capture.enabled && !enforceSchema
         ? new CapturedToolsProvider(this.capturedTools)
         : undefined;
-    if (this.#config.fullCodeMode) {
+    if (effectiveFullCodeMode) {
       this.#registry.register(
-        new PiToolsProvider(context.cwd, this.capturedTools, capturedToolsProvider),
+        new PiToolsProvider(
+          context.cwd,
+          enforceSchema ? undefined : this.capturedTools,
+          capturedToolsProvider,
+        ),
       );
     }
     this.#registry.register(new McpProvider(context.cwd, this.#config.mcp));
@@ -155,13 +165,24 @@ export class FabricState {
       this.#registry.register(new MeshProvider(this.#mesh, identity));
       this.#registry.register(new StateProvider(this.#mesh, identity));
     }
+    this.#schema = new SchemaController(
+      context.cwd,
+      this.#config.schema,
+      this.#mesh,
+      identity,
+      new StateStore(this.#mesh),
+    );
+    this.#registry.register(new SchemaProvider(this.#schema));
     this.#identity = identity;
     this.#compact = new CompactController({
       onRequest: (intent) => void this.#publishCompactEvent("requested", intent),
       onCommit: (info) => void this.#publishCompactEvent(info.status, info),
     });
     this.#registry.register(new CompactProvider(this.#compact));
-    this.#subagents = new SubagentManager(context.cwd, this.#config.subagents, {
+    const subagentConfig = enforceSchema
+      ? { ...this.#config.subagents, enabled: false }
+      : this.#config.subagents;
+    this.#subagents = new SubagentManager(context.cwd, subagentConfig, {
       fullCodeMode: this.#config.fullCodeMode,
       onBackgroundComplete: (result) => {
         const durationMs = Math.max(0, (result.finishedAt ?? Date.now()) - result.startedAt);
@@ -189,7 +210,7 @@ export class FabricState {
       sessionId,
       identity,
       this.#mesh,
-      this.#config.mesh,
+      enforceSchema ? { ...this.#config.mesh, enabled: false } : this.#config.mesh,
       this.#subagents,
       ({ actor, message, delivery, triggerTurn }) => {
         const actorText = message.text ?? "";
@@ -208,7 +229,7 @@ export class FabricState {
           { deliverAs: delivery, triggerTurn },
         );
       },
-      context.isProjectTrusted() && this.#config.mesh.enabled
+      !enforceSchema && context.isProjectTrusted() && this.#config.mesh.enabled
         ? {
             actorRoot:
               this.#config.mesh.actorScope === "session"
@@ -234,7 +255,12 @@ export class FabricState {
     for (const provider of this.#externalProviders.values()) {
       this.#registry.register(provider);
     }
-    this.#execution = new FabricExecutionService(this.#registry, this.#config, this.activity);
+    this.#execution = new FabricExecutionService(
+      this.#registry,
+      this.#config,
+      this.activity,
+      this.#schema,
+    );
     const discovery: FabricProviderDiscovery = {
       version: 1,
       register: (provider, options) => this.registerExternal(provider, options),
@@ -253,6 +279,7 @@ export class FabricState {
       agentDir: getAgentDir(),
       projectTrusted: context.isProjectTrusted(),
     });
+    next.schema.mode = this.#config.schema.mode;
     deepAssign(this.#config as unknown as Record<string, unknown>, next as unknown as Record<string, unknown>);
   }
 
@@ -261,7 +288,11 @@ export class FabricState {
     payload: unknown,
     context: ExtensionContext,
   ): number {
-    if (!this.#actors || !this.#config?.mesh.enabled) return 0;
+    if (
+      !this.#actors ||
+      !this.#config?.mesh.enabled ||
+      this.#config.schema.mode === "enforce"
+    ) return 0;
     const maxChars = this.#config.mesh.eventContextChars;
     const bounded = (value: unknown): unknown => {
       let json: string;
@@ -307,7 +338,20 @@ export class FabricState {
   }
 
   registerExternal(provider: FabricProvider, options: { overwrite?: boolean } = {}): void {
-    if (["pi", "mcp", "agents", "mesh", "extensions", "fabric"].includes(provider.name)) {
+    if (
+      [
+        "pi",
+        "mcp",
+        "agents",
+        "mesh",
+        "extensions",
+        "fabric",
+        "schema",
+        "state",
+        "memory",
+        "compact",
+      ].includes(provider.name)
+    ) {
       throw new Error(`Reserved Fabric provider name: ${provider.name}`);
     }
     if (this.#externalProviders.has(provider.name) && !options.overwrite) {
@@ -328,6 +372,7 @@ export class FabricState {
     this.#mesh = undefined;
     this.#identity = undefined;
     this.#compact = undefined;
+    this.#schema = undefined;
     this.#cwd = undefined;
     this.activity.reset();
     this.#widgetDismissedAt = 0;
@@ -363,6 +408,7 @@ export class FabricState {
     this.#mesh = undefined;
     this.#identity = undefined;
     this.#compact = undefined;
+    this.#schema = undefined;
   }
 }
 

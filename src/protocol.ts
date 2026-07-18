@@ -80,6 +80,7 @@ export interface FabricProvider {
     args: Record<string, unknown>,
     context: FabricInvocationContext,
   ): Promise<unknown>;
+  invocationEnded?(parentToolCallId: string): Promise<void>;
   close?(): Promise<void>;
 }
 
