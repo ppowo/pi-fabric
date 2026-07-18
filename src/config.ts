@@ -66,6 +66,23 @@ export interface FabricToolCaptureConfig {
   risks: Record<string, FabricRisk>;
 }
 
+export type FabricSchemaMode = "off" | "audit" | "enforce";
+
+export interface FabricSchemaTrustedCommand {
+  command: string;
+  args: string[];
+  shell: boolean;
+  timeoutMs: number;
+}
+
+export interface FabricSchemaConfig {
+  mode: FabricSchemaMode;
+  certificateTtlMs: number;
+  maxFiles: number;
+  maxBytes: number;
+  trustedCommands: Record<string, FabricSchemaTrustedCommand>;
+}
+
 interface FabricUiConfig {
   enabled: boolean;
   widget: FabricUiWidgetMode;
@@ -111,6 +128,7 @@ export interface FabricConfig {
   compaction: FabricCompactionConfig;
   mesh: FabricMeshConfig;
   memory: FabricMemoryConfig;
+  schema: FabricSchemaConfig;
 }
 
 export const MIN_SUBAGENT_TIMEOUT_MS = 1_000;
@@ -196,6 +214,13 @@ export const DEFAULT_FABRIC_CONFIG: FabricConfig = {
     maxEntryChars: 2_000,
     hotSessions: 50,
     digestTerms: 200,
+  },
+  schema: {
+    mode: "off",
+    certificateTtlMs: 30_000,
+    maxFiles: 100,
+    maxBytes: 10 * 1024 * 1024,
+    trustedCommands: {},
   },
 };
 
@@ -293,6 +318,9 @@ const compactionEngineValue = (
 const actorScopeValue = (value: unknown, fallback: FabricActorScope): FabricActorScope =>
   value === "project" || value === "session" ? value : fallback;
 
+const schemaModeValue = (value: unknown, fallback: FabricSchemaMode): FabricSchemaMode =>
+  value === "off" || value === "audit" || value === "enforce" ? value : fallback;
+
 const riskValue = (value: unknown, fallback: FabricRisk): FabricRisk =>
   value === "read" ||
   value === "write" ||
@@ -313,6 +341,7 @@ export const normalizeFabricConfig = (input: Record<string, unknown>): FabricCon
   const compaction = objectValue(input.compaction);
   const mesh = objectValue(input.mesh);
   const memory = objectValue(input.memory);
+  const schema = objectValue(input.schema);
   const configuredTools = Array.isArray(subagents.defaultTools)
     ? subagents.defaultTools.filter(
         (tool): tool is string => typeof tool === "string" && Boolean(tool),
@@ -334,6 +363,24 @@ export const normalizeFabricConfig = (input: Record<string, unknown>): FabricCon
     ...DEFAULT_FABRIC_CONFIG.capture.risks,
     ...objectValue(capture.risks),
   };
+  const trustedCommands = Object.fromEntries(
+    Object.entries(objectValue(schema.trustedCommands)).flatMap(([name, raw]) => {
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(name)) return [];
+      const command = objectValue(raw);
+      const executable = stringValue(command.command);
+      if (!executable) return [];
+      const shell = booleanValue(command.shell, false);
+      const args = !shell && Array.isArray(command.args)
+        ? command.args.filter((arg): arg is string => typeof arg === "string").slice(0, 64)
+        : [];
+      return [[name, {
+        command: executable,
+        args,
+        shell,
+        timeoutMs: boundedInteger(command.timeoutMs, 30_000, 1, 300_000),
+      } satisfies FabricSchemaTrustedCommand]];
+    }),
+  );
   const risks = Object.fromEntries(
     Object.entries(configuredRisks)
       .filter(([name]) => Boolean(name.trim()))
@@ -534,27 +581,57 @@ export const normalizeFabricConfig = (input: Record<string, unknown>): FabricCon
         10_000,
       ),
     },
+    schema: {
+      mode: schemaModeValue(schema.mode, DEFAULT_FABRIC_CONFIG.schema.mode),
+      certificateTtlMs: boundedInteger(
+        schema.certificateTtlMs,
+        DEFAULT_FABRIC_CONFIG.schema.certificateTtlMs,
+        1_000,
+        10 * 60_000,
+      ),
+      maxFiles: boundedInteger(
+        schema.maxFiles,
+        DEFAULT_FABRIC_CONFIG.schema.maxFiles,
+        1,
+        1_000,
+      ),
+      maxBytes: boundedInteger(
+        schema.maxBytes,
+        DEFAULT_FABRIC_CONFIG.schema.maxBytes,
+        1_024,
+        100 * 1024 * 1024,
+      ),
+      trustedCommands,
+    },
   };
 };
 
 export const effectiveToolCaptureConfig = (
-  config: Pick<FabricConfig, "fullCodeMode" | "capture">,
+  config: Pick<FabricConfig, "fullCodeMode" | "capture"> & Partial<Pick<FabricConfig, "schema">>,
 ): FabricToolCaptureConfig =>
-  config.fullCodeMode
+  config.schema?.mode === "enforce"
     ? {
         ...config.capture,
-        keepVisible: config.capture.keepVisible.filter(
-          (name) => !PI_CORE_TOOL_NAME_SET.has(name),
-        ),
+        enabled: true,
+        hideFromModel: true,
+        keepVisible: ["fabric_exec"],
         risks: { ...config.capture.risks },
       }
-    : {
-        ...config.capture,
-        enabled: false,
-        hideFromModel: false,
-        keepVisible: [...config.capture.keepVisible],
-        risks: { ...config.capture.risks },
-      };
+    : config.fullCodeMode
+      ? {
+          ...config.capture,
+          keepVisible: config.capture.keepVisible.filter(
+            (name) => !PI_CORE_TOOL_NAME_SET.has(name),
+          ),
+          risks: { ...config.capture.risks },
+        }
+      : {
+          ...config.capture,
+          enabled: false,
+          hideFromModel: false,
+          keepVisible: [...config.capture.keepVisible],
+          risks: { ...config.capture.risks },
+        };
 
 export const loadFabricConfig = (options: {
   cwd: string;

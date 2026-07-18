@@ -1,6 +1,8 @@
 # State layer (fabric-schema)
 
-The `state` provider is a typed, labeled world-model layer over mesh storage. It records claims, attached executable evidence, verification outcomes, and compare-and-swap state transitions. It provides durable process state and fail-closed reporting; it is not a gate on direct Pi tools such as `pi.edit` or `pi.bash`. A forthcoming or optional strict schema mode may provide stronger enforcement, but this document does not assume one.
+The `state` provider is a typed, labeled world-model layer over mesh storage. It records claims, attached executable evidence, verification outcomes, and compare-and-swap state transitions. By itself it provides durable process state and fail-closed reporting; in the default `schema.mode: "off"` it is not a gate on direct Pi tools such as `pi.edit` or `pi.bash`.
+
+The separate opt-in Schema transaction layer adds `audit` and `enforce` modes. In enforce mode, state reads remain available but `state.transition`, `state.verify`, `state.goal`, and `state.checkGoal` are blocked from model-originated calls; mutations use the host-owned `schema.*` transaction control plane instead. See [Schema enforcement](./schema-enforcement.md).
 
 ## Claim, evidence attachment, and certification
 
@@ -27,7 +29,7 @@ Evidence commands are arbitrary shell commands and are trusted workflow input. T
 | Complexity reduction | Decision-point reduction requires attached evidence and remains pending until later verification succeeds. |
 | Executable goal | `state.goal({ check })` stores a predicate; `state.checkGoal()` executes it. |
 
-The `fabric-schema` skill uses these facilities as workflow discipline. The current provider does not prevent a caller from bypassing that discipline with direct tools.
+The `fabric-schema` skill uses these facilities as workflow discipline when Schema mode is off, and uses the `schema.*` transaction API when audit or enforce mode is selected. The state provider alone does not prevent bypass; the central ActionRegistry gate is what supplies enforce-mode authorization.
 
 ## Storage format
 

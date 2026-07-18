@@ -57,6 +57,7 @@ export type FabricRegistryActivityEvent =
     };
 
 export interface FabricRegistryInvocationContext extends FabricInvocationContext {
+  authorize?(action: ResolvedFabricAction): Promise<void>;
   approve(action: ResolvedFabricAction): Promise<void>;
   audits: FabricCallAudit[];
   maxResultChars: number;
@@ -268,7 +269,7 @@ export class ActionRegistry {
     context: FabricRegistryInvocationContext,
   ): Promise<unknown> {
     const traceOperation = context.traceOperation ?? context.trace?.issueCall(ref, args);
-    let failureStage: "resolve" | "prepare" | "validate" | "approve" | "invoke" = "resolve";
+    let failureStage: "resolve" | "guard" | "prepare" | "validate" | "approve" | "invoke" = "resolve";
     let audit: FabricCallAudit | undefined;
     try {
       const { provider, actionName } = this.#parseRef(ref);
@@ -276,6 +277,9 @@ export class ActionRegistry {
       if (!descriptor) throw new Error(`Unknown Fabric action: ${ref}`);
       const action = resolveDescriptor(provider, descriptor);
       traceOperation?.resolved(action.provider, action.name);
+
+      failureStage = "guard";
+      await context.authorize?.(action);
 
       failureStage = "prepare";
       const preparedArgs = provider.prepareArguments
@@ -374,6 +378,14 @@ export class ActionRegistry {
     } finally {
       if (audit) audit.endedAt = Date.now();
     }
+  }
+
+  async endInvocation(parentToolCallId: string): Promise<void> {
+    await Promise.allSettled(
+      [...this.#providers.values()].map((provider) =>
+        provider.invocationEnded?.(parentToolCallId),
+      ),
+    );
   }
 
   async close(excludedProviderNames: Set<string> = new Set()): Promise<void> {

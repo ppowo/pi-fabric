@@ -48,6 +48,10 @@ interface FabricExecutionPartial {
   progress?: string | undefined;
 }
 
+export interface FabricExecutionAuthorizer {
+  authorize(ref: string, parentToolCallId: string): Promise<void>;
+}
+
 export interface FabricExecutionOptions {
   code: string;
   strings?: Record<string, string>;
@@ -67,15 +71,18 @@ export class FabricExecutionService {
     readonly registry: ActionRegistry,
     readonly config: FabricConfig,
     readonly activity?: FabricActivityStore,
+    readonly authorizer?: FabricExecutionAuthorizer,
   ) {}
 
   async execute(options: FabricExecutionOptions): Promise<FabricExecutionResult> {
     const startedAt = performance.now();
     const traceRecorder = new FabricExecutionTraceRecorder();
     this.activity?.start(options.parentToolCallId, options.display);
+    const effectiveFullCodeMode =
+      this.config.fullCodeMode || this.config.schema.mode === "enforce";
     const checked = typeCheckFabricCode(
       options.code,
-      guestTypeDeclarations(this.config.fullCodeMode),
+      guestTypeDeclarations(effectiveFullCodeMode),
     );
     if (checked.errors.length > 0) {
       this.activity?.finish(options.parentToolCallId, false, "Type checking failed");
@@ -115,7 +122,7 @@ export class FabricExecutionService {
       return provider === "pi" || provider === "extensions" ? provider : undefined;
     };
     const guardFullCodeRef = (ref: string): void => {
-      if (this.config.fullCodeMode) return;
+      if (effectiveFullCodeMode) return;
       const provider = fullCodeProvider(ref);
       if (!provider) return;
       throw new Error(
@@ -208,7 +215,17 @@ export class FabricExecutionService {
       }
       return this.registry.invoke(ref, args, {
         ...callContext,
-        approve: (action) => approval.approve(action),
+        ...(this.authorizer
+          ? { authorize: (action) => this.authorizer!.authorize(action.ref, options.parentToolCallId) }
+          : {}),
+        approve: async (action) => {
+          if (action.ref === "schema.commit") {
+            await approval.approve({ ...action, risk: "write" });
+            await approval.approve({ ...action, risk: "execute" });
+            return;
+          }
+          await approval.approve(action);
+        },
         audits,
         maxResultChars: this.config.executor.maxNestedResultChars,
         traceOperation,
@@ -226,7 +243,7 @@ export class FabricExecutionService {
               return this.registry
                 .providers()
                 .filter(
-                  (provider) => this.config.fullCodeMode || !fullCodeProvider(provider.name),
+                  (provider) => effectiveFullCodeMode || !fullCodeProvider(provider.name),
                 );
             case "fabric.$models": {
               const registry = options.context.modelRegistry;
@@ -257,7 +274,7 @@ export class FabricExecutionService {
                 callContext,
               );
               return actions.filter(
-                (action) => this.config.fullCodeMode || !fullCodeProvider(action.provider),
+                (action) => effectiveFullCodeMode || !fullCodeProvider(action.provider),
               );
             }
             case "fabric.$search": {
@@ -267,7 +284,7 @@ export class FabricExecutionService {
                 typeof args.limit === "number" ? args.limit : undefined,
               );
               return actions.filter(
-                (action) => this.config.fullCodeMode || !fullCodeProvider(action.provider),
+                (action) => effectiveFullCodeMode || !fullCodeProvider(action.provider),
               );
             }
             case "fabric.$describe": {
@@ -338,6 +355,8 @@ export class FabricExecutionService {
       const message = error instanceof Error ? error.message : String(error);
       this.activity?.finish(options.parentToolCallId, false, message);
       throw error;
+    } finally {
+      await this.registry.endInvocation(options.parentToolCallId);
     }
 
     this.activity?.finish(options.parentToolCallId, !sandboxResult.error, sandboxResult.error);

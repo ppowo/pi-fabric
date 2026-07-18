@@ -123,7 +123,7 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
       name: "fabric_exec",
       label: "Fabric",
       description:
-        "Execute type-checked TypeScript in a QuickJS sandbox for Pi core tools, discovery, and extensions. In full code mode, this is the exclusive path to Pi core tools.",
+        "Execute type-checked TypeScript in a QuickJS sandbox for Pi core tools, discovery, and extensions. In full code mode, and always in Schema enforce mode, this is the exclusive model tool path.",
       promptSnippet:
         "Pi core tools, tool discovery, and extensions",
       promptGuidelines: [
@@ -563,7 +563,9 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
   const applyFabricMode = (): void => {
     toolCapture.setPolicy(effectiveToolCaptureConfig(state.config));
     pi.registerTool(fabricTool);
-    toolOwnership.apply(state.config.fullCodeMode);
+    toolOwnership.apply(
+      state.config.fullCodeMode || state.config.schema.mode === "enforce",
+    );
   };
   const suspendToolCapture = (): void => {
     toolCapture.setPolicy(inactiveCapturePolicy);
@@ -658,19 +660,25 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
 
   pi.on("input", async (event, context) => {
     if (!state.initialized) return;
-    toolOwnership.apply(state.config.fullCodeMode);
+    toolOwnership.apply(
+      state.config.fullCodeMode || state.config.schema.mode === "enforce",
+    );
     state.dispatchHostEvent("input", event, context);
   });
 
   pi.on("turn_end", async (event, context) => {
     if (!state.initialized) return;
-    toolOwnership.apply(state.config.fullCodeMode);
+    toolOwnership.apply(
+      state.config.fullCodeMode || state.config.schema.mode === "enforce",
+    );
     state.dispatchHostEvent("turn_end", event, context);
   });
 
   pi.on("agent_settled", async (event, context) => {
     if (!state.initialized) return;
-    toolOwnership.apply(state.config.fullCodeMode);
+    toolOwnership.apply(
+      state.config.fullCodeMode || state.config.schema.mode === "enforce",
+    );
     state.dispatchHostEvent("agent_settled", event, context);
     fabricUi.dismissOnSettle();
     // Commit any pending host-session compaction intent. Compaction is
@@ -705,12 +713,21 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
     const fullCodeMode = state.initialized
       ? state.config.fullCodeMode
       : DEFAULT_FABRIC_CONFIG.fullCodeMode;
-    toolOwnership.apply(fullCodeMode);
+    const schemaMode = state.initialized
+      ? state.config.schema.mode
+      : DEFAULT_FABRIC_CONFIG.schema.mode;
+    const effectiveFullCodeMode = fullCodeMode || schemaMode === "enforce";
+    toolOwnership.apply(effectiveFullCodeMode);
     state.widgetDismissedAt = Date.now();
     if (!pi.getActiveTools().includes("fabric_exec")) return;
-    const guidance = (fullCodeMode
+    const guidance = (effectiveFullCodeMode
       ? "Pi Fabric full code mode: `fabric_exec` is the only way to call Pi core tools — use them as `pi.*` inside `code`.\nReturns: `pi.read`/`pi.grep`/`pi.find`/`pi.ls` → string; `pi.bash`/`pi.edit`/`pi.write` → `{ok, output, details}` (read `.output`).\nExamples: `pi.read('/x')` · `pi.bash({cmd:'ls'})` · `pi.grep('TODO','src')` · `pi.grep({regex:'TODO', ic:true, ctx:2})` · `pi.find('*.ts','src')` · `pi.edit({path:'/x', old:'a', new:'b'})` · `pi.write({path:'/y', text:'z'})` · `pi.ls('src')`.\nShorthands (all accepted): `cmd`/`shell`→command · `query`/`regex`/`search`→pattern · `file`/`dir`→path · `ic`→ignoreCase · `ctx`→context · `max`→limit · `start`→offset · `old`→oldText · `new`/`replacement`→newText · `text`/`contents`→content · `timeoutMs`→timeout.\n`tools` is discovery + generic calls only (`providers`/`list`/`search`/`describe`/`call`/`models`); call MCP/extension tools via `extensions.<tool>(options)` or `tools.call({ref, args})`. `pi` is the core tools; `π.<key>` is named strings from the `strings` param (not a tool)."
       : "Pi Fabric is in orchestration-only mode. Pi core and registered extension tools stay on their native direct execution path; inside fabric_exec, `pi.*` and `extensions.*` are unavailable. Use `tools` (`tools.search`/`tools.describe`/`tools.call`/`tools.list`) to discover and invoke MCP and Fabric providers; other surfaces are opt-in via user-loaded skills.")
+      + (schemaMode === "enforce"
+        ? "\n\nSchema enforce mode is fixed for this session. Reads remain available, but protected-workspace changes must use schema.hypothesize → schema.verify → schema.commit in the same fabric_exec invocation. Direct pi.edit/write/bash, agents, state/mesh writes, compaction requests, MCP, extensions, and external providers are blocked by the host gate."
+        : schemaMode === "audit"
+          ? "\n\nSchema audit mode reports actions that enforce mode would block, but preserves their current behavior."
+          : "")
       + "\n\n" + FABRIC_TEMPLATE_LITERAL_CAVEAT;
     return {
       systemPrompt: `${event.systemPrompt}\n\n${guidance}`,

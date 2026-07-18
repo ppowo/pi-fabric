@@ -140,6 +140,61 @@ describe("Fabric configuration", () => {
     expect(invalid.ui.haltOnEscape).toBe(true);
   });
 
+  it("normalizes strict Schema mode, transaction bounds, and trusted command definitions", () => {
+    const config = normalizeFabricConfig({
+      schema: {
+        mode: "enforce",
+        certificateTtlMs: 1,
+        maxFiles: 10_000,
+        maxBytes: Number.MAX_SAFE_INTEGER,
+        trustedCommands: {
+          tests: {
+            command: "pnpm",
+            args: ["test", 42, "--run"] as unknown[],
+            shell: true,
+            timeoutMs: 999_999,
+          },
+          "bad name": { command: "ignored" },
+          empty: { command: " " },
+        },
+      },
+    });
+    expect(config.schema).toEqual({
+      mode: "enforce",
+      certificateTtlMs: 1_000,
+      maxFiles: 1_000,
+      maxBytes: 100 * 1024 * 1024,
+      trustedCommands: {
+        tests: {
+          command: "pnpm",
+          args: [],
+          shell: true,
+          timeoutMs: 300_000,
+        },
+      },
+    });
+    expect(normalizeFabricConfig({ schema: { mode: "strict" } }).schema.mode).toBe("off");
+    expect(DEFAULT_FABRIC_CONFIG.schema.mode).toBe("off");
+  });
+
+  it("forces fabric_exec to be the only capture visibility exception in enforce mode", () => {
+    const capture = effectiveToolCaptureConfig({
+      fullCodeMode: false,
+      schema: { ...DEFAULT_FABRIC_CONFIG.schema, mode: "enforce" },
+      capture: {
+        ...DEFAULT_FABRIC_CONFIG.capture,
+        enabled: false,
+        hideFromModel: false,
+        keepVisible: ["fabric_exec", "bash", "custom"],
+      },
+    });
+    expect(capture).toMatchObject({
+      enabled: true,
+      hideFromModel: true,
+      keepVisible: ["fabric_exec"],
+    });
+  });
+
   it("preserves native tool registration in orchestration-only mode", () => {
     const capture = effectiveToolCaptureConfig({
       fullCodeMode: false,
@@ -196,6 +251,26 @@ describe("Fabric configuration", () => {
     fs.writeFileSync(projectConfig, JSON.stringify({ compaction: { engine: "pi" } }));
     loadFabricConfig({ cwd, agentDir, projectTrusted: true });
     expect(process.env.PI_FABRIC_COMPACTION_ENGINE).toBeUndefined();
+  });
+
+  it("loads trusted commands only from trusted Fabric configuration", () => {
+    const root = temporaryDirectory();
+    const cwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(agentDir, "fabric.json"),
+      JSON.stringify({ schema: { trustedCommands: { global: { command: "node", args: ["--version"] } } } }),
+    );
+    fs.writeFileSync(
+      path.join(cwd, ".pi", "fabric.json"),
+      JSON.stringify({ schema: { trustedCommands: { project: { command: "git", args: ["status"] } } } }),
+    );
+    const untrusted = loadFabricConfig({ cwd, agentDir, projectTrusted: false });
+    expect(Object.keys(untrusted.schema.trustedCommands)).toEqual(["global"]);
+    const trusted = loadFabricConfig({ cwd, agentDir, projectTrusted: true });
+    expect(Object.keys(trusted.schema.trustedCommands).sort()).toEqual(["global", "project"]);
   });
 
   it("ignores project configuration when the project is untrusted", () => {
