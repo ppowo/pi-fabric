@@ -12,6 +12,7 @@ import {
   isFabricExecutionTraceV1,
   readFabricExecutionTraceV1,
 } from "../src/audit/trace.js";
+import { FabricActivityStore } from "../src/activity/store.js";
 import { DEFAULT_FABRIC_CONFIG } from "../src/config.js";
 import { ActionRegistry } from "../src/core/action-registry.js";
 import { FabricExecutionService } from "../src/execution-service.js";
@@ -60,6 +61,16 @@ const serviceFor = (
   };
 };
 
+const serviceForRegistry = (
+  registry: ActionRegistry,
+  context: ExtensionContext = { cwd: process.cwd(), hasUI: false } as ExtensionContext,
+): { service: FabricExecutionService; context: ExtensionContext } => {
+  const config = structuredClone(DEFAULT_FABRIC_CONFIG);
+  config.fullCodeMode = false;
+  config.approvals.read = "allow";
+  return { service: new FabricExecutionService(registry, config), context };
+};
+
 const execute = (
   service: FabricExecutionService,
   context: ExtensionContext,
@@ -92,6 +103,15 @@ describe("Fabric execution trace V1", () => {
         {
           type: "call",
           sequence: 0,
+          ref: "fabric.workflow.phase",
+          provider: "fabric",
+          action: "workflow.phase",
+          args: { name: "Inspect" },
+          outcome: "succeeded",
+        },
+        {
+          type: "call",
+          sequence: 1,
           ref: "demo.echo",
           provider: "demo",
           action: "echo",
@@ -111,6 +131,368 @@ describe("Fabric execution trace V1", () => {
     ]);
     expect(isFabricExecutionTraceV1(result.trace)).toBe(true);
     expect(() => JSON.stringify(result)).not.toThrow();
+  });
+
+  it("records all discovery paths in issue order without queries or results", async () => {
+    const registry = new ActionRegistry();
+    registry.register(demoProvider({
+      description: "provider-result-secret",
+      async list() {
+        return [{ ...descriptor, description: "descriptor-result-secret", namespace: "public" }];
+      },
+    }));
+    const context = {
+      cwd: process.cwd(),
+      hasUI: false,
+      modelRegistry: {
+        getAvailable() {
+          return [{ provider: "model-provider-secret", id: "model-id-secret", name: "model-name-secret" }];
+        },
+      },
+    } as unknown as ExtensionContext;
+    const { service } = serviceForRegistry(registry, context);
+    const result = await execute(
+      service,
+      context,
+      `
+await tools.providers();
+await tools.models();
+await tools.list({ provider: "demo", namespace: "public", query: "list-query-secret", limit: 7 });
+await tools.search({ query: "search-query-secret", limit: 3 });
+await tools.describe({ ref: "demo.echo" });
+return true;
+`,
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.trace.operations.map(({ sequence, ref, args, outcome, result: operationResult }) => ({
+      sequence,
+      ref,
+      args,
+      outcome,
+      result: operationResult,
+    }))).toEqual([
+      { sequence: 0, ref: "fabric.discovery.providers", args: {}, outcome: "succeeded", result: undefined },
+      { sequence: 1, ref: "fabric.discovery.models", args: {}, outcome: "succeeded", result: undefined },
+      {
+        sequence: 2,
+        ref: "fabric.discovery.list",
+        args: { limit: 7, namespace: "public", provider: "demo" },
+        outcome: "succeeded",
+        result: undefined,
+      },
+      { sequence: 3, ref: "fabric.discovery.search", args: { limit: 3 }, outcome: "succeeded", result: undefined },
+      { sequence: 4, ref: "fabric.discovery.describe", args: { ref: "demo.echo" }, outcome: "succeeded", result: undefined },
+    ]);
+    const serialized = JSON.stringify(createFabricPersistedExecutionDetails(result));
+    for (const secret of [
+      "provider-result-secret",
+      "descriptor-result-secret",
+      "model-provider-secret",
+      "model-id-secret",
+      "model-name-secret",
+      "list-query-secret",
+      "search-query-secret",
+    ]) {
+      expect(serialized).not.toContain(secret);
+    }
+  });
+
+  it("records a typed failure for every discovery operation", async () => {
+    const providersRegistry = new ActionRegistry();
+    Object.defineProperty(providersRegistry, "providers", {
+      value() {
+        throw new Error("providers-failure-secret");
+      },
+    });
+    const providers = serviceForRegistry(providersRegistry);
+    const providersResult = await execute(providers.service, providers.context, "return tools.providers();");
+
+    const modelsRegistry = new ActionRegistry();
+    const modelsContext = {
+      cwd: process.cwd(),
+      hasUI: false,
+      modelRegistry: {
+        getAvailable() {
+          throw new Error("models-failure-secret");
+        },
+      },
+    } as unknown as ExtensionContext;
+    const models = serviceForRegistry(modelsRegistry, modelsContext);
+    const modelsResult = await execute(models.service, models.context, "return tools.models();");
+
+    const failingProvider = demoProvider({
+      async list() {
+        throw new Error("list-search-failure-secret");
+      },
+      async describe() {
+        throw new Error("describe-failure-secret");
+      },
+    });
+    const list = serviceFor(failingProvider);
+    const listResult = await execute(list.service, list.context, 'return tools.list({ provider: "demo" });');
+    const search = serviceFor(failingProvider);
+    const searchResult = await execute(search.service, search.context, 'return tools.search({ query: "failure-query-secret" });');
+    const describeResult = await execute(
+      search.service,
+      search.context,
+      'return tools.describe({ ref: "demo.echo" });',
+    );
+
+    expect(providersResult.trace.operations[0]).toMatchObject({
+      ref: "fabric.discovery.providers",
+      outcome: "failed",
+      failureStage: "invoke",
+    });
+    expect(modelsResult.success).toBe(true);
+    expect(modelsResult.value).toEqual([]);
+    expect(modelsResult.trace.operations[0]).toMatchObject({
+      ref: "fabric.discovery.models",
+      outcome: "failed",
+      failureStage: "invoke",
+    });
+    expect(listResult.trace.operations[0]).toMatchObject({
+      ref: "fabric.discovery.list",
+      outcome: "failed",
+      failureStage: "invoke",
+    });
+    expect(searchResult.trace.operations[0]).toMatchObject({
+      ref: "fabric.discovery.search",
+      outcome: "failed",
+      failureStage: "invoke",
+      args: {},
+    });
+    expect(describeResult.trace.operations[0]).toMatchObject({
+      ref: "fabric.discovery.describe",
+      outcome: "failed",
+      failureStage: "resolve",
+      args: { ref: "demo.echo" },
+    });
+    const serialized = JSON.stringify([
+      createFabricPersistedExecutionDetails(providersResult),
+      createFabricPersistedExecutionDetails(modelsResult),
+      createFabricPersistedExecutionDetails(listResult),
+      createFabricPersistedExecutionDetails(searchResult),
+      createFabricPersistedExecutionDetails(describeResult),
+    ]);
+    expect(serialized).not.toContain("failure-secret");
+    expect(serialized).not.toContain("failure-query-secret");
+  });
+
+  it("records discovery guard, timeout, and abort outcomes", async () => {
+    const guarded = serviceFor();
+    const guardedResult = await execute(
+      guarded.service,
+      guarded.context,
+      'return tools.describe({ ref: "pi.read" });',
+    );
+    expect(guardedResult.trace.operations[0]).toMatchObject({
+      ref: "fabric.discovery.describe",
+      outcome: "failed",
+      failureStage: "guard",
+    });
+
+    const waitingProvider = demoProvider({
+      async list() {
+        return new Promise(() => undefined);
+      },
+    });
+    const timed = serviceFor(waitingProvider);
+    timed.service.config.executor.timeoutMs = 40;
+    const timedResult = await execute(
+      timed.service,
+      timed.context,
+      'return tools.list({ provider: "demo" });',
+    );
+    expect(timedResult.trace.operations[0]).toMatchObject({
+      ref: "fabric.discovery.list",
+      outcome: "timed_out",
+      failureStage: "invoke",
+    });
+
+    const aborted = serviceFor(waitingProvider);
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(new Error("cancel-secret")), 30);
+    const abortedResult = await execute(
+      aborted.service,
+      aborted.context,
+      'return tools.list({ provider: "demo" });',
+      controller.signal,
+    );
+    expect(abortedResult.trace.operations[0]).toMatchObject({
+      ref: "fabric.discovery.list",
+      outcome: "aborted",
+      failureStage: "invoke",
+    });
+  });
+
+  it("records workflow lifecycle operations with structural projections and live activity", async () => {
+    const registry = new ActionRegistry();
+    const config = structuredClone(DEFAULT_FABRIC_CONFIG);
+    config.fullCodeMode = false;
+    const activity = new FabricActivityStore();
+    const service = new FabricExecutionService(registry, config, activity);
+    const context = { cwd: process.cwd(), hasUI: false } as ExtensionContext;
+    const partials: Array<{ progress?: string | undefined }> = [];
+    const result = await service.execute({
+      code: `
+await workflow.configure({ name: "Lifecycle", description: "configure-description-secret" });
+await workflow.phase("Inspect", { id: "inspect", description: "phase-description-secret", total: 4 });
+await workflow.item({
+  id: "item-1",
+  label: "item-label-secret",
+  status: "completed",
+  phase: "inspect",
+  kind: "task",
+  detail: "item-detail-secret",
+  current: "item-current-secret",
+  total: 4,
+  completed: 2,
+  data: { value: "item-data-secret" },
+});
+await workflow.event({ message: "event-message-secret", level: "success", data: { value: "event-data-secret" } });
+await tools.progress({ message: "progress-message-secret" });
+return true;
+`,
+      signal: undefined,
+      parentToolCallId: "workflow-lifecycle",
+      context,
+      onPartial(snapshot) {
+        partials.push(snapshot);
+      },
+    });
+
+    expect(result.trace.operations.map((operation) => ({ ref: operation.ref, args: operation.args }))).toEqual([
+      { ref: "fabric.workflow.configure", args: { name: "Lifecycle" } },
+      { ref: "fabric.workflow.phase", args: { id: "inspect", name: "Inspect", total: 4 } },
+      {
+        ref: "fabric.workflow.item",
+        args: { completed: 2, id: "item-1", kind: "task", phase: "inspect", status: "completed", total: 4 },
+      },
+      { ref: "fabric.workflow.event", args: { level: "success" } },
+      { ref: "fabric.workflow.progress", args: {} },
+    ]);
+    expect(result.trace.operations.every((operation) => operation.outcome === "succeeded")).toBe(true);
+    expect(result.trace.phases).toEqual(["Inspect"]);
+    expect(activity.get("workflow-lifecycle")).toMatchObject({
+      name: "Lifecycle",
+      description: "configure-description-secret",
+      phases: [{ id: "inspect", name: "Inspect", description: "phase-description-secret" }],
+      items: [{ id: "item-1", label: "item-label-secret", detail: "item-detail-secret" }],
+      events: [{ message: "event-message-secret", level: "success" }],
+    });
+    expect(partials.some((partial) => partial.progress === "progress-message-secret")).toBe(true);
+    const serialized = JSON.stringify(createFabricPersistedExecutionDetails(result));
+    for (const secret of [
+      "configure-description-secret",
+      "phase-description-secret",
+      "item-label-secret",
+      "item-detail-secret",
+      "item-current-secret",
+      "item-data-secret",
+      "event-message-secret",
+      "event-data-secret",
+      "progress-message-secret",
+    ]) {
+      expect(serialized).not.toContain(secret);
+    }
+    expect(Buffer.byteLength(serialized, "utf8")).toBeLessThanOrEqual(FABRIC_EXECUTION_DETAILS_MAX_BYTES);
+  });
+
+  it("records workflow validation failures before activity mutation", async () => {
+    const { service, context } = serviceFor();
+    const result = await execute(service, context, 'return workflow.phase("   ");');
+
+    expect(result.trace.operations[0]).toMatchObject({
+      ref: "fabric.workflow.phase",
+      outcome: "failed",
+      failureStage: "validate",
+      args: { name: "   " },
+    });
+  });
+
+  it("records parallel and nested pipeline spans in issue order, including empty calls", async () => {
+    const { service, context } = serviceFor();
+    const result = await execute(
+      service,
+      context,
+      `
+await workflow.parallel([]);
+await workflow.pipeline([],(value) => value);
+await workflow.parallel([
+  () => tools.call({ ref: "demo.echo", args: { value: "a" } }),
+  () => tools.call({ ref: "demo.echo", args: { value: "b" } }),
+], { concurrency: 1 });
+await workflow.pipeline(
+  ["c"],
+  (value) => tools.call({ ref: "demo.echo", args: { value } }),
+  (value) => value,
+);
+return true;
+`,
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.trace.operations.map(({ sequence, ref, args, outcome }) => ({ sequence, ref, args, outcome }))).toEqual([
+      { sequence: 0, ref: "fabric.workflow.parallel", args: { concurrency: 0, itemCount: 0, kind: "parallel" }, outcome: "succeeded" },
+      { sequence: 1, ref: "fabric.workflow.pipeline", args: { itemCount: 0, kind: "pipeline", stageCount: 1 }, outcome: "succeeded" },
+      { sequence: 2, ref: "fabric.workflow.parallel", args: { concurrency: 0, itemCount: 0, kind: "parallel" }, outcome: "succeeded" },
+      { sequence: 3, ref: "fabric.workflow.parallel", args: { concurrency: 1, itemCount: 2, kind: "parallel" }, outcome: "succeeded" },
+      { sequence: 4, ref: "demo.echo", args: {}, outcome: "succeeded" },
+      { sequence: 5, ref: "demo.echo", args: {}, outcome: "succeeded" },
+      { sequence: 6, ref: "fabric.workflow.pipeline", args: { itemCount: 1, kind: "pipeline", stageCount: 2 }, outcome: "succeeded" },
+      { sequence: 7, ref: "fabric.workflow.parallel", args: { concurrency: 1, itemCount: 1, kind: "parallel" }, outcome: "succeeded" },
+      { sequence: 8, ref: "demo.echo", args: {}, outcome: "succeeded" },
+    ]);
+    expect(JSON.stringify(result.trace)).not.toContain("span-");
+  });
+
+  it("fails pipeline and nested parallel spans when a stage throws", async () => {
+    const { service, context } = serviceFor();
+    const result = await execute(
+      service,
+      context,
+      'return workflow.pipeline([1], () => { throw new Error("stage-error-secret"); });',
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.trace.operations).toMatchObject([
+      { ref: "fabric.workflow.pipeline", outcome: "failed", failureStage: "invoke" },
+      { ref: "fabric.workflow.parallel", outcome: "failed", failureStage: "invoke" },
+    ]);
+    expect(JSON.stringify(createFabricPersistedExecutionDetails(result))).not.toContain("stage-error-secret");
+  });
+
+  it("seals unclosed workflow spans on timeout and abort", async () => {
+    const waitingProvider = demoProvider({
+      async invoke() {
+        return new Promise(() => undefined);
+      },
+    });
+    const timed = serviceFor(waitingProvider);
+    timed.service.config.executor.timeoutMs = 40;
+    timed.service.config.subagents.timeoutMs = 40;
+    const code = `return workflow.parallel([
+      () => tools.call({ ref: "demo.echo", args: { value: "wait-secret" } }),
+    ]);`;
+    const timedResult = await execute(timed.service, timed.context, code);
+    expect(timedResult.trace.operations.map(({ ref, outcome }) => ({ ref, outcome }))).toEqual([
+      { ref: "fabric.workflow.parallel", outcome: "timed_out" },
+      { ref: "demo.echo", outcome: "timed_out" },
+    ]);
+
+    const aborted = serviceFor(waitingProvider);
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(new Error("abort-secret")), 30);
+    const abortedResult = await execute(aborted.service, aborted.context, code, controller.signal);
+    expect(abortedResult.trace.operations.map(({ ref, outcome }) => ({ ref, outcome }))).toEqual([
+      { ref: "fabric.workflow.parallel", outcome: "aborted" },
+      { ref: "demo.echo", outcome: "aborted" },
+    ]);
+    expect(JSON.stringify([
+      createFabricPersistedExecutionDetails(timedResult),
+      createFabricPersistedExecutionDetails(abortedResult),
+    ])).not.toContain("secret");
   });
 
   it.each([

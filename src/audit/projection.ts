@@ -84,6 +84,32 @@ const copyNumber = (
   if (value !== undefined) output[key] = value;
 };
 
+const structuralIdentifier = (value: unknown): string | undefined => {
+  if (typeof value !== "string" || value.length === 0) return undefined;
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    const alphanumeric =
+      (code >= 48 && code <= 57) ||
+      (code >= 65 && code <= 90) ||
+      (code >= 97 && code <= 122);
+    if (alphanumeric) continue;
+    if (index > 0 && (code === 45 || code === 46 || code === 47 || code === 58 || code === 95)) {
+      continue;
+    }
+    return undefined;
+  }
+  return value;
+};
+
+const copyIdentifier = (
+  output: Record<string, FabricTraceJsonValue>,
+  args: Record<string, unknown>,
+  key: string,
+): void => {
+  const value = structuralIdentifier(args[key]);
+  if (value !== undefined) output[key] = value;
+};
+
 const copyPath = (
   output: Record<string, FabricTraceJsonValue>,
   args: Record<string, unknown>,
@@ -138,6 +164,47 @@ export const projectFabricAuditArgs = (
   args: Record<string, unknown>,
 ): FabricAuditProjection => {
   switch (ref) {
+    case "fabric.discovery.providers":
+    case "fabric.discovery.models":
+    case "fabric.workflow.progress":
+      return emptyProjection(args);
+    case "fabric.discovery.list":
+      return projected(args, (output) => {
+        copyIdentifier(output, args, "provider");
+        copyIdentifier(output, args, "namespace");
+        copyNumber(output, args, "limit");
+      });
+    case "fabric.discovery.search":
+      return projected(args, (output) => copyNumber(output, args, "limit"));
+    case "fabric.discovery.describe":
+      return projected(args, (output) => copyIdentifier(output, args, "ref"));
+    case "fabric.workflow.configure":
+      return projected(args, (output) => copyString(output, args, "name"));
+    case "fabric.workflow.phase":
+      return projected(args, (output) => {
+        copyString(output, args, "name");
+        copyIdentifier(output, args, "id");
+        copyNumber(output, args, "total");
+      });
+    case "fabric.workflow.item":
+      return projected(args, (output) => {
+        copyIdentifier(output, args, "id");
+        copyIdentifier(output, args, "status");
+        copyIdentifier(output, args, "phase");
+        copyIdentifier(output, args, "kind");
+        copyNumber(output, args, "total");
+        copyNumber(output, args, "completed");
+      });
+    case "fabric.workflow.event":
+      return projected(args, (output) => copyIdentifier(output, args, "level"));
+    case "fabric.workflow.parallel":
+    case "fabric.workflow.pipeline":
+      return projected(args, (output) => {
+        copyIdentifier(output, args, "kind");
+        copyNumber(output, args, "itemCount");
+        copyNumber(output, args, "stageCount");
+        copyNumber(output, args, "concurrency");
+      });
     case "pi.read":
       return projected(args, (output) => {
         copyPath(output, args);

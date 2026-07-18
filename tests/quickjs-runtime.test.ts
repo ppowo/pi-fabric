@@ -46,6 +46,7 @@ const values = await parallel([
 return { values, spent: budget.spent() };
 `,
       async (ref, args) => {
+        if (ref === "fabric.$spanStart" || ref === "fabric.$spanEnd") return undefined;
         calls.push(ref);
         if (ref === "fabric.$phase") return { name: args.name, index: 0 };
         if (ref === "agents.run") {
@@ -93,6 +94,7 @@ const out = await parallel(items, (item) => agent(item.q, { label: item.q }), 2)
 return out;
 `,
       async (ref, args) => {
+        if (ref === "fabric.$spanStart" || ref === "fabric.$spanEnd") return undefined;
         if (ref === "agents.run") {
           calls.push(String(args.task));
           return { status: "completed", text: String(args.task).toUpperCase(), usage: { input: 1, output: 1 } };
@@ -104,6 +106,41 @@ return out;
     expect(result.error).toBeUndefined();
     expect(result.value).toEqual(["FIRST", "SECOND", "THIRD"]);
     expect(calls.sort()).toEqual(["first", "second", "third"]);
+  });
+
+  it("emits deterministic internal workflow span start/end calls from guest combinators", async () => {
+    const calls: Array<{ ref: string; args: Record<string, unknown> }> = [];
+    const result = await new QuickJsRuntime().execute(
+      `
+await workflow.parallel([], { concurrency: 9 });
+await workflow.pipeline([1], (value) => value);
+return {
+  globalBridge: typeof globalThis.__fabricHostCall,
+  lexicalBridge: typeof __fabricBridge,
+  internalCall: typeof __call,
+};
+`,
+      async (ref, args) => {
+        calls.push({ ref, args });
+        return undefined;
+      },
+      options,
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.value).toEqual({
+      globalBridge: "undefined",
+      lexicalBridge: "undefined",
+      internalCall: "undefined",
+    });
+    expect(calls).toEqual([
+      { ref: "fabric.$spanStart", args: { id: "span-0", kind: "parallel", itemCount: 0, concurrency: 0 } },
+      { ref: "fabric.$spanEnd", args: { id: "span-0", outcome: "succeeded" } },
+      { ref: "fabric.$spanStart", args: { id: "span-1", kind: "pipeline", itemCount: 1, stageCount: 1 } },
+      { ref: "fabric.$spanStart", args: { id: "span-2", kind: "parallel", itemCount: 1, concurrency: 1 } },
+      { ref: "fabric.$spanEnd", args: { id: "span-2", outcome: "succeeded" } },
+      { ref: "fabric.$spanEnd", args: { id: "span-1", outcome: "succeeded" } },
+    ]);
   });
 
   it("calls captured extension tools through the lazy proxy", async () => {

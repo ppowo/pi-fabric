@@ -44,7 +44,10 @@ const quickJsModule = (): Promise<QuickJsModule> => {
 };
 
 const guestSetup = `
-const __call = (ref, args) => globalThis.__fabricHostCall(ref, args ?? {});
+(() => {
+const __fabricBridge = globalThis.__fabricHostCall;
+delete globalThis.__fabricHostCall;
+const __call = (ref, args) => __fabricBridge(ref, args ?? {});
 const __piToolNames = ["read","bash","edit","write","grep","find","ls"];
 const __toolsBase = {
   providers: () => __call("fabric.$providers", {}),
@@ -275,6 +278,39 @@ const __budgetedRun = async (args) => {
   }
   return __recordAgentUsage(await agents.run(args));
 };
+let __nextWorkflowSpanId = 0;
+const __workflowSpanMetadata = (kind, items, options, stageCount) => {
+  const itemCount = Array.isArray(items) ? items.length : undefined;
+  let concurrency;
+  if (kind === "parallel" && itemCount !== undefined) {
+    if (itemCount === 0) concurrency = 0;
+    else {
+      const concurrencyOpt = typeof options === "number" ? { concurrency: options } : options ?? {};
+      const requested = Number(concurrencyOpt.concurrency ?? itemCount);
+      if (Number.isFinite(requested) && requested >= 1) {
+        concurrency = Math.max(1, Math.min(itemCount, Math.floor(requested)));
+      }
+    }
+  }
+  return {
+    kind,
+    ...(itemCount !== undefined ? { itemCount } : {}),
+    ...(stageCount !== undefined ? { stageCount } : {}),
+    ...(concurrency !== undefined ? { concurrency } : {}),
+  };
+};
+const __withWorkflowSpan = async (metadata, body) => {
+  const id = "span-" + __nextWorkflowSpanId++;
+  await __call("fabric.$spanStart", { id, ...metadata });
+  try {
+    const value = await body();
+    await __call("fabric.$spanEnd", { id, outcome: "succeeded" });
+    return value;
+  } catch (error) {
+    try { await __call("fabric.$spanEnd", { id, outcome: "failed" }); } catch { /* preserve the workflow error */ }
+    throw error;
+  }
+};
 const __runParallel = async (thunks, options) => {
   if (!Array.isArray(thunks) || thunks.some((thunk) => typeof thunk !== "function")) {
     throw new TypeError("workflow.parallel expects an array of functions or (items, mapper)");
@@ -297,22 +333,32 @@ const __runParallel = async (thunks, options) => {
   return results;
 };
 const __workflowParallel = async (items, arg2, arg3) => {
-  if (typeof arg2 === "function") {
-    if (!Array.isArray(items)) throw new TypeError("workflow.parallel expects an array as the first argument");
-    return __runParallel(items.map((item, index) => () => arg2(item, index)), arg3);
-  }
-  return __runParallel(items, arg2);
+  const options = typeof arg2 === "function" ? arg3 : arg2;
+  return __withWorkflowSpan(
+    __workflowSpanMetadata("parallel", items, options),
+    async () => {
+      if (typeof arg2 === "function") {
+        if (!Array.isArray(items)) throw new TypeError("workflow.parallel expects an array as the first argument");
+        return __runParallel(items.map((item, index) => () => arg2(item, index)), arg3);
+      }
+      return __runParallel(items, arg2);
+    },
+  );
 };
-const __workflowPipeline = async (items, ...stages) => {
-  if (!Array.isArray(items) || stages.some((stage) => typeof stage !== "function")) {
-    throw new TypeError("workflow.pipeline expects an array followed by stage functions");
-  }
-  return __workflowParallel(items.map((original, index) => async () => {
-    let value = original;
-    for (const stage of stages) value = await stage(value, original, index);
-    return value;
-  }));
-};
+const __workflowPipeline = async (items, ...stages) =>
+  __withWorkflowSpan(
+    __workflowSpanMetadata("pipeline", items, undefined, stages.length),
+    async () => {
+      if (!Array.isArray(items) || stages.some((stage) => typeof stage !== "function")) {
+        throw new TypeError("workflow.pipeline expects an array followed by stage functions");
+      }
+      return __workflowParallel(items.map((original, index) => async () => {
+        let value = original;
+        for (const stage of stages) value = await stage(value, original, index);
+        return value;
+      }));
+    },
+  );
 globalThis.workflow = Object.freeze({
   agent: __workflowAgent,
   parallel: __workflowParallel,
@@ -388,6 +434,7 @@ globalThis.setInterval = (callback, ms = 0) => {
 };
 globalThis.clearTimeout = (id) => { __timerCallbacks.delete(id); };
 globalThis.clearInterval = (id) => { __timerCallbacks.delete(id); };
+})();
 `;
 
 const transpile = (code: string): string =>

@@ -2,6 +2,8 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   FabricExecutionTraceRecorder,
   executionOutcomeFromError,
+  type FabricExecutionFailureStageV1,
+  type FabricExecutionTraceOperationHandle,
   type FabricExecutionTraceV1,
 } from "./audit/trace.js";
 import { FabricActivityStore } from "./activity/store.js";
@@ -120,6 +122,10 @@ export class FabricExecutionService {
     const approval = new ApprovalController(this.config.approvals, options.context);
     const audits: FabricCallAudit[] = [];
     const phases: string[] = [];
+    const workflowSpans = new Map<
+      string,
+      { kind: "parallel" | "pipeline"; operation: FabricExecutionTraceOperationHandle }
+    >();
     let agentCalls = 0;
     const maxAgentCalls = Math.max(
       1,
@@ -215,6 +221,25 @@ export class FabricExecutionService {
           : 0;
       return Math.max(orchestrationTimeoutMs, requestedTimeoutMs);
     };
+    const traceAttempt = async <T>(
+      ref: string,
+      args: Record<string, unknown>,
+      signal: AbortSignal,
+      run: (setStage: (stage: FabricExecutionFailureStageV1) => void) => T | Promise<T>,
+    ): Promise<T> => {
+      const operation = traceRecorder.issueCall(ref, args);
+      let stage: FabricExecutionFailureStageV1 = "invoke";
+      try {
+        const value = await run((nextStage) => {
+          stage = nextStage;
+        });
+        operation.succeed(undefined);
+        return value;
+      } catch (error) {
+        operation.fail(stage, error, executionOutcomeFromError(error, signal));
+        throw error;
+      }
+    };
     const invokeAction = async (
       ref: string,
       args: Record<string, unknown>,
@@ -259,58 +284,98 @@ export class FabricExecutionService {
           const callContext = { ...baseContext, signal: runtimeSignal };
           switch (ref) {
             case "fabric.$providers":
-              return this.registry
-                .providers()
-                .filter(
-                  (provider) => effectiveFullCodeMode || !fullCodeProvider(provider.name),
-                );
+              return traceAttempt(
+                "fabric.discovery.providers",
+                args,
+                runtimeSignal,
+                () =>
+                  this.registry
+                    .providers()
+                    .filter(
+                      (provider) => effectiveFullCodeMode || !fullCodeProvider(provider.name),
+                    ),
+              );
             case "fabric.$models": {
+              const operation = traceRecorder.issueCall("fabric.discovery.models", args);
               const registry = options.context.modelRegistry;
-              let models: Array<{ provider: string; id: string; name: string; key: string }> = [];
               try {
                 const available =
                   typeof registry?.getAvailable === "function" ? registry.getAvailable() : [];
-                models = available.map((model) => ({
+                const models = available.map((model) => ({
                   provider: String(model.provider),
                   id: String(model.id),
                   name: String(model.name ?? model.id),
                   key: `${model.provider}/${model.id}`,
                 }));
-              } catch {
-                models = [];
+                operation.succeed(undefined);
+                return models;
+              } catch (error) {
+                operation.fail(
+                  "invoke",
+                  error,
+                  executionOutcomeFromError(error, runtimeSignal),
+                );
+                return [];
               }
-              return models;
             }
-            case "fabric.$list": {
-              if (typeof args.provider === "string") guardFullCodeRef(`${args.provider}.*`);
-              const actions = await this.registry.list(
-                {
-                  ...(typeof args.provider === "string" ? { provider: args.provider } : {}),
-                  ...(typeof args.namespace === "string" ? { namespace: args.namespace } : {}),
-                  ...(typeof args.query === "string" ? { query: args.query } : {}),
-                  ...(typeof args.limit === "number" ? { limit: args.limit } : {}),
+            case "fabric.$list":
+              return traceAttempt(
+                "fabric.discovery.list",
+                args,
+                runtimeSignal,
+                async (setStage) => {
+                  setStage("guard");
+                  if (typeof args.provider === "string") {
+                    guardFullCodeRef(`${args.provider}.*`);
+                  }
+                  setStage(
+                    typeof args.provider === "string" && !this.registry.has(args.provider)
+                      ? "resolve"
+                      : "invoke",
+                  );
+                  const actions = await this.registry.list(
+                    {
+                      ...(typeof args.provider === "string" ? { provider: args.provider } : {}),
+                      ...(typeof args.namespace === "string" ? { namespace: args.namespace } : {}),
+                      ...(typeof args.query === "string" ? { query: args.query } : {}),
+                      ...(typeof args.limit === "number" ? { limit: args.limit } : {}),
+                    },
+                    callContext,
+                  );
+                  return actions.filter(
+                    (action) => effectiveFullCodeMode || !fullCodeProvider(action.provider),
+                  );
                 },
-                callContext,
               );
-              return actions.filter(
-                (action) => effectiveFullCodeMode || !fullCodeProvider(action.provider),
+            case "fabric.$search":
+              return traceAttempt(
+                "fabric.discovery.search",
+                args,
+                runtimeSignal,
+                async () => {
+                  const actions = await this.registry.search(
+                    String(args.query ?? ""),
+                    callContext,
+                    typeof args.limit === "number" ? args.limit : undefined,
+                  );
+                  return actions.filter(
+                    (action) => effectiveFullCodeMode || !fullCodeProvider(action.provider),
+                  );
+                },
               );
-            }
-            case "fabric.$search": {
-              const actions = await this.registry.search(
-                String(args.query ?? ""),
-                callContext,
-                typeof args.limit === "number" ? args.limit : undefined,
+            case "fabric.$describe":
+              return traceAttempt(
+                "fabric.discovery.describe",
+                args,
+                runtimeSignal,
+                async (setStage) => {
+                  const targetRef = String(args.ref ?? "");
+                  setStage("guard");
+                  guardFullCodeRef(targetRef);
+                  setStage("resolve");
+                  return this.registry.describe(targetRef, callContext);
+                },
               );
-              return actions.filter(
-                (action) => effectiveFullCodeMode || !fullCodeProvider(action.provider),
-              );
-            }
-            case "fabric.$describe": {
-              const targetRef = String(args.ref ?? "");
-              guardFullCodeRef(targetRef);
-              return this.registry.describe(targetRef, callContext);
-            }
             case "fabric.$call": {
               const callArgs =
                 typeof args.args === "object" && args.args !== null && !Array.isArray(args.args)
@@ -320,41 +385,96 @@ export class FabricExecutionService {
               return invokeAction(targetRef, callArgs, callContext);
             }
             case "fabric.$progress":
-              update(String(args.message ?? "Working"));
+              return traceAttempt(
+                "fabric.workflow.progress",
+                args,
+                runtimeSignal,
+                () => update(String(args.message ?? "Working")),
+              );
+            case "fabric.$configure":
+              return traceAttempt(
+                "fabric.workflow.configure",
+                args,
+                runtimeSignal,
+                () => {
+                  const display: FabricRunDisplay = {
+                    ...(typeof args.name === "string" ? { name: args.name } : {}),
+                    ...(typeof args.description === "string" ? { description: args.description } : {}),
+                  };
+                  return this.activity?.configure(options.parentToolCallId, display) ?? display;
+                },
+              );
+            case "fabric.$phase":
+              return traceAttempt(
+                "fabric.workflow.phase",
+                args,
+                runtimeSignal,
+                (setStage) => {
+                  setStage("validate");
+                  const name = String(args.name ?? "").trim();
+                  if (!name) throw new Error("Workflow phase name must not be empty");
+                  phases.push(name);
+                  const phaseIndex = phases.length - 1;
+                  const phaseInput: FabricPhaseInput = {
+                    name,
+                    ...(typeof args.id === "string" ? { id: args.id } : {}),
+                    ...(typeof args.description === "string" ? { description: args.description } : {}),
+                    ...(typeof args.total === "number" ? { total: args.total } : {}),
+                  };
+                  setStage("invoke");
+                  const activityPhase = this.activity?.phase(options.parentToolCallId, phaseInput);
+                  update(`Phase: ${name}`);
+                  return {
+                    name,
+                    index: phaseIndex,
+                    ...(activityPhase ? { id: activityPhase.id } : {}),
+                  };
+                },
+              );
+            case "fabric.$item":
+              return traceAttempt(
+                "fabric.workflow.item",
+                args,
+                runtimeSignal,
+                () => {
+                  const item = args as unknown as FabricActivityItemInput;
+                  return this.activity?.upsertItem(options.parentToolCallId, item) ?? item;
+                },
+              );
+            case "fabric.$event":
+              return traceAttempt(
+                "fabric.workflow.event",
+                args,
+                runtimeSignal,
+                () => {
+                  const event = args as unknown as FabricActivityEventInput;
+                  this.activity?.event(options.parentToolCallId, event);
+                },
+              );
+            case "fabric.$spanStart": {
+              const id = typeof args.id === "string" ? args.id : "";
+              const kind = args.kind;
+              if (!id || (kind !== "parallel" && kind !== "pipeline")) {
+                throw new Error("Invalid internal workflow span start");
+              }
+              if (workflowSpans.has(id)) throw new Error("Duplicate internal workflow span");
+              const operation = traceRecorder.issueCall(`fabric.workflow.${kind}`, args);
+              workflowSpans.set(id, { kind, operation });
               return undefined;
-            case "fabric.$configure": {
-              const display: FabricRunDisplay = {
-                ...(typeof args.name === "string" ? { name: args.name } : {}),
-                ...(typeof args.description === "string" ? { description: args.description } : {}),
-              };
-              return this.activity?.configure(options.parentToolCallId, display) ?? display;
             }
-            case "fabric.$phase": {
-              const name = String(args.name ?? "").trim();
-              if (!name) throw new Error("Workflow phase name must not be empty");
-              phases.push(name);
-              const phaseIndex = phases.length - 1;
-              const phaseInput: FabricPhaseInput = {
-                name,
-                ...(typeof args.id === "string" ? { id: args.id } : {}),
-                ...(typeof args.description === "string" ? { description: args.description } : {}),
-                ...(typeof args.total === "number" ? { total: args.total } : {}),
-              };
-              const activityPhase = this.activity?.phase(options.parentToolCallId, phaseInput);
-              update(`Phase: ${name}`);
-              return {
-                name,
-                index: phaseIndex,
-                ...(activityPhase ? { id: activityPhase.id } : {}),
-              };
-            }
-            case "fabric.$item": {
-              const item = args as unknown as FabricActivityItemInput;
-              return this.activity?.upsertItem(options.parentToolCallId, item) ?? item;
-            }
-            case "fabric.$event": {
-              const event = args as unknown as FabricActivityEventInput;
-              this.activity?.event(options.parentToolCallId, event);
+            case "fabric.$spanEnd": {
+              const id = typeof args.id === "string" ? args.id : "";
+              const span = workflowSpans.get(id);
+              if (!span) throw new Error("Unknown internal workflow span");
+              workflowSpans.delete(id);
+              if (args.outcome === "succeeded") span.operation.succeed(undefined);
+              else {
+                span.operation.fail(
+                  "invoke",
+                  undefined,
+                  executionOutcomeFromError(new Error("Workflow span failed"), runtimeSignal),
+                );
+              }
               return undefined;
             }
             default:
