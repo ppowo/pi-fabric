@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { decodeCompactionInstructions, FABRIC_COMPACTION_REQUEST_PREFIX } from "../src/compaction/instructions.js";
 import {
   CompactController,
   type CompactLastCommit,
@@ -136,6 +137,19 @@ describe("CompactController", () => {
       estimatedTokensAfter: 200,
       requestedBy: "model",
     });
+  });
+
+  it("encodes typed preserve items with instructions", () => {
+    const capture: CompactCapture = { current: undefined };
+    const controller = new CompactController();
+    controller.request({ instructions: "Keep the plan", preserve: ["rare fact", "src/a.ts"] });
+    expect(controller.status().pending?.preserve).toEqual(["rare fact", "src/a.ts"]);
+    controller.maybeCommit(fakeContext(capture));
+    expect(capture.current?.customInstructions?.startsWith(FABRIC_COMPACTION_REQUEST_PREFIX)).toBe(true);
+    const decoded = decodeCompactionInstructions(capture.current?.customInstructions);
+    expect(decoded.policy.mode).toBe("typed-v1");
+    expect(decoded.requestLines.join("\n")).toContain("rare fact");
+    capture.current!.onError(new Error("Already compacted"));
   });
 
   it("forwards customInstructions only when provided", () => {

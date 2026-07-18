@@ -1,3 +1,4 @@
+import { omissionLine, sampleAddressed, sampleAddressedFrom } from "./bounds.js";
 import { firstLine, type CompactionEvent, type ToolCallEvent } from "./normalize.js";
 
 // Section folds: each projection is a pure function of the typed event stream.
@@ -20,14 +21,41 @@ export interface Sections {
 const MAX_LINE = 140;
 const FILE_TOOLS = new Set(["read", "edit", "write", "grep", "find", "ls"]);
 const MODIFYING_TOOLS = new Set(["edit", "write"]);
-const MAX_USER_GOAL_LINES = 3;
+export const MAX_USER_GOAL_LINES = 3;
+export const MAX_USER_GOAL_LINE = 1024;
 const MAX_USER_ONELINER = 120;
 const MAX_EARLIER_USER = 80;
 const MAX_STATUS_LINE = 140;
 const MAX_TRANSCRIPT_LINE = 100;
 const MAX_TRANSCRIPT_THINKING = 80;
 const MAX_TRANSCRIPT_CMD = 80;
-const TRANSCRIPT_WINDOW = 120;
+const MAX_LATER_GOALS = 24;
+export const MAX_FILES_PER_KIND = 24;
+export const MAX_COMMITS = 20;
+const MAX_OUTSTANDING = 32;
+export const MAX_UNRESOLVED = 24;
+const MAX_RESOLVED = MAX_OUTSTANDING - MAX_UNRESOLVED;
+export const MAX_EARLIER_TURNS = 32;
+const TRANSCRIPT_WINDOW = 40;
+
+export interface ProjectionOmittedCounts {
+  goal: number;
+  files: number;
+  commits: number;
+  outstanding: number;
+  earlierTurns: number;
+  transcript: number;
+}
+
+export interface ProjectionResult {
+  sections: Sections;
+  omittedCounts: ProjectionOmittedCounts;
+}
+
+interface ProjectedSection {
+  lines: string[];
+  omitted: number;
+}
 
 const truncate = (text: string, max: number): string => {
   const flat = text.replace(/\s+/g, " ").trim();
@@ -65,23 +93,44 @@ const commonRoot = (paths: string[]): string => {
 const stripRoot = (root: string, path: string): string =>
   root ? path.replace(root, "") : path;
 
-// [Session Goal] — the user's words ARE the goal. Quote verbatim, do not
-// paraphrase. The first message is kept up to three lines; every later user
-// message collapses to a one-liner.
-const projectGoal = (events: CompactionEvent[]): string[] => {
-  const users = events.filter((e): e is Extract<CompactionEvent, { kind: "user" }> => e.kind === "user");
-  if (users.length === 0) return [];
-  const first = users[0]!;
-  const rest = users.slice(1);
+// [Session Goal] keeps up to three mechanically normalized, bounded lines
+// from the first user message. Later scope changes use bounded one-liners and
+// deterministic earliest/latest sampling with source addresses.
+const projectGoal = (events: CompactionEvent[]): ProjectedSection => {
+  const first = events.find(
+    (event): event is Extract<CompactionEvent, { kind: "user" }> => event.kind === "user",
+  );
+  if (!first) return { lines: [], omitted: 0 };
   const firstLines = first.text.split("\n").filter((line, i, arr) =>
     line.trim() !== "" || (i === 0 && arr.length === 1),
-  );
+  ).map((line) => truncate(line, MAX_USER_GOAL_LINE));
   const lines: string[] = [...trailingEllipsis(firstLines, MAX_USER_GOAL_LINES)];
-  for (const user of rest) {
-    const line = truncate(firstLine(user.text), MAX_USER_ONELINER);
-    if (line) lines.push(`- ${line}`);
+  function* laterUsers(): Generator<Extract<CompactionEvent, { kind: "user" }>> {
+    let skippedFirst = false;
+    for (const event of events) {
+      if (event.kind !== "user") continue;
+      if (!skippedFirst) {
+        skippedFirst = true;
+        continue;
+      }
+      yield event;
+    }
   }
-  return lines;
+  const sampled = sampleAddressedFrom(laterUsers(), MAX_LATER_GOALS);
+  for (let index = 0; index < sampled.values.length; index++) {
+    if (sampled.omitted > 0 && index === sampled.splitIndex) {
+      lines.push(omissionLine(
+        sampled.omitted,
+        sampled.omittedFirstEntryId,
+        sampled.omittedLastEntryId,
+        "user scope changes",
+      ));
+    }
+    const user = sampled.values[index]!;
+    const line = truncate(firstLine(user.text), MAX_USER_ONELINER);
+    if (line) lines.push(`- ${line} [entry ${user.entryId}]`);
+  }
+  return { lines, omitted: sampled.omitted };
 };
 
 // [Files And Changes] — addresses only, never content. A path is recorded when
@@ -89,87 +138,112 @@ const projectGoal = (events: CompactionEvent[]): string[] => {
 // Modified, write ⇒ Created, read/grep/find/ls ⇒ Read. A path that was modified
 // or created is dropped from Read to avoid redundant weaker entries. Paths are
 // trimmed to their common root.
-const projectFiles = (events: CompactionEvent[]): string[] => {
-  const callById = new Map<string, ToolCallEvent>();
-  for (const e of events) {
-    if (e.kind === "toolCall") callById.set(e.toolCallId, e);
-  }
+interface FileAddress {
+  path: string;
+  entryId: string;
+}
+
+const projectFiles = (events: CompactionEvent[]): ProjectedSection => {
   const results = new Map<string, boolean>();
   for (const e of events) {
     if (e.kind === "toolResult") results.set(e.toolCallId, e.isError);
   }
 
-  const read: string[] = [];
-  const modified: string[] = [];
-  const created: string[] = [];
-  const seenRead = new Set<string>();
-  const seenModified = new Set<string>();
-  const seenCreated = new Set<string>();
+  const read = new Map<string, FileAddress>();
+  const modified = new Map<string, FileAddress>();
+  const created = new Map<string, FileAddress>();
 
   for (const e of events) {
-    if (e.kind !== "toolCall") continue;
-    if (!FILE_TOOLS.has(e.name)) continue;
+    if (e.kind !== "toolCall" || !FILE_TOOLS.has(e.name)) continue;
     const path = pathOf(e.args);
-    if (!path) continue;
-    const isError = results.get(e.toolCallId);
-    if (isError !== false) continue; // only confirmed-successful operations
+    if (!path || results.get(e.toolCallId) !== false) continue;
+    const address = { path, entryId: e.entryId };
     if (e.name === "write") {
-      if (!seenCreated.has(path)) {
-        seenCreated.add(path);
-        created.push(path);
-      }
+      if (!created.has(path)) created.set(path, address);
     } else if (e.name === "edit") {
-      if (!seenModified.has(path)) {
-        seenModified.add(path);
-        modified.push(path);
-      }
-    } else if (!seenRead.has(path)) {
-      seenRead.add(path);
-      read.push(path);
+      if (!modified.has(path)) modified.set(path, address);
+    } else if (!read.has(path)) {
+      read.set(path, address);
     }
   }
 
-  const modifiedSet = new Set([...modified, ...created]);
-  const filteredRead = read.filter((p) => !modifiedSet.has(p));
-
-  const all = [...created, ...modified, ...filteredRead];
-  if (all.length === 0) return [];
-  const root = commonRoot(all);
+  const modifiedSet = new Set<string>();
+  for (const path of modified.keys()) modifiedSet.add(path);
+  for (const path of created.keys()) modifiedSet.add(path);
+  function* filteredRead(): Generator<FileAddress> {
+    for (const item of read.values()) {
+      if (!modifiedSet.has(item.path)) yield item;
+    }
+  }
+  const sampledCreated = sampleAddressedFrom(created.values(), MAX_FILES_PER_KIND);
+  const sampledModified = sampleAddressedFrom(modified.values(), MAX_FILES_PER_KIND);
+  const sampledRead = sampleAddressedFrom(filteredRead(), MAX_FILES_PER_KIND);
+  const allSampled = [...sampledCreated.values, ...sampledModified.values, ...sampledRead.values];
+  if (allSampled.length === 0) return { lines: [], omitted: 0 };
+  const root = commonRoot(allSampled.map((item) => item.path));
   const lines: string[] = [];
+  let omitted = 0;
   if (root) lines.push(`(under ${root})`);
-  if (created.length > 0) {
-    lines.push("Created:");
-    for (const p of created) lines.push(`  ${stripRoot(root, p)}`);
-  }
-  if (modified.length > 0) {
-    lines.push("Modified:");
-    for (const p of modified) lines.push(`  ${stripRoot(root, p)}`);
-  }
-  if (filteredRead.length > 0) {
-    lines.push("Read:");
-    for (const p of filteredRead) lines.push(`  ${stripRoot(root, p)}`);
-  }
-  return lines;
+
+  const appendKind = (
+    header: string,
+    sampled: ReturnType<typeof sampleAddressed<FileAddress>>,
+  ): void => {
+    if (sampled.values.length === 0 && sampled.omitted === 0) return;
+    lines.push(header);
+    omitted += sampled.omitted;
+    for (let index = 0; index < sampled.values.length; index++) {
+      if (sampled.omitted > 0 && index === sampled.splitIndex) {
+        lines.push(`  ${omissionLine(
+          sampled.omitted,
+          sampled.omittedFirstEntryId,
+          sampled.omittedLastEntryId,
+          "file addresses",
+        )}`);
+      }
+      const item = sampled.values[index]!;
+      lines.push(`  ${stripRoot(root, item.path)} [entry ${item.entryId}]`);
+    }
+  };
+
+  appendKind("Created:", sampledCreated);
+  appendKind("Modified:", sampledModified);
+  appendKind("Read:", sampledRead);
+  return { lines, omitted };
 };
 
 // [Commits] — bash tool calls whose command begins with `git commit`, paired
 // with the first line of their output (the commit summary the shell prints).
-const projectCommits = (events: CompactionEvent[]): string[] => {
-  const lines: string[] = [];
+const projectCommits = (events: CompactionEvent[]): ProjectedSection => {
+  const commits: { entryId: string; line: string }[] = [];
   for (const e of events) {
-    if (e.kind !== "bash") continue;
-    if (!e.command.trimStart().startsWith("git commit")) continue;
+    if (e.kind !== "bash" || !e.command.trimStart().startsWith("git commit")) continue;
     const summary = firstLine(e.output).trim();
     const line = summary || truncate(firstLine(e.command), MAX_LINE);
-    if (line) lines.push(`- ${line}`);
+    if (line) commits.push({ entryId: e.entryId, line });
   }
-  return lines;
+  const sampled = sampleAddressed(commits, MAX_COMMITS);
+  const lines: string[] = [];
+  for (let index = 0; index < sampled.values.length; index++) {
+    if (sampled.omitted > 0 && index === sampled.splitIndex) {
+      lines.push(omissionLine(
+        sampled.omitted,
+        sampled.omittedFirstEntryId,
+        sampled.omittedLastEntryId,
+        "commits",
+      ));
+    }
+    const commit = sampled.values[index]!;
+    lines.push(`- ${commit.line} [entry ${commit.entryId}]`);
+  }
+  return { lines, omitted: sampled.omitted };
 };
 
 type SourceTag = "ERROR" | "WARN" | "INFO";
 
 interface ErrorItem {
   index: number;
+  entryId: string;
   tag: SourceTag;
   description: string;
   resolved: boolean;
@@ -187,10 +261,9 @@ const tagFor = (toolName: string, isUserBash: boolean): SourceTag => {
 // later successful operation on the same path; a bash error is resolved by a
 // later successful run of the same command. Unresolved errors are listed
 // first; resolved ones are tagged [RESOLVED] so the agent can see they were
-// addressed. This is the highest-value section: the deterministic core cannot
-// forget an unresolved error because it never "remembered" it — it computes
-// the state from the raw stream every time.
-export const projectOutstanding = (events: CompactionEvent[]): string[] => {
+// addressed. Open and resolved collections are independently sampled; omitted
+// records retain count and entry-id range addresses.
+const projectOutstandingWithMetadata = (events: CompactionEvent[]): ProjectedSection => {
   const callById = new Map<string, ToolCallEvent>();
   for (const e of events) {
     if (e.kind === "toolCall") callById.set(e.toolCallId, e);
@@ -231,7 +304,7 @@ export const projectOutstanding = (events: CompactionEvent[]): string[] => {
       if (path) {
         resolved = successByPath.some((s) => s.path === path && s.index > e.index);
       }
-      items.push({ index: e.index, tag, description: detail, resolved });
+      items.push({ index: e.index, entryId: e.entryId, tag, description: detail, resolved });
     }
     if (e.kind === "bash" && e.isError) {
       const isUserBash = e.toolCallId === "";
@@ -240,70 +313,92 @@ export const projectOutstanding = (events: CompactionEvent[]): string[] => {
       const resolved = e.command.trim()
         ? successBash.some((s) => s.command === e.command && s.index > e.index)
         : false;
-      items.push({ index: e.index, tag, description: detail, resolved });
+      items.push({ index: e.index, entryId: e.entryId, tag, description: detail, resolved });
     }
   }
 
-  if (items.length === 0) return [];
+  if (items.length === 0) return { lines: [], omitted: 0 };
   const unresolved = items.filter((i) => !i.resolved).sort((a, b) => a.index - b.index);
   const resolved = items.filter((i) => i.resolved).sort((a, b) => a.index - b.index);
+  const sampledUnresolved = sampleAddressed(unresolved, MAX_UNRESOLVED);
+  const sampledResolved = sampleAddressed(resolved, MAX_RESOLVED);
   const lines: string[] = [];
-  for (const item of unresolved) lines.push(`- [${item.tag}] ${item.description}`);
-  for (const item of resolved) lines.push(`- [${item.tag}] ${item.description} [RESOLVED]`);
-  return lines;
+  const append = (sampled: ReturnType<typeof sampleAddressed<ErrorItem>>, noun: string): void => {
+    for (let index = 0; index < sampled.values.length; index++) {
+      if (sampled.omitted > 0 && index === sampled.splitIndex) {
+        lines.push(omissionLine(
+          sampled.omitted,
+          sampled.omittedFirstEntryId,
+          sampled.omittedLastEntryId,
+          noun,
+        ));
+      }
+      const item = sampled.values[index]!;
+      lines.push(`- [${item.tag}] ${item.description}${item.resolved ? " [RESOLVED]" : ""} [entry ${item.entryId}]`);
+    }
+  };
+  append(sampledUnresolved, "open error records");
+  append(sampledResolved, "resolved error records");
+  return { lines, omitted: sampledUnresolved.omitted + sampledResolved.omitted };
 };
 
-interface Turn {
-  user: Extract<CompactionEvent, { kind: "user" }>;
-  events: CompactionEvent[];
+export const projectOutstanding = (events: CompactionEvent[]): string[] =>
+  projectOutstandingWithMetadata(events).lines;
+
+interface EarlierTurnAddress {
+  entryId: string;
+  userLine: string;
+  tools: string;
 }
 
-const partitionTurns = (events: CompactionEvent[]): Turn[] => {
-  const turns: Turn[] = [];
-  let current: Turn | undefined;
-  for (const e of events) {
-    if (e.kind === "user") {
-      if (current) turns.push(current);
-      current = { user: e, events: [e] };
-    } else if (current) {
-      current.events.push(e);
+// [Earlier Turns] — sampled one-liners for turns before the latest summarized
+// one (which Current Status surfaces), plus tool-name histograms and an
+// entry-range address for any omitted middle turns.
+const projectEarlierTurns = (events: CompactionEvent[]): ProjectedSection => {
+  function* earlierTurns(): Generator<EarlierTurnAddress> {
+    let currentUser: Extract<CompactionEvent, { kind: "user" }> | undefined;
+    let counts = new Map<string, number>();
+    let order: string[] = [];
+    const completed = (): EarlierTurnAddress | undefined => {
+      if (!currentUser) return undefined;
+      return {
+        entryId: currentUser.entryId,
+        userLine: truncate(firstLine(currentUser.text), MAX_EARLIER_USER),
+        tools: order.map((name) => `${name}:${counts.get(name) ?? 0}`).join(" "),
+      };
+    };
+    for (const event of events) {
+      if (event.kind === "user") {
+        const turn = completed();
+        if (turn) yield turn;
+        currentUser = event;
+        counts = new Map<string, number>();
+        order = [];
+        continue;
+      }
+      if (!currentUser) continue;
+      const name = event.kind === "toolCall" ? event.name : event.kind === "bash" ? "bash" : undefined;
+      if (!name) continue;
+      if (!counts.has(name)) order.push(name);
+      counts.set(name, (counts.get(name) ?? 0) + 1);
     }
   }
-  if (current) turns.push(current);
-  return turns;
-};
 
-const histogram = (events: CompactionEvent[]): string => {
-  const counts = new Map<string, number>();
-  const order: string[] = [];
-  for (const e of events) {
-    let name: string | undefined;
-    if (e.kind === "toolCall") name = e.name;
-    else if (e.kind === "bash") name = "bash";
-    if (!name) continue;
-    if (!counts.has(name)) {
-      counts.set(name, 0);
-      order.push(name);
-    }
-    counts.set(name, (counts.get(name) ?? 0) + 1);
-  }
-  return order.map((name) => `${name}:${counts.get(name) ?? 0}`).join(" ");
-};
-
-// [Earlier Turns] — one line per turn for every turn except the last summarized
-// one (the last is surfaced by Current Status). User intent as a quoted
-// one-liner plus a tool-name histogram. This is the "one-line earlier turns"
-// tier of graded decay.
-const projectEarlierTurns = (events: CompactionEvent[]): string[] => {
-  const turns = partitionTurns(events);
-  if (turns.length <= 1) return [];
+  const sampled = sampleAddressedFrom(earlierTurns(), MAX_EARLIER_TURNS);
   const lines: string[] = [];
-  for (const turn of turns.slice(0, -1)) {
-    const userLine = truncate(firstLine(turn.user.text), MAX_EARLIER_USER);
-    const tools = histogram(turn.events);
-    lines.push(tools ? `"${userLine}" | ${tools}` : `"${userLine}"`);
+  for (let index = 0; index < sampled.values.length; index++) {
+    if (sampled.omitted > 0 && index === sampled.splitIndex) {
+      lines.push(omissionLine(
+        sampled.omitted,
+        sampled.omittedFirstEntryId,
+        sampled.omittedLastEntryId,
+        "earlier turns",
+      ));
+    }
+    const turn = sampled.values[index]!;
+    lines.push(`${turn.tools ? `"${turn.userLine}" | ${turn.tools}` : `"${turn.userLine}"`} [entry ${turn.entryId}]`);
   }
-  return lines;
+  return { lines, omitted: sampled.omitted };
 };
 
 // [Current Status] — a bridge from the summarized window into the kept tail:
@@ -347,12 +442,21 @@ const summarizeArgs = (name: string, args: Record<string, unknown>): string => {
 };
 
 // Brief transcript — the "collapsed transcript" tier of graded decay. A
-// rolling window of the last ~120 events rendered as one-liners, each prefixed
+// rolling window of the last 40 events rendered as one-liners, each prefixed
 // with its stable `(#N)` reference so the agent can point back at a specific
 // event without storing its content (principle 0).
-const projectTranscript = (events: CompactionEvent[]): string[] => {
+const projectTranscript = (events: CompactionEvent[]): ProjectedSection => {
   const window = events.slice(-TRANSCRIPT_WINDOW);
   const lines: string[] = [];
+  const omitted = events.length - window.length;
+  if (omitted > 0) {
+    lines.push(omissionLine(
+      omitted,
+      events[0]?.entryId,
+      events[omitted - 1]?.entryId,
+      "transcript events",
+    ));
+  }
   for (const e of window) {
     const ref = `(#${e.index})`;
     if (e.kind === "user") {
@@ -372,15 +476,36 @@ const projectTranscript = (events: CompactionEvent[]): string[] => {
       lines.push(`${ref} bash(${truncate(firstLine(e.command), MAX_TRANSCRIPT_CMD)}) → ${status}`);
     }
   }
-  return lines;
+  return { lines, omitted };
 };
 
-export const project = (events: CompactionEvent[]): Sections => ({
-  goal: projectGoal(events),
-  files: projectFiles(events),
-  commits: projectCommits(events),
-  outstanding: projectOutstanding(events),
-  earlierTurns: projectEarlierTurns(events),
-  status: projectStatus(events),
-  transcript: projectTranscript(events),
-});
+export const projectWithMetadata = (events: CompactionEvent[]): ProjectionResult => {
+  const goal = projectGoal(events);
+  const files = projectFiles(events);
+  const commits = projectCommits(events);
+  const outstanding = projectOutstandingWithMetadata(events);
+  const earlierTurns = projectEarlierTurns(events);
+  const transcript = projectTranscript(events);
+  return {
+    sections: {
+      goal: goal.lines,
+      files: files.lines,
+      commits: commits.lines,
+      outstanding: outstanding.lines,
+      earlierTurns: earlierTurns.lines,
+      status: projectStatus(events),
+      transcript: transcript.lines,
+    },
+    omittedCounts: {
+      goal: goal.omitted,
+      files: files.omitted,
+      commits: commits.omitted,
+      outstanding: outstanding.omitted,
+      earlierTurns: earlierTurns.omitted,
+      transcript: transcript.omitted,
+    },
+  };
+};
+
+export const project = (events: CompactionEvent[]): Sections =>
+  projectWithMetadata(events).sections;

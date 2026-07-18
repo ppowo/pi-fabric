@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { encodeCompactionRequest } from "../compaction/instructions.js";
 
 // A pending-intent controller for the host Pi session's context compaction.
 //
@@ -16,12 +17,14 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 export interface CompactRequestIntent {
   reason?: string;
   instructions?: string;
+  preserve?: string[];
   requestedBy?: string;
 }
 
 export interface CompactPendingIntent {
   reason?: string;
   instructions?: string;
+  preserve?: string[];
   requestedBy: string;
   requestedAt: number;
 }
@@ -58,6 +61,12 @@ const DEFAULT_REQUESTED_BY = "model";
 const isString = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0;
 
+const stringsOf = (value: unknown): string[] | undefined => {
+  if (!Array.isArray(value)) return undefined;
+  const strings = value.filter(isString);
+  return strings.length > 0 ? strings : undefined;
+};
+
 export class CompactController {
   #pending: CompactPendingIntent | undefined;
   #last: CompactLastCommit | undefined;
@@ -71,11 +80,13 @@ export class CompactController {
   // Record a pending compaction intent. A single slot: a new request replaces
   // any pending one, keeping the latest instructions.
   request(intent: CompactRequestIntent): CompactPendingIntent {
+    const preserve = stringsOf(intent.preserve);
     const pending: CompactPendingIntent = {
       requestedBy: isString(intent.requestedBy) ? intent.requestedBy! : DEFAULT_REQUESTED_BY,
       requestedAt: Date.now(),
       ...(isString(intent.reason) ? { reason: intent.reason } : {}),
       ...(isString(intent.instructions) ? { instructions: intent.instructions } : {}),
+      ...(preserve ? { preserve } : {}),
     };
     this.#pending = pending;
     this.#hooks.onRequest?.(pending);
@@ -106,7 +117,12 @@ export class CompactController {
     // Capture the intent's fields before forwarding so the async callbacks
     // below do not depend on closure-narrowed references to `pending`.
     const requestedBy = pending.requestedBy;
-    const instructions = pending.instructions;
+    const instructions = pending.preserve
+      ? encodeCompactionRequest({
+          ...(pending.instructions !== undefined ? { instructions: pending.instructions } : {}),
+          preserve: pending.preserve,
+        })
+      : pending.instructions;
     // Hold the exact intent object we are committing. A new request() may
     // replace `this.#pending` while this commit is in flight; on completion we
     // only clear the intent we actually committed (by identity), leaving any

@@ -6,11 +6,10 @@ boundary, instead of compaction being only a token-threshold reflex. It is the
 distillation of two proven ideas into first-principles primitives native to
 pi-fabric:
 
-- **Schema** proved that a *harness-enforced* process beats prompt-level
-  discipline: a single gated channel from thought to action, with the host —
-  not the model — deciding when it is safe to act.
-- **pi-vcc** proved that *deterministic*, LLM-free compaction sustains 20+
-  compactions without goal degradation.
+- **Harness enforcement** motivates a single gated channel from thought to
+  action, with the host — not the model — deciding when it is safe to act.
+- **Deterministic compaction** avoids adding another model call to a context
+  transition and makes repeated results testable.
 
 Both point at the same primitive: compaction should be a **deliberate,
 labeled transition** of the agent's own context, requested by the model
@@ -21,16 +20,14 @@ labeled transition** of the agent's own context, requested by the model
 
 The model runs inside the context it would compact. If it could compact the
 running context directly, it would race with its own in-flight turn: tool calls
-mid-execution, partial plans, unresolved steering. Schema's ablation showed
-that the *same models* on a *generic* harness scored 42.83%, but on an
-*enforced* harness scored 98.98%. The enforcement that mattered was not a
-smarter prompt — it was a typed, validated write path with an open read path.
+mid-execution, partial plans, and unresolved steering. Pi Fabric avoids that
+race with a typed, validated write path and an open status path.
 
-pi-fabric therefore exposes compaction as **two separable acts**:
+Pi Fabric therefore exposes compaction as **two separable acts**:
 
 1. **Advisory** — `compact.request` (host) or `agents.compact` (child) only
-   *records an intent*. It never touches the context. It is a read-only,
-   risk-gated, schema-validated declaration: "I think this context should be
+   *records an intent*. It never touches the context. It is a write-risk,
+   schema-validated declaration: "I think this context should be
    compacted, with these instructions, for this reason."
 
 2. **Committed** — the host, at a boundary it knows to be safe, forwards the
@@ -67,12 +64,13 @@ Always available (no config guard). Exposed through `fabric_exec` as
 await compact.request({
   reason: "the file map and the failing test are the only live state",
   instructions: "Keep the failing test name and the file map; drop the rest.",
+  preserve: ["Auth regression is still open", "tests/auth.test.ts"], // optional
   requestedBy: "model", // optional; default "model"
 });
 
 // Read the pending intent and the last committed/failed compaction info.
 const status = await compact.status();
-// { pending?: { reason?, instructions?, requestedBy, requestedAt },
+// { pending?: { reason?, instructions?, preserve?, requestedBy, requestedAt },
 //   last?:   { at, requestedBy, status: "committed"|"failed"|"cancelled",
 //             summary?, tokensBefore?, estimatedTokensAfter?, error? } }
 
@@ -82,6 +80,15 @@ await compact.cancel();
 
 Risk classes: `request` is `write` (it mutates host session state); `status`
 and `cancel` are `read`.
+
+`instructions` alone is forwarded as ordinary Pi `customInstructions`, so manual
+`/compact` text and programmatic requests have the same Fabric rendering. When
+`preserve` is present, the controller encodes `{version: 1, instructions?,
+preserve}` behind an exact versioned prefix plus JSON. The compaction hook
+strictly decodes that shape and renders the bounded values under
+`[Compaction Request]`. Unknown versions or malformed payloads are preserved as
+plain instructions rather than partially parsed or silently dropped. The exact
+`__pi_vcc__` value remains reserved for pi-vcc routing.
 
 #### Commit semantics
 
@@ -158,8 +165,8 @@ configuration to be safe.
 
 | File | Role |
 | --- | --- |
-| `src/core/compact-controller.ts` | Pending-intent controller: `request`, `cancel`, `status`, `maybeCommit`. Single replaceable slot; in-flight guard; quiet-clear on cancelled/already-compacted. |
-| `src/providers/compact-provider.ts` | Fabric provider exposing `request` (write), `status` (read), `cancel` (read). Always registered; activity audit. |
+| `src/core/compact-controller.ts` | Pending-intent controller: `request`, `cancel`, `status`, `maybeCommit`. Single replaceable slot; typed preserve encoding; in-flight guard; quiet-clear on cancelled/already-compacted. |
+| `src/providers/compact-provider.ts` | Fabric provider exposing `request` (write, including optional `preserve: string[]`), `status` (read), `cancel` (read). Always registered; activity audit. |
 | `src/fabric-state.ts` | Constructs the controller with mesh-publish hooks; registers the provider; resets on re-init/shutdown. |
 | `src/index.ts` | Invokes `state.compact.maybeCommit(context)` in the existing `agent_settled` handler. |
 | `src/subagents/types.ts` | `SubagentSteerEntry["type"]` extended with `"compact"`; optional `instructions` field. |

@@ -23,6 +23,11 @@ const requestSchema = {
       type: "string",
       description: "Custom compaction instructions forwarded to Pi core",
     },
+    preserve: {
+      type: "array",
+      items: { type: "string" },
+      description: "Explicit bounded facts to preserve, encoded as a typed Fabric compaction request",
+    },
     requestedBy: {
       type: "string",
       description: "Who requested the compaction (default: model)",
@@ -96,6 +101,9 @@ export class CompactProvider implements FabricProvider {
         const intent = this.controller.request({
           ...(typeof args.reason === "string" ? { reason: args.reason } : {}),
           ...(typeof args.instructions === "string" ? { instructions: args.instructions } : {}),
+          ...(Array.isArray(args.preserve) && args.preserve.every((item) => typeof item === "string")
+            ? { preserve: args.preserve }
+            : {}),
           ...(typeof args.requestedBy === "string" ? { requestedBy: args.requestedBy } : {}),
         });
         context.activity?.({
