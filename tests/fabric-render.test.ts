@@ -4,6 +4,12 @@ import { Box, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import { initHighlighting } from "../src/ui/highlight.js";
 import {
+  HiddenRowBorrowingComponent,
+  observeResultRows,
+  resultRowDeficit,
+  type ResultRowBalance,
+} from "../src/ui/row-balance.js";
+import {
   captureFabricWritePreviews,
   compactProgressPreview,
   fabricWriteBindings,
@@ -351,6 +357,63 @@ b`, theme)).toBe("");
       "\x1b[42m " + "x".repeat(18) + "\x1b[22;23;24;27;29;39m \x1b[49m",
     );
     expect(visibleWidth(line)).toBe(20);
+  });
+
+  it("replaces lost result rows with hidden source lines", () => {
+    const balance: ResultRowBalance = {};
+    const partial = observeResultRows(
+      renderBoundedLines(["running", "call one", "call two", "detail", "progress"]),
+      balance,
+      { expanded: false, isPartial: true },
+    );
+    expect(partial.render(80)).toHaveLength(5);
+
+    const final = observeResultRows(
+      renderBoundedLines(["complete", "calls"]),
+      balance,
+      { expanded: false, isPartial: false },
+    );
+    expect(final.render(80)).toEqual(["complete", "calls"]);
+    expect(resultRowDeficit(balance, 80)).toBe(3);
+
+    const code = new HiddenRowBorrowingComponent(
+      8,
+      20,
+      (limit) => [
+        "title",
+        ...Array.from({ length: limit }, (_, index) => `code-${index + 1}`),
+        ...(limit < 20 ? [`${20 - limit} hidden`] : []),
+      ],
+      balance,
+    );
+    const rendered = code.render(80);
+    expect(rendered).toHaveLength(13);
+    expect(rendered).toContain("code-11");
+    expect(rendered).not.toContain("code-12");
+    expect(rendered.length + final.render(80).length).toBe(15);
+  });
+
+  it("does not reveal a source line that would overshoot the result deficit", () => {
+    const balance: ResultRowBalance = {};
+    observeResultRows(
+      renderBoundedLines(["one", "two", "three"]),
+      balance,
+      { expanded: false, isPartial: true },
+    ).render(20);
+    observeResultRows(
+      renderBoundedLines(["done"]),
+      balance,
+      { expanded: false, isPartial: false },
+    );
+
+    const code = new HiddenRowBorrowingComponent(
+      1,
+      2,
+      (limit) =>
+        limit === 1 ? ["base"] : ["base", "wrapped", "source", "line"],
+      balance,
+    );
+    expect(code.render(20)).toEqual(["base"]);
   });
 
   it("keeps multicall progress inline without adding completion-only rows", () => {

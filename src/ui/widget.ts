@@ -3,9 +3,6 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { FabricUiWidgetMode } from "../config.js";
 import type {
-  FabricActivityCall,
-  FabricActivityItem,
-  FabricActivityKind,
   FabricActivityRun,
   FabricActivityStatus,
 } from "../activity/types.js";
@@ -14,26 +11,10 @@ import {
   isActiveStatus,
   orderAgentsByCreation,
   type FabricDashboardSnapshot,
-  type FabricUiActor,
   type FabricUiAgent,
 } from "./types.js";
 
 const spinnerFrames = ["◐", "◓", "◑", "◒"];
-
-type WidgetActivityKind = FabricActivityKind | "state" | "ambientActor";
-
-const widgetActivityPriority: readonly WidgetActivityKind[] = [
-  "agent",
-  "actor",
-  "task",
-  "custom",
-  "tool",
-  "extension",
-  "mcp",
-  "mesh",
-  "state",
-  "ambientActor",
-];
 
 const statusGlyph = (status: string): string => {
   if (status === "completed" || status === "done") return "✓";
@@ -101,68 +82,6 @@ const agentLine = (theme: Theme, agent: FabricUiAgent, now: number): string => {
   }`;
 };
 
-const actorStream = (actor: FabricUiActor): string => {
-  const last = actor.recentMessages[actor.recentMessages.length - 1];
-  if (!last) return "";
-  if (last.direction === "out") {
-    if (last.error) return `← ✗ ${truncateToWidth(safeText(last.error), 48)}`;
-    if (last.text) return `← ${truncateToWidth(safeText(last.text), 48)}`;
-    if (last.action) return `← ${last.action}`;
-    return "";
-  }
-  return `→ ${last.source}`;
-};
-
-const actorLine = (theme: Theme, actor: FabricUiActor): string => {
-  const effectiveStatus = actor.lastError ? "failed" : actor.status;
-  const status = colorStatus(theme, effectiveStatus, statusGlyph(effectiveStatus));
-  const workerActivity = actor.worker?.currentTool;
-  const activity = workerActivity ?? actor.status;
-  const queue = actor.queued > 0 ? ` · q:${actor.queued}` : "";
-  const messages = actor.messages > 0 ? ` · ${actor.messages} msg` : "";
-  const usage = actor.worker?.usage
-    ? ` · ${formatTokens(actor.worker.usage.input + actor.worker.usage.output)} tok`
-    : "";
-  const stream = actorStream(actor);
-  return `  ${status} ${safeText(actor.name)}  ${theme.fg("muted", safeText(activity))}${stream ? theme.fg("muted", ` · ${stream}`) : ""}${theme.fg(
-    "dim",
-    `${queue}${messages}${usage}`,
-  )}`;
-};
-
-const callLine = (theme: Theme, call: FabricActivityCall, now: number): string => {
-  const status = colorStatus(theme, call.status, statusGlyph(call.status));
-  const activity = call.progress ?? (call.label !== call.ref ? call.ref : undefined);
-  const metrics = [
-    call.metrics?.tokens !== undefined ? `${formatTokens(call.metrics.tokens)} tok` : undefined,
-    call.metrics?.toolCalls !== undefined ? `${call.metrics.toolCalls} tools` : undefined,
-    formatDuration((call.finishedAt ?? now) - call.startedAt),
-  ].filter((value): value is string => Boolean(value));
-  return `  ${status} ${safeText(call.label)}${
-    activity ? `  ${theme.fg("muted", safeText(activity))}` : ""
-  }${metrics.length > 0 ? theme.fg("dim", ` · ${metrics.join(" · ")}`) : ""}`;
-};
-
-const itemLine = (theme: Theme, item: FabricActivityItem): string => {
-  const current = item.current ?? item.detail;
-  const progress =
-    item.total !== undefined
-      ? ` · ${item.completed ?? 0}/${item.total}`
-      : current
-        ? ` · ${safeText(current)}`
-        : "";
-  return `  ${colorStatus(theme, item.status, statusGlyph(item.status))} ${safeText(
-    item.label,
-  )}${theme.fg("dim", progress)}`;
-};
-
-const actorActivityKind = (actor: FabricUiActor): WidgetActivityKind =>
-  actor.lastError ||
-  actor.status !== "idle" ||
-  (actor.worker && isActiveStatus(actor.worker.status))
-    ? "actor"
-    : "ambientActor";
-
 export const shouldShowFabricWidget = (
   snapshot: FabricDashboardSnapshot,
   mode: FabricUiWidgetMode,
@@ -171,7 +90,6 @@ export const shouldShowFabricWidget = (
   if (mode === "always") return true;
   if (snapshot.agents.some((agent) => isActiveStatus(agent.status))) return true;
   if (snapshot.actors.some((actor) => actor.status !== "stopped")) return true;
-  if (snapshot.state.some((entry) => isActiveStatus(entry.status))) return true;
   const run = snapshot.runs[0];
   if (!run) return false;
   if (run.status === "running") return true;
@@ -188,11 +106,13 @@ export class FabricWidget implements Component {
 
   #lastWidth: number | undefined;
   #lastLines: string[] | undefined;
+  #leaseKey: string | undefined;
+  #leasedRows = 0;
 
   render(width: number): string[] {
     if (width <= 0) return [];
-    const content = this.#buildContent();
-    const lines = this.#boundContent(content, width);
+    const { lines: content, leaseKey } = this.#buildContent();
+    const lines = this.#leaseContent(this.#boundContent(content, width), leaseKey);
     this.#lastWidth = width;
     this.#lastLines = lines;
     return lines;
@@ -200,14 +120,17 @@ export class FabricWidget implements Component {
 
   hasChanged(): boolean {
     if (this.#lastWidth === undefined || this.#lastLines === undefined) return true;
-    const content = this.#buildContent();
-    const lines = this.#boundContent(content, this.#lastWidth);
+    const { lines: content, leaseKey } = this.#buildContent();
+    const lines = this.#leaseContent(
+      this.#boundContent(content, this.#lastWidth),
+      leaseKey,
+    );
     return JSON.stringify(lines) !== JSON.stringify(this.#lastLines);
   }
 
   invalidate(): void {}
 
-  #buildContent(): string[] {
+  #buildContent(): { lines: string[]; leaseKey: string } {
     const snapshot = this.snapshot();
     const candidateRun = snapshot.runs[0];
     const candidateFinishedAt = candidateRun?.finishedAt ?? candidateRun?.updatedAt ?? 0;
@@ -219,18 +142,18 @@ export class FabricWidget implements Component {
         : undefined;
     const orderedAgents = orderAgentsByCreation(snapshot.agents);
     const activeAgents = orderedAgents.filter((agent) => isActiveStatus(agent.status));
-    const terminalAgents =
-      run && run.status !== "running" && activeAgents.length === 0
-        ? orderedAgents
-            .filter((agent) => agent.runId === run.id && !isActiveStatus(agent.status))
-            .slice(0, 2)
-        : [];
+    const activeAgentIds = new Set(activeAgents.map((agent) => agent.id));
+    const terminalAgents = run
+      ? orderedAgents.filter(
+          (agent) =>
+            agent.runId === run.id &&
+            !activeAgentIds.has(agent.id) &&
+            !isActiveStatus(agent.status),
+        )
+      : [];
     const visibleActors = snapshot.actors.filter((actor) => actor.status !== "stopped");
-    const activeState = snapshot.state.filter((entry) => isActiveStatus(entry.status));
     const nestedCalls =
       run?.calls.filter((call) => call.kind !== "agent" && call.kind !== "actor") ?? [];
-    const activeCalls = nestedCalls.filter((call) => isActiveStatus(call.status));
-    const runningItems = run?.items.filter((item) => isActiveStatus(item.status)) ?? [];
     const title = run?.name ?? "Fabric session";
     const headerStatus = run?.status ?? (activeAgents.length > 0 ? "running" : "idle");
     const parts: string[] = [];
@@ -267,41 +190,28 @@ export class FabricWidget implements Component {
     )}${parts.length > 0 ? this.theme.fg("dim", ` · ${parts.join(" · ")}`) : ""}`;
     const lines = [header];
 
-    const activityRows: Array<{ kind: WidgetActivityKind; line: string }> = [];
-    for (const agent of activeAgents) {
-      activityRows.push({ kind: "agent", line: agentLine(this.theme, agent, snapshot.now) });
-    }
-    for (const agent of terminalAgents) {
-      activityRows.push({ kind: "agent", line: agentLine(this.theme, agent, snapshot.now) });
-    }
-    for (const call of activeCalls) {
-      activityRows.push({
-        kind: call.entityKind ?? call.kind,
-        line: callLine(this.theme, call, snapshot.now),
-      });
-    }
-    for (const item of runningItems) {
-      activityRows.push({ kind: item.kind, line: itemLine(this.theme, item) });
-    }
-    for (const entry of activeState) {
-      activityRows.push({
-        kind: "state",
-        line: `  ${colorStatus(this.theme, entry.status, statusGlyph(entry.status))} ${safeText(
-          entry.label,
-        )}${this.theme.fg("dim", ` · ${entry.owner ?? entry.status}`)}`,
-      });
-    }
-    for (const actor of visibleActors) {
-      activityRows.push({ kind: actorActivityKind(actor), line: actorLine(this.theme, actor) });
-    }
-
-    const visibleKind = widgetActivityPriority.find((kind) =>
-      activityRows.some((row) => row.kind === kind),
+    lines.push(
+      ...activeAgents.map((agent) => agentLine(this.theme, agent, snapshot.now)),
+      ...terminalAgents.map((agent) => agentLine(this.theme, agent, snapshot.now)),
     );
-    if (visibleKind) {
-      lines.push(...activityRows.filter((row) => row.kind === visibleKind).map((row) => row.line));
+    return {
+      lines,
+      leaseKey: run?.id ?? "ambient",
+    };
+  }
+
+  #leaseContent(lines: string[], leaseKey: string): string[] {
+    if (this.#leaseKey !== leaseKey) {
+      this.#leaseKey = leaseKey;
+      this.#leasedRows = lines.length;
+    } else {
+      this.#leasedRows = Math.max(this.#leasedRows, lines.length);
     }
-    return lines;
+    if (lines.length >= this.#leasedRows) return lines;
+    return [
+      ...lines,
+      ...Array.from({ length: this.#leasedRows - lines.length }, () => ""),
+    ];
   }
 
   #boundContent(content: string[], width: number): string[] {

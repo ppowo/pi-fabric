@@ -184,7 +184,7 @@ describe("Fabric dynamic UI", () => {
     expect(shouldShowFabricWidget(current, "auto")).toBe(true);
   });
 
-  it("shows only the highest-priority activity type in the widget", () => {
+  it("shows only agent-provider rows in the widget", () => {
     const current = snapshot();
     const customCall = current.runs[0]!.calls.find((call) => call.kind === "extension")!;
     current.runs[0]!.calls = [
@@ -197,7 +197,6 @@ describe("Fabric dynamic UI", () => {
         progress: "Indexing packages",
       },
     ];
-    current.runs[0]!.items = [];
 
     const withAgent = new FabricWidget(theme, () => current, 8).render(120).join("\n");
     expect(withAgent).toContain("security-reviewer");
@@ -206,10 +205,20 @@ describe("Fabric dynamic UI", () => {
     expect(withAgent).not.toContain("Package A");
 
     current.agents = [];
-    const withCustomEntity = new FabricWidget(theme, () => current, 8).render(120).join("\n");
-    expect(withCustomEntity).toContain("Custom index");
-    expect(withCustomEntity).not.toContain("advisor");
-    expect(withCustomEntity).not.toContain("Package A");
+    const withoutAgents = new FabricWidget(theme, () => current, 8).render(120);
+    expect(withoutAgents).toHaveLength(1);
+    expect(withoutAgents.join("\n")).not.toContain("Custom index");
+    expect(withoutAgents.join("\n")).not.toContain("advisor");
+    expect(withoutAgents.join("\n")).not.toContain("Package A");
+  });
+
+  it("does not mount the auto widget for standalone non-agent state", () => {
+    const current = snapshot();
+    current.runs = [];
+    current.agents = [];
+    current.actors = [];
+    expect(current.state[0]?.status).toBe("claimed");
+    expect(shouldShowFabricWidget(current, "auto")).toBe(false);
   });
 
   it("keeps dashboard and widget agents in creation order", () => {
@@ -258,7 +267,7 @@ describe("Fabric dynamic UI", () => {
     }
   });
 
-  it("keeps completed runs until settle, then dismisses but retains actors", () => {
+  it("keeps completed runs visible and summarizes actors without listing them", () => {
     const current = snapshot();
     const run = current.runs[0];
     if (!run) throw new Error("missing fixture run");
@@ -267,20 +276,22 @@ describe("Fabric dynamic UI", () => {
     current.agents[0]!.status = "completed";
     current.state = [];
     current.actors = [];
-    // a completed run stays visible until the turn settles
+    // A completed run remains visible through agent_settled so its rows do not collapse.
     expect(shouldShowFabricWidget(current, "auto")).toBe(true);
-    // settling (agent_settled) dismisses it
+    // An explicit dismissal watermark can still hide retained history.
     current.widgetDismissedAt = current.now;
     expect(shouldShowFabricWidget(current, "auto")).toBe(false);
     // ambient actors keep the widget visible regardless
     current.actors = snapshot().actors;
     expect(shouldShowFabricWidget(current, "auto")).toBe(true);
     const lines = new FabricWidget(theme, () => current, 5).render(72);
+    expect(lines).toHaveLength(1);
     expect(lines[0]).toContain("Fabric session");
-    expect(lines.join("\n")).toContain("advisor");
+    expect(lines[0]).toContain("1 actor");
+    expect(lines.join("\n")).not.toContain("advisor");
   });
 
-  it("keeps a bounded terminal agent result cue until settle", () => {
+  it("keeps a bounded terminal agent result cue through settle", () => {
     const current = snapshot();
     const run = current.runs[0]!;
     run.status = "completed";
@@ -300,7 +311,7 @@ describe("Fabric dynamic UI", () => {
     expect(shouldShowFabricWidget(current, "auto")).toBe(false);
   });
 
-  it("hides dismissed runs and resurfaces later ones", () => {
+  it("hides explicitly dismissed runs and resurfaces later ones", () => {
     const current = snapshot();
     const run = current.runs[0];
     if (!run) throw new Error("missing fixture run");
@@ -314,11 +325,12 @@ describe("Fabric dynamic UI", () => {
     run.status = "completed";
     run.finishedAt = current.now;
     current.widgetDismissedAt = 0;
-    // a freshly-finished run shows as a single-line summary
+    // A freshly finished non-agent run remains summarized by its header only.
     expect(shouldShowFabricWidget(current, "auto")).toBe(true);
     const lines = new FabricWidget(theme, () => current, 8).render(72);
-    expect(lines.length).toBe(1);
-    // a new prompt dismisses the run (it finished before the prompt) -> hidden
+    expect(lines).toHaveLength(1);
+    expect(lines.join("\n")).not.toContain("pi.bash");
+    // An explicit dismissal hides retained history.
     current.widgetDismissedAt = current.now;
     expect(shouldShowFabricWidget(current, "auto")).toBe(false);
     current.widgetDismissedAt = current.now + 1;
@@ -330,7 +342,7 @@ describe("Fabric dynamic UI", () => {
     expect(shouldShowFabricWidget(current, "auto")).toBe(true);
   });
 
-  it("compacts widget rows as agents complete without blank padding", () => {
+  it("keeps widget rows stable as agents complete", () => {
     const current = snapshot();
     current.actors = [];
     current.state = [];
@@ -346,16 +358,60 @@ describe("Fabric dynamic UI", () => {
 
     current.agents[1]!.status = "completed";
     const second = widget.render(72);
-    expect(second.length).toBe(2); // header + alpha
+    expect(second).toHaveLength(first.length);
     expect(second.join("\n")).toContain("alpha");
+    expect(second.join("\n")).toContain("beta");
     expect(second.every((line) => visibleWidth(line) > 0)).toBe(true);
 
     current.agents[0]!.status = "completed";
     const third = widget.render(72);
-    expect(third.length).toBe(1); // header only
-    expect(visibleWidth(third[0]!)).toBeGreaterThan(0);
+    expect(third).toHaveLength(first.length);
+    expect(third.join("\n")).toContain("alpha");
+    expect(third.join("\n")).toContain("beta");
   });
 
+  it("leases rows within one run and releases them for a newer run", () => {
+    const current = snapshot();
+    const call = current.runs[0]!.calls.find((candidate) => candidate.kind === "extension")!;
+    current.actors = [];
+    current.state = [];
+    current.runs[0]!.items = [];
+    current.runs[0]!.calls = [
+      {
+        ...call,
+        id: "custom-index",
+        label: "Custom index",
+        status: "running",
+        entityKind: "custom",
+      },
+    ];
+    const base = current.agents[0]!;
+    current.agents = [
+      { ...base, id: "agent-1", name: "alpha" },
+      { ...base, id: "agent-2", name: "beta" },
+    ];
+    const widget = new FabricWidget(theme, () => current, 8);
+    const withAgents = widget.render(72);
+    expect(withAgents).toHaveLength(3);
+
+    current.agents = [];
+    const withoutAgents = widget.render(72);
+    expect(withoutAgents).toHaveLength(withAgents.length);
+    expect(withoutAgents.join("\n")).not.toContain("Custom index");
+    expect(withoutAgents.at(-1)).toBe("");
+
+    const previousRun = current.runs[0]!;
+    current.runs[0] = {
+      ...previousRun,
+      id: "run-2",
+      name: "Smaller follow-up",
+      startedAt: current.now,
+      updatedAt: current.now,
+    };
+    const newerRun = widget.render(72);
+    expect(newerRun).toHaveLength(1);
+    expect(newerRun.join("\n")).not.toContain("Custom index");
+  });
 
   it("keeps the hidden-row marker visible at the width boundary", () => {
     const current = snapshot();

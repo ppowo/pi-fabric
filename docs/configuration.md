@@ -206,7 +206,7 @@ See the [`mcp` reference](../skills/fabric-exec/references/mcp.md) for the call 
 
 ## UI
 
-- `ui.widget` is `auto`, `always`, or `hidden`. `auto` shows active work, recent completion, and live persistent actors.
+- `ui.widget` is `auto`, `always`, or `hidden`. `auto` shows active or retained Fabric runs and agent-provider activity; persistent actors can keep the summary header visible but do not occupy widget rows.
 - The widget renders above the chat (like `pi-supervisor`); set `ui.enabled` to `false` to disable both the widget and dashboard controller.
 
 See the [interface reference](interface.md).

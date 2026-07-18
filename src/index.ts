@@ -3,7 +3,7 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Text } from "@earendil-works/pi-tui";
+import { Container, Text, type Component } from "@earendil-works/pi-tui";
 import { loadCodePreviewSettings, withCodePreviewShell } from "pi-code-previews";
 import { Type } from "typebox";
 import {
@@ -45,13 +45,26 @@ import {
   type FabricWritePreview,
 } from "./ui/fabric-render.js";
 import { highlightCode, initHighlighting } from "./ui/highlight.js";
+import {
+  HiddenRowBorrowingComponent,
+  observeResultRows,
+  type ResultRowBalance,
+} from "./ui/row-balance.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import { truncateMiddle } from "./util.js";
 
 const RESULT_FORMATS = ["auto", "json", "text"] as const;
+const MAX_FABRIC_CODE_TRANSFER_LINES = 12;
 type ResultFormat = (typeof RESULT_FORMATS)[number];
+
+type FabricRendererState = {
+  fabricWriteBindingsCode?: string;
+  fabricWriteBindings?: FabricWriteBinding[];
+  fabricWritePreviews?: FabricWritePreview[];
+  fabricResultRowBalance?: ResultRowBalance;
+};
 
 // Absolute path to the Fabric skills bundled with this extension. Resolved
 // relative to the extension entry so it works both in development (src/) and
@@ -192,10 +205,8 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
       }),
       renderCall(params, theme, context) {
         const code = Array.isArray(params.code) ? params.code.join("\n") : params.code;
-        const rendererState = context.state as {
-          fabricWriteBindingsCode?: string;
-          fabricWriteBindings?: FabricWriteBinding[];
-        };
+        const rendererState = context.state as FabricRendererState;
+        const rowBalance = rendererState.fabricResultRowBalance ??= {};
         if (rendererState.fabricWriteBindingsCode !== code) {
           rendererState.fabricWriteBindingsCode = code;
           rendererState.fabricWriteBindings = fabricWriteBindings(code);
@@ -213,28 +224,39 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
             );
 
         const lines = safeTerminalText(code).split("\n");
-        const limit = context.expanded ? lines.length : 8;
-        const shown = lines.slice(0, limit);
-        const width = String(Math.max(1, shown.length)).length;
-        const preview = shown
-          .map(
-            (line, index) =>
-              `${theme.fg("dim", String(index + 1).padStart(width, " "))} ${theme.fg("muted", line || " ")}`,
-          )
-          .join("\n");
-        const hidden = lines.length - shown.length;
         const displayName = params.display?.name ? safeTerminalText(params.display.name) : "";
         const title = `${theme.fg("toolTitle", theme.bold("fabric"))}${
           displayName ? ` ${theme.fg("accent", displayName)}` : ""
         } ${theme.fg("dim", `TypeScript · ${countLabel(lines.length, "line")}`)}`;
-        const hiddenHint =
-          hidden > 0
-            ? `\n${theme.fg("dim", `… ${countLabel(hidden, "line")} hidden · `)}${expandHint(theme)}`
-            : "";
-        const codePreview = new Text(
-          `${title}${preview ? `\n${preview}` : ""}${hiddenHint}`,
-          0,
-          0,
+        const baseLimit = context.expanded ? lines.length : Math.min(lines.length, 8);
+        const maxLimit = context.expanded
+          ? lines.length
+          : Math.min(lines.length, baseLimit + MAX_FABRIC_CODE_TRANSFER_LINES);
+        const renderCodePreview = (limit: number, width: number): string[] => {
+          const shown = lines.slice(0, limit);
+          const lineNumberWidth = String(Math.max(1, shown.length)).length;
+          const preview = shown
+            .map(
+              (line, index) =>
+                `${theme.fg("dim", String(index + 1).padStart(lineNumberWidth, " "))} ${theme.fg("muted", line || " ")}`,
+            )
+            .join("\n");
+          const hidden = lines.length - shown.length;
+          const hiddenHint =
+            hidden > 0
+              ? `\n${theme.fg("dim", `… ${countLabel(hidden, "line")} hidden · `)}${expandHint(theme)}`
+              : "";
+          return new Text(
+            `${title}${preview ? `\n${preview}` : ""}${hiddenHint}`,
+            0,
+            0,
+          ).render(width);
+        };
+        const codePreview = new HiddenRowBorrowingComponent(
+          baseLimit,
+          maxLimit,
+          renderCodePreview,
+          rowBalance,
         );
         if (!writePreview) return codePreview;
         const composite = new Container();
@@ -249,9 +271,10 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
           details.audits as FabricRenderAudit[],
           context.args,
         );
-        const rendererState = context.state as {
-          fabricWritePreviews?: FabricWritePreview[];
-        };
+        const rendererState = context.state as FabricRendererState;
+        const rowBalance = rendererState.fabricResultRowBalance ??= {};
+        const trackRows = (component: Component): Component =>
+          observeResultRows(component, rowBalance, { expanded, isPartial });
         if (isPartial) {
           const writePreviews = captureFabricWritePreviews(audits);
           if (writePreviews.length > 0) rendererState.fabricWritePreviews = writePreviews;
@@ -318,13 +341,15 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
         if (isPartial) {
           const progress = details.progress;
           if (audits.length === 0) {
-            return new Text(
-              theme.fg(
-                "warning",
-                `◆ ${safeTerminalText(progress ?? "Running Fabric program…")}`,
+            return trackRows(
+              new Text(
+                theme.fg(
+                  "warning",
+                  `◆ ${safeTerminalText(progress ?? "Running Fabric program…")}`,
+                ),
+                0,
+                0,
               ),
-              0,
-              0,
             );
           }
           if (audits.length === 1) {
@@ -350,7 +375,7 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
                 text += nl + theme.fg("dim", safeTerminalText(progress));
               }
             }
-            return new Text(text, 0, 0);
+            return trackRows(new Text(text, 0, 0));
           }
           let preview: { auditIndex: number; body: string; hidden: number } | undefined;
           for (let index = audits.length - 1; index >= 0; index--) {
@@ -362,10 +387,12 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
               break;
             }
           }
-          return renderFabricMulticallPartial(
-            { audits, phases, progress, expanded, preview },
-            theme,
-            context?.invalidate,
+          return trackRows(
+            renderFabricMulticallPartial(
+              { audits, phases, progress, expanded, preview },
+              theme,
+              context?.invalidate,
+            ),
           );
         }
 
@@ -377,13 +404,15 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
 
         if (audits.length === 0) {
           if (failed && details.error) {
-            return new Text(
-              theme.fg("error", `✗ ${safeTerminalText(details.error)}`),
-              0,
-              0,
+            return trackRows(
+              new Text(
+                theme.fg("error", `✗ ${safeTerminalText(details.error)}`),
+                0,
+                0,
+              ),
             );
           }
-          if (!output) return new Text(theme.fg("dim", "✓ Fabric"), 0, 0);
+          if (!output) return trackRows(new Text(theme.fg("dim", "✓ Fabric"), 0, 0));
           const lines = safeTerminalText(output).split(nl);
           const limit = expanded ? Math.min(lines.length, 200) : 12;
           const shown = lines.slice(0, limit);
@@ -394,7 +423,7 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
             text += nl + theme.fg("dim", `… ${countLabel(lines.length - shown.length, "line")}`);
             if (!expanded) text += theme.fg("dim", " · ") + expandHint(theme);
           }
-          return new Text(text, 0, 0);
+          return trackRows(new Text(text, 0, 0));
         }
 
         if (audits.length === 1) {
@@ -404,7 +433,7 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
             if (audit.error) {
               text += nl + theme.fg("error", safeTerminalText(audit.error));
             }
-            return new Text(text, 0, 0);
+            return trackRows(new Text(text, 0, 0));
           }
           const limit = expanded ? 200 : 12;
           const rendered = renderBody(audit, limit);
@@ -428,7 +457,7 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
               if (!expanded) text += theme.fg("dim", " · ") + expandHint(theme);
             }
           }
-          return new Text(text, 0, 0);
+          return trackRows(new Text(text, 0, 0));
         }
 
         const failedCalls = audits.filter(
@@ -452,8 +481,23 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
         const callLimit = fabricMulticallCallLimit(expanded);
         const callsShown = audits.slice(0, callLimit);
         const callsHidden = audits.length - callsShown.length;
+        let collapsedPreview:
+          | { auditIndex: number; body: string; hidden: number }
+          | undefined;
+        if (!expanded) {
+          for (let index = callsShown.length - 1; index >= 0; index--) {
+            const audit = callsShown[index]!;
+            if (audit.tool !== "write" || audit.success === false) continue;
+            const rendered = renderBody(audit, 10);
+            if (rendered) {
+              collapsedPreview = { auditIndex: index, ...rendered };
+              break;
+            }
+          }
+        }
         let firstNested = true;
-        for (const audit of callsShown) {
+        for (let index = 0; index < callsShown.length; index++) {
+          const audit = callsShown[index]!;
           if (expanded && !firstNested) text += nl;
           firstNested = false;
           const glyph =
@@ -468,6 +512,17 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
               if (rendered.hidden > 0) {
                 text += nl + theme.fg("dim", `… ${countLabel(rendered.hidden, "line")}`);
               }
+            }
+          } else if (collapsedPreview?.auditIndex === index) {
+            text += nl + collapsedPreview.body
+              .split(nl)
+              .map((line) => `  ${line}`)
+              .join(nl);
+            if (collapsedPreview.hidden > 0) {
+              text += nl + theme.fg(
+                "dim",
+                `  … ${countLabel(collapsedPreview.hidden, "line")}`,
+              );
             }
           }
         }
@@ -492,9 +547,11 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
             }
           }
         }
-        return !expanded && !showOutput
-          ? renderBoundedLines(text.split(nl))
-          : new Text(text, 0, 0);
+        return trackRows(
+          !expanded && !showOutput
+            ? renderBoundedLines(text.split(nl))
+            : new Text(text, 0, 0),
+        );
       },
       async execute(toolCallId, params, signal, onUpdate, context) {
         await state.ensure(context);
@@ -755,7 +812,8 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
       state.config.fullCodeMode || state.config.schema.mode === "enforce",
     );
     state.dispatchHostEvent("agent_settled", event, context);
-    fabricUi.dismissOnSettle();
+    // Keep the completed widget mounted until a newer Fabric run replaces it.
+    // Removing rows at settle would pull the editor and latest chat content upward.
     // Pi's compact API is callback-based. Await the controller's Promise here
     // so ExtensionRunner does not finish this handler (and Pi does not publish
     // its public agent_settled event) before compaction settles.
@@ -799,7 +857,6 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
       : DEFAULT_FABRIC_CONFIG.schema.mode;
     const effectiveFullCodeMode = fullCodeMode || schemaMode === "enforce";
     toolOwnership.apply(effectiveFullCodeMode);
-    state.widgetDismissedAt = Date.now();
     if (!pi.getActiveTools().includes("fabric_exec")) return;
     const guidance = (effectiveFullCodeMode
       ? "Pi Fabric full code mode: `fabric_exec` is the only way to call Pi core tools — use them as `pi.*` inside `code`.\nReturns: `pi.read`/`pi.grep`/`pi.find`/`pi.ls` → string; `pi.bash`/`pi.edit`/`pi.write` → `{ok, output, details}` (read `.output`).\nExamples: `pi.read('/x')` · `pi.bash({cmd:'ls'})` · `pi.grep('TODO','src')` · `pi.grep({regex:'TODO', ic:true, ctx:2})` · `pi.find('*.ts','src')` · `pi.edit({path:'/x', old:'a', new:'b'})` · `pi.write({path:'/y', text:'z'})` · `pi.ls('src')`.\nShorthands (all accepted): `cmd`/`shell`→command · `query`/`regex`/`search`→pattern · `file`/`dir`→path · `ic`→ignoreCase · `ctx`→context · `max`→limit · `start`→offset · `old`→oldText · `new`/`replacement`→newText · `text`/`contents`→content · `timeoutMs`→timeout.\n`tools` is discovery + generic calls only (`providers`/`list`/`search`/`describe`/`call`/`models`); call MCP/extension tools via `extensions.<tool>(options)` or `tools.call({ref, args})`. `pi` is the core tools; `π.<key>` is named strings from the `strings` param (not a tool)."
