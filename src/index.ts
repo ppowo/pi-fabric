@@ -6,6 +6,10 @@ import {
 import { Text } from "@earendil-works/pi-tui";
 import { loadCodePreviewSettings, withCodePreviewShell } from "pi-code-previews";
 import { Type } from "typebox";
+import {
+  createFabricPersistedExecutionDetails,
+  readFabricExecutionRenderDetails,
+} from "./audit/index.js";
 import { CapturedToolCatalog } from "./capture/catalog.js";
 import { installRegisteredToolCapture } from "./capture/interceptor.js";
 import { registerFabricCommand } from "./commands/fabric.js";
@@ -201,17 +205,9 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
         );
       },
       renderResult(result, { expanded, isPartial }, theme, context) {
-        const details = result.details as
-          | {
-              success?: boolean;
-              progress?: string;
-              error?: string;
-              audits?: FabricRenderAudit[];
-              phases?: string[];
-            }
-          | undefined;
-        const audits = details?.audits ?? [];
-        const phases = details?.phases ?? [];
+        const details = readFabricExecutionRenderDetails(result.details);
+        const audits = details.audits as FabricRenderAudit[];
+        const phases = details.phases;
         const nl = "\n";
 
         const renderBody = (
@@ -269,7 +265,7 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
         };
 
         if (isPartial) {
-          const progress = details?.progress;
+          const progress = details.progress;
           if (audits.length === 0) {
             return new Text(
               theme.fg(
@@ -306,10 +302,10 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
           .filter((part): part is { type: "text"; text: string } => part.type === "text")
           .map((part) => part.text)
           .join(nl);
-        const failed = details?.success === false;
+        const failed = details.success === false;
 
         if (audits.length === 0) {
-          if (failed && details?.error) {
+          if (failed && details.error) {
             return new Text(
               theme.fg("error", `✗ ${safeTerminalText(details.error)}`),
               0,
@@ -464,6 +460,8 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
           },
         });
 
+        const persistedDetails = createFabricPersistedExecutionDetails(result);
+
         if (result.typeErrors) {
           const text = result.typeErrors
             .map((error) =>
@@ -474,7 +472,7 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
             .join("\n");
           return {
             content: [{ type: "text", text: `Type errors; code was not executed:\n${text}` }],
-            details: result,
+            details: persistedDetails,
             isError: true,
           };
         }
@@ -514,8 +512,8 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
         // call body, so the joined program return suffices as the content text
         // there.
         const mediaNote = singleAudit?.mediaNote;
-        // The base64 payload now lives in the result content; the audit media
-        // copies would otherwise persist in the stored details.
+        // The base64 payload now lives in the result content; discard the
+        // duplicate in-memory audit copies before returning.
         for (const audit of result.audits) {
           delete audit.media;
           delete audit.mediaNote;
@@ -541,7 +539,7 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
         }
         return {
           content,
-          details: result,
+          details: persistedDetails,
           ...(terminate ? { terminate: true } : {}),
           ...(result.success ? {} : { isError: true }),
         };

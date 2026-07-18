@@ -82,6 +82,7 @@ const providerNamePattern = /^[a-z][a-z0-9_-]*$/;
 const PREVIEW_ARG_CHARS = 2_000;
 const PREVIEW_ARG_KEYS = 32;
 const PREVIEW_RESULT_CHARS = 16_000;
+const MAX_VALIDATION_MESSAGE_CHARS = 2_000;
 
 const truncateString = (value: string, max: number): string =>
   value.length <= max ? value : `${value.slice(0, max)}…`;
@@ -168,12 +169,13 @@ const validationMessage = (
 ): string | undefined => {
   try {
     if (Value.Check(schema, value)) return undefined;
-    return [...Value.Errors(schema, value)]
+    const message = [...Value.Errors(schema, value)]
       .slice(0, 5)
       .map((error) => error.message)
       .join("; ");
+    return truncateString(message || "Schema validation failed", MAX_VALIDATION_MESSAGE_CHARS);
   } catch {
-    return undefined;
+    return "Schema validator failed";
   }
 };
 
@@ -363,7 +365,7 @@ export class ActionRegistry {
       return bounded.value;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      traceOperation?.fail(failureStage, error, executionOutcomeFromError(message, context.signal));
+      traceOperation?.fail(failureStage, error, executionOutcomeFromError(error, context.signal));
       if (audit) {
         audit.success = false;
         audit.error = message;

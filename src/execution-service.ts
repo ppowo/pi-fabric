@@ -27,8 +27,27 @@ import {
   codeUsesOrchestration,
   isBlockingOrchestrationRef,
 } from "./runtime/orchestration.js";
-import { QuickJsRuntime, type FabricSandboxResult } from "./runtime/quickjs-runtime.js";
+import {
+  QuickJsRuntime,
+  type FabricSandboxResult,
+  type FabricSandboxTerminationReason,
+} from "./runtime/quickjs-runtime.js";
 import { typeCheckFabricCode, type FabricTypeError } from "./runtime/type-checker.js";
+
+const executionOutcomeFromTermination = (
+  reason: FabricSandboxTerminationReason,
+): "succeeded" | "failed" | "aborted" | "timed_out" => {
+  switch (reason) {
+    case "completed":
+      return "succeeded";
+    case "aborted":
+      return "aborted";
+    case "timed_out":
+      return "timed_out";
+    case "runtime_error":
+      return "failed";
+  }
+};
 
 export interface FabricExecutionResult {
   success: boolean;
@@ -209,7 +228,7 @@ export class FabricExecutionService {
         traceOperation.fail(
           "guard",
           error,
-          executionOutcomeFromError(String(error), callContext.signal),
+          executionOutcomeFromError(error, callContext.signal),
         );
         throw error;
       }
@@ -313,7 +332,8 @@ export class FabricExecutionService {
             case "fabric.$phase": {
               const name = String(args.name ?? "").trim();
               if (!name) throw new Error("Workflow phase name must not be empty");
-              if (!phases.includes(name)) phases.push(name);
+              phases.push(name);
+              const phaseIndex = phases.length - 1;
               const phaseInput: FabricPhaseInput = {
                 name,
                 ...(typeof args.id === "string" ? { id: args.id } : {}),
@@ -324,7 +344,7 @@ export class FabricExecutionService {
               update(`Phase: ${name}`);
               return {
                 name,
-                index: phases.indexOf(name),
+                index: phaseIndex,
                 ...(activityPhase ? { id: activityPhase.id } : {}),
               };
             }
@@ -359,10 +379,11 @@ export class FabricExecutionService {
       await this.registry.endInvocation(options.parentToolCallId);
     }
 
-    this.activity?.finish(options.parentToolCallId, !sandboxResult.error, sandboxResult.error);
-    const runOutcome = executionOutcomeFromError(sandboxResult.error, options.signal);
+    const runOutcome = executionOutcomeFromTermination(sandboxResult.terminationReason);
+    const succeeded = runOutcome === "succeeded";
+    this.activity?.finish(options.parentToolCallId, succeeded, sandboxResult.error);
     return {
-      success: !sandboxResult.error,
+      success: succeeded,
       value: sandboxResult.value,
       logs: sandboxResult.logs,
       audits,

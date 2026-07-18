@@ -1,8 +1,14 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import {
+  FABRIC_EXECUTION_DETAILS_MAX_BYTES,
+  createFabricPersistedExecutionDetails,
+  readFabricExecutionRenderDetails,
+} from "../src/audit/details.js";
+import {
   FABRIC_EXECUTION_TRACE_MAX_BYTES,
   FabricExecutionTraceRecorder,
+  executionOutcomeFromError,
   isFabricExecutionTraceV1,
   readFabricExecutionTraceV1,
 } from "../src/audit/trace.js";
@@ -89,13 +95,12 @@ describe("Fabric execution trace V1", () => {
           ref: "demo.echo",
           provider: "demo",
           action: "echo",
-          args: { value: "ok" },
+          args: {},
           outcome: "succeeded",
-          result: { value: "ok" },
         },
       ],
       counts: {
-        droppedValues: 0,
+        droppedValues: 2,
         truncatedValues: 0,
         redactedValues: 0,
         droppedOperations: 0,
@@ -152,7 +157,12 @@ describe("Fabric execution trace V1", () => {
       sequence: 0,
       outcome: "failed",
       failureStage: stage,
+      error: `Call failed during ${stage}`,
+      args: {},
     });
+    expect(JSON.stringify(createFabricPersistedExecutionDetails(result))).not.toContain(
+      "exploded",
+    );
   });
 
   it("records execution guard failures", async () => {
@@ -160,16 +170,20 @@ describe("Fabric execution trace V1", () => {
     const result = await execute(
       service,
       context,
-      'return tools.call({ ref: "pi.read", args: { path: "secret.txt" } });',
+      'return tools.call({ ref: "pi.write", args: { path: "safe.txt", content: "guard-content-secret" } });',
     );
 
     expect(result.trace.operations[0]).toMatchObject({
-      ref: "pi.read",
+      ref: "pi.write",
       outcome: "failed",
       failureStage: "guard",
-      args: { path: "secret.txt" },
+      error: "Call failed during guard",
+      args: { path: "safe.txt" },
     });
     expect(result.audits).toEqual([]);
+    expect(JSON.stringify(createFabricPersistedExecutionDetails(result))).not.toContain(
+      "guard-content-secret",
+    );
   });
 
   it("records approval denial at the approval stage", async () => {
@@ -192,6 +206,8 @@ describe("Fabric execution trace V1", () => {
     expect(result.trace.operations[0]).toMatchObject({
       outcome: "failed",
       failureStage: "approve",
+      error: "Call failed during approve",
+      args: {},
     });
     expect(result.audits).toEqual([]);
   });
@@ -209,11 +225,12 @@ describe("Fabric execution trace V1", () => {
 
     expect(result.trace.operations.map((operation) => ({
       sequence: operation.sequence,
-      value: operation.args.value,
+      ref: operation.ref,
+      args: operation.args,
       result: operation.result,
     }))).toEqual([
-      { sequence: 0, value: "first", result: { value: "first" } },
-      { sequence: 1, value: "second", result: { value: "second" } },
+      { sequence: 0, ref: "demo.echo", args: {}, result: undefined },
+      { sequence: 1, ref: "demo.echo", args: {}, result: undefined },
     ]);
   });
 
@@ -247,58 +264,218 @@ describe("Fabric execution trace V1", () => {
     expect(cancelledResult.trace.operations[0]).toMatchObject({ outcome: "aborted" });
   });
 
-  it("returns a failed zero-call trace for type-check failure", async () => {
+  it("returns a failed zero-call trace for type-check failure without source text", async () => {
     const { service, context } = serviceFor();
-    const result = await execute(service, context, "return missingIdentifier;");
+    const result = await execute(service, context, "return rawCodeSecretIdentifier;");
+    const details = createFabricPersistedExecutionDetails(result);
 
     expect(result.typeErrors?.length).toBeGreaterThan(0);
-    expect(result.trace).toMatchObject({ outcome: "failed", operations: [], phases: [] });
+    expect(result.trace).toMatchObject({
+      outcome: "failed",
+      operations: [],
+      phases: [],
+      error: "Execution failed",
+    });
+    expect(JSON.stringify(details)).not.toContain("rawCodeSecretIdentifier");
   });
 
-  it("redacts secrets, safely snapshots unusual JSON, and excludes media/base64", () => {
-    const recorder = new FabricExecutionTraceRecorder();
-    const circular: Record<string, unknown> = { bigint: 42n, infinite: Infinity };
-    circular.self = circular;
-    const operation = recorder.issueCall("pi.bash", {
-      command: "printf usable",
-      path: "/tmp/usable",
-      apiToken: "do-not-persist",
-      omitted: undefined,
-      callback() {},
-      circular,
+  it("fails closed when a TypeBox validator throws", async () => {
+    const provider = demoProvider({
+      async describe(name) {
+        return name === "echo"
+          ? {
+              ...descriptor,
+              inputSchema: {
+                type: "object",
+                properties: { value: { type: "string", pattern: "[" } },
+              },
+            }
+          : undefined;
+      },
     });
-    operation.succeed({
-      text: "kept",
-      media: [{ type: "image", mimeType: "image/png", data: "A".repeat(4_096) }],
-      payload: "A".repeat(4_096),
-    });
-    const trace = recorder.seal("succeeded", []);
-    const serialized = JSON.stringify(trace);
+    const { service, context } = serviceFor(provider);
+    const result = await execute(
+      service,
+      context,
+      'return tools.call({ ref: "demo.echo", args: { value: "validator-arg-secret" } });',
+    );
 
-    expect(trace.operations[0]?.args).toMatchObject({
-      command: "printf usable",
-      path: "/tmp/usable",
-      apiToken: "[REDACTED]",
-      circular: { bigint: "42n", infinite: "[non-finite:Infinity]", self: "[CIRCULAR]" },
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("Schema validator failed");
+    expect(result.trace.operations[0]).toMatchObject({
+      outcome: "failed",
+      failureStage: "validate",
+      error: "Call failed during validate",
+      args: {},
     });
-    expect(serialized).not.toContain("do-not-persist");
-    expect(serialized).not.toContain("image/png");
-    expect(serialized).not.toContain("A".repeat(1_024));
-    expect(trace.counts.redactedValues).toBeGreaterThan(0);
+    expect(JSON.stringify(createFabricPersistedExecutionDetails(result))).not.toContain("secret");
+  });
+
+  it("preserves repeated phase occurrences", async () => {
+    const { service, context } = serviceFor();
+    const result = await execute(
+      service,
+      context,
+      'await phase("A"); await phase("B"); await phase("A"); return true;',
+    );
+
+    expect(result.phases).toEqual(["A", "B", "A"]);
+    expect(result.trace.phases).toEqual(["A", "B", "A"]);
+  });
+
+  it("does not infer timeout or abort outcomes from error prose", async () => {
+    expect(executionOutcomeFromError(new Error("ordinary timeout wording"))).toBe("failed");
+    expect(executionOutcomeFromError(new Error("ordinary aborted wording"))).toBe("failed");
+    const controller = new AbortController();
+    controller.abort(new Error("unclassified reason"));
+    expect(executionOutcomeFromError(new Error("ordinary failure"), controller.signal)).toBe(
+      "aborted",
+    );
+
+    const { service, context } = serviceFor();
+    for (const message of ["runtime timeout false positive", "runtime aborted false positive"]) {
+      const result = await execute(
+        service,
+        context,
+        `throw new Error(${JSON.stringify(message)});`,
+      );
+      expect(result.trace.outcome).toBe("failed");
+      expect(result.trace.error).toBe("Execution failed");
+      expect(JSON.stringify(createFabricPersistedExecutionDetails(result))).not.toContain(message);
+    }
+  });
+
+  it("reconstructs current render audits from trace and preserves legacy audit rendering", () => {
+    const recorder = new FabricExecutionTraceRecorder();
+    const operation = recorder.issueCall("pi.read", { path: "src/index.ts", offset: 4, limit: 8 });
+    operation.succeed("omitted content");
+    const trace = recorder.seal("succeeded", ["Inspect"]);
+
+    expect(readFabricExecutionRenderDetails({ success: true, trace })).toMatchObject({
+      phases: ["Inspect"],
+      audits: [{ ref: "pi.read", provider: "pi", tool: "read", success: true, args: { path: "src/index.ts", offset: 4, limit: 8 } }],
+    });
+    const legacy = {
+      success: true,
+      phases: ["Legacy"],
+      audits: [{ ref: "pi.read", tool: "read", args: { path: "old.txt" }, result: "old body" }],
+    };
+    expect(readFabricExecutionRenderDetails(legacy)).toMatchObject(legacy);
+  });
+
+  it("uses exact ref projections and omits arbitrary argument and result content", () => {
+    const recorder = new FabricExecutionTraceRecorder();
+    const bash = recorder.issueCall("pi.bash", {
+      command: "printf command-embedded-secret",
+      authorizationValue: "authorization-secret",
+    });
+    bash.succeed({ secretValue: "result-secret" });
+    const write = recorder.issueCall("pi.write", {
+      path: "/tmp/safe.txt",
+      content: "write-content-secret",
+    });
+    write.succeed({ created: true, details: { secretValue: "write-result-secret" } });
+    const agent = recorder.issueCall("agents.run", {
+      task: "agent-task-secret",
+      name: "also-private",
+    });
+    agent.succeed({ value: "agent-result-secret" });
+    const external = recorder.issueCall("extensions.lookup", {
+      query: "query-token-secret",
+      url: "https://user:url-password@example.test/path?token=url-query-secret",
+      arbitrary: { secretValue: "nested-secret" },
+    });
+    external.succeed({ authorizationValue: "external-result-secret" });
+    const unsafePath = recorder.issueCall("pi.read", {
+      path: "https://user:path-password@example.test/file?token=path-query-secret",
+      offset: 2,
+      limit: 4,
+    });
+    unsafePath.succeed("read-content-secret");
+    recorder.issueCall("mesh.put", { key: "build.status", value: "mesh-value-secret" }).succeed({
+      value: "mesh-result-secret",
+    });
+    recorder.issueCall("state.transition", {
+      label: "release",
+      value: "state-value-secret",
+      evidence: ["state-evidence-secret"],
+    }).succeed({ value: "state-result-secret" });
+    recorder.issueCall("memory.recall", { query: "memory-query-secret" }).succeed({
+      text: "memory-result-secret",
+    });
+
+    const trace = recorder.seal("succeeded", []);
+    const details = createFabricPersistedExecutionDetails({ success: true, trace });
+    const serialized = JSON.stringify(details);
+
+    expect(trace.operations.map((operation) => operation.args)).toEqual([
+      { commandDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/) },
+      { path: "/tmp/safe.txt" },
+      {},
+      {},
+      { limit: 4, offset: 2 },
+      { key: "build.status" },
+      {},
+      {},
+    ]);
+    expect(trace.operations.map((operation) => operation.result)).toEqual([
+      undefined,
+      { created: true },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    for (const secret of [
+      "command-embedded-secret",
+      "authorization-secret",
+      "result-secret",
+      "write-content-secret",
+      "write-result-secret",
+      "agent-task-secret",
+      "also-private",
+      "agent-result-secret",
+      "query-token-secret",
+      "url-password",
+      "url-query-secret",
+      "nested-secret",
+      "external-result-secret",
+      "path-password",
+      "path-query-secret",
+      "read-content-secret",
+      "mesh-value-secret",
+      "mesh-result-secret",
+      "state-value-secret",
+      "state-evidence-secret",
+      "state-result-secret",
+      "memory-query-secret",
+      "memory-result-secret",
+    ]) {
+      expect(serialized).not.toContain(secret);
+    }
+    expect(details).not.toHaveProperty("audits");
+    expect(Buffer.byteLength(serialized, "utf8")).toBeLessThanOrEqual(
+      FABRIC_EXECUTION_DETAILS_MAX_BYTES,
+    );
     expect(trace.counts.droppedValues).toBeGreaterThan(0);
-    expect(() => JSON.stringify(trace)).not.toThrow();
   });
 
   it("enforces the total UTF-8 envelope bound with explicit drops", () => {
     const recorder = new FabricExecutionTraceRecorder();
-    for (let index = 0; index < 96; index++) {
-      const operation = recorder.issueCall(`demo.action${index}`, { value: "x".repeat(16_000) });
-      operation.succeed({ value: "y".repeat(16_000) });
-    }
-    const trace = recorder.seal("succeeded", []);
+    const phases = Array.from(
+      { length: 512 },
+      (_, index) => `${String(index).padStart(4, "0")}${"x".repeat(1_100)}`,
+    );
+    const trace = recorder.seal("succeeded", phases);
 
     expect(Buffer.byteLength(JSON.stringify(trace), "utf8")).toBeLessThanOrEqual(
       FABRIC_EXECUTION_TRACE_MAX_BYTES,
+    );
+    const details = createFabricPersistedExecutionDetails({ success: true, trace });
+    expect(Buffer.byteLength(JSON.stringify(details), "utf8")).toBeLessThanOrEqual(
+      FABRIC_EXECUTION_DETAILS_MAX_BYTES,
     );
     expect(trace.counts.droppedValues + trace.counts.droppedOperations).toBeGreaterThan(0);
     expect(isFabricExecutionTraceV1(trace)).toBe(true);

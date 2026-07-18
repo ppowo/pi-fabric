@@ -1,3 +1,5 @@
+import { projectFabricAuditArgs, projectFabricAuditResult } from "./projection.js";
+
 export const FABRIC_EXECUTION_TRACE_KIND = "pi-fabric.execution" as const;
 export const FABRIC_EXECUTION_TRACE_VERSION = 1 as const;
 export const FABRIC_EXECUTION_TRACE_MAX_BYTES = 512 * 1024;
@@ -75,6 +77,7 @@ interface MutableOperation {
   type: "call";
   sequence: number;
   ref: string;
+  projectionRef: string;
   provider?: string;
   action?: string;
   args: Sanitized<{ [key: string]: FabricTraceJsonValue }>;
@@ -82,6 +85,7 @@ interface MutableOperation {
   failureStage?: FabricExecutionFailureStageV1;
   error?: Sanitized<string>;
   result?: Sanitized<FabricTraceJsonValue>;
+  droppedResultValues: number;
 }
 
 const DROP = Symbol("drop");
@@ -286,13 +290,25 @@ const sanitize = (input: unknown, maxBytes: number): Sanitized<FabricTraceJsonVa
   return { value, counts };
 };
 
-const sanitizeObject = (value: Record<string, unknown>): Sanitized<{ [key: string]: FabricTraceJsonValue }> => {
+const sanitizeObject = (
+  value: Record<string, unknown>,
+  droppedValues = 0,
+): Sanitized<{ [key: string]: FabricTraceJsonValue }> => {
   const sanitized = sanitize(value, MAX_ARGS_BYTES);
+  sanitized.counts.droppedValues += droppedValues;
   if (typeof sanitized.value === "object" && sanitized.value !== null && !Array.isArray(sanitized.value)) {
     return sanitized as Sanitized<{ [key: string]: FabricTraceJsonValue }>;
   }
   sanitized.counts.droppedValues++;
   return { value: {}, counts: sanitized.counts };
+};
+
+const projectedArgs = (
+  ref: string,
+  args: Record<string, unknown>,
+): Sanitized<{ [key: string]: FabricTraceJsonValue }> => {
+  const projection = projectFabricAuditArgs(ref, args);
+  return sanitizeObject(projection.value, projection.droppedValues);
 };
 
 const sanitizeString = (value: string, maxBytes: number): Sanitized<string> => {
@@ -321,6 +337,22 @@ const lexicalIdentity = (ref: string): { provider?: string; action?: string } =>
   };
 };
 
+const failureMessage = (
+  stage: FabricExecutionFailureStageV1,
+  outcome: FabricExecutionOutcomeV1,
+): string => {
+  if (outcome === "timed_out") return "Call timed out";
+  if (outcome === "aborted") return "Call aborted";
+  return `Call failed during ${stage}`;
+};
+
+const executionErrorMessage = (outcome: FabricExecutionOutcomeV1): string | undefined => {
+  if (outcome === "succeeded") return undefined;
+  if (outcome === "timed_out") return "Execution timed out";
+  if (outcome === "aborted") return "Execution aborted";
+  return "Execution failed";
+};
+
 export class FabricExecutionTraceOperationHandle {
   constructor(
     private readonly recorder: FabricExecutionTraceRecorder,
@@ -341,26 +373,38 @@ export class FabricExecutionTraceOperationHandle {
 
   prepared(args: Record<string, unknown>): void {
     if (!this.operation || this.recorder.sealed) return;
-    this.operation.args = sanitizeObject(args);
+    this.operation.args = projectedArgs(this.operation.projectionRef, args);
   }
 
   succeed(result: unknown): void {
     if (!this.operation || this.recorder.sealed) return;
-    this.operation.result = sanitize(result, MAX_RESULT_BYTES);
+    const projected = projectFabricAuditResult(this.operation.projectionRef, result);
+    if (projected !== undefined) {
+      this.operation.result = sanitize(projected.value, MAX_RESULT_BYTES);
+      this.operation.result.counts.droppedValues += projected.droppedValues;
+    } else if (result !== undefined) {
+      this.operation.droppedResultValues++;
+    }
     this.operation.outcome = "succeeded";
   }
 
   fail(
     stage: FabricExecutionFailureStageV1,
-    error: unknown,
+    _error: unknown,
     outcome: FabricExecutionOutcomeV1 = "failed",
     result?: unknown,
   ): void {
     if (!this.operation || this.recorder.sealed) return;
     this.operation.failureStage = stage;
-    this.operation.error = sanitizeString(error instanceof Error ? error.message : String(error), MAX_ERROR_BYTES);
+    this.operation.error = sanitizeString(failureMessage(stage, outcome), MAX_ERROR_BYTES);
     this.operation.outcome = outcome;
-    if (result !== undefined) this.operation.result = sanitize(result, MAX_RESULT_BYTES);
+    const projected = projectFabricAuditResult(this.operation.projectionRef, result);
+    if (projected !== undefined) {
+      this.operation.result = sanitize(projected.value, MAX_RESULT_BYTES);
+      this.operation.result.counts.droppedValues += projected.droppedValues;
+    } else if (result !== undefined) {
+      this.operation.droppedResultValues++;
+    }
   }
 }
 
@@ -388,9 +432,11 @@ export class FabricExecutionTraceRecorder {
       type: "call",
       sequence,
       ref: this.snapshotIdentifier(ref),
+      projectionRef: ref,
       ...(identity.provider ? { provider: this.snapshotIdentifier(identity.provider) } : {}),
       ...(identity.action ? { action: this.snapshotIdentifier(identity.action) } : {}),
-      args: sanitizeObject(args),
+      args: projectedArgs(ref, args),
+      droppedResultValues: 0,
     };
     this.#operations.push(operation);
     return new FabricExecutionTraceOperationHandle(this, operation);
@@ -399,14 +445,25 @@ export class FabricExecutionTraceRecorder {
   seal(
     outcome: FabricExecutionOutcomeV1,
     phases: readonly string[],
-    error?: string,
+    _error?: string,
   ): FabricExecutionTraceV1 {
     this.sealed = true;
     for (const operation of this.#operations) {
-      if (operation.outcome) continue;
-      operation.outcome = outcome === "timed_out" ? "timed_out" : outcome === "aborted" ? "aborted" : "failed";
-      operation.failureStage ??= "invoke";
-      if (error && !operation.error) operation.error = sanitizeString(error, MAX_ERROR_BYTES);
+      if (!operation.outcome) {
+        operation.outcome = outcome === "timed_out" ? "timed_out" : outcome === "aborted" ? "aborted" : "failed";
+        operation.failureStage ??= "invoke";
+      } else if (operation.outcome === "aborted" && outcome === "timed_out") {
+        // Host calls observe an aborted bridge signal for both cancellation and
+        // deadline expiry. The runtime's typed final termination is
+        // authoritative when sealing the durable operation.
+        operation.outcome = "timed_out";
+      }
+      if (operation.outcome !== "succeeded") {
+        operation.error = sanitizeString(
+          failureMessage(operation.failureStage ?? "invoke", operation.outcome),
+          MAX_ERROR_BYTES,
+        );
+      }
     }
 
     const counts: FabricExecutionTraceCountsV1 = {
@@ -417,6 +474,7 @@ export class FabricExecutionTraceRecorder {
     };
     const operations = this.#operations.map((operation): FabricExecutionTraceOperationV1 => {
       addCounts(counts, operation.args.counts);
+      counts.droppedValues += operation.droppedResultValues;
       if (operation.error) addCounts(counts, operation.error.counts);
       if (operation.result) addCounts(counts, operation.result.counts);
       return {
@@ -441,7 +499,8 @@ export class FabricExecutionTraceRecorder {
       counts.droppedValues += phases.length - boundedPhases.length;
       counts.truncatedValues++;
     }
-    const runError = error ? sanitizeString(error, MAX_ERROR_BYTES) : undefined;
+    const safeRunError = executionErrorMessage(outcome);
+    const runError = safeRunError ? sanitizeString(safeRunError, MAX_ERROR_BYTES) : undefined;
     if (runError) addCounts(counts, runError.counts);
     const trace: FabricExecutionTraceV1 = {
       kind: FABRIC_EXECUTION_TRACE_KIND,
@@ -453,48 +512,44 @@ export class FabricExecutionTraceRecorder {
       ...(runError ? { error: runError.value } : {}),
     };
 
-    for (let index = trace.operations.length - 1; serializedBytes(trace) > FABRIC_EXECUTION_TRACE_MAX_BYTES && index >= 0; index--) {
+    let traceBytes = serializedBytes(trace);
+    for (let index = trace.operations.length - 1; traceBytes > FABRIC_EXECUTION_TRACE_MAX_BYTES && index >= 0; index--) {
       const operation = trace.operations[index]!;
       if (operation.result !== undefined) {
         delete operation.result;
         trace.counts.droppedValues++;
+        traceBytes = serializedBytes(trace);
       }
     }
-    for (let index = trace.operations.length - 1; serializedBytes(trace) > FABRIC_EXECUTION_TRACE_MAX_BYTES && index >= 0; index--) {
+    for (let index = trace.operations.length - 1; traceBytes > FABRIC_EXECUTION_TRACE_MAX_BYTES && index >= 0; index--) {
       const operation = trace.operations[index]!;
       if (Object.keys(operation.args).length > 0) {
         operation.args = {};
         trace.counts.droppedValues++;
         trace.counts.truncatedValues++;
+        traceBytes = serializedBytes(trace);
       }
     }
-    while (serializedBytes(trace) > FABRIC_EXECUTION_TRACE_MAX_BYTES && trace.operations.length > 0) {
+    while (traceBytes > FABRIC_EXECUTION_TRACE_MAX_BYTES && trace.operations.length > 0) {
       trace.operations.pop();
       trace.counts.droppedOperations++;
+      traceBytes = serializedBytes(trace);
     }
-    while (serializedBytes(trace) > FABRIC_EXECUTION_TRACE_MAX_BYTES && trace.phases.length > 0) {
+    while (traceBytes > FABRIC_EXECUTION_TRACE_MAX_BYTES && trace.phases.length > 0) {
       trace.phases.pop();
       trace.counts.droppedValues++;
+      traceBytes = serializedBytes(trace);
     }
     return trace;
   }
 }
 
 export const executionOutcomeFromError = (
-  error: string | undefined,
+  error: unknown,
   signal?: AbortSignal,
 ): FabricExecutionOutcomeV1 => {
-  const reason = signal?.aborted
-    ? signal.reason instanceof Error
-      ? signal.reason.message
-      : String(signal.reason ?? "")
-    : "";
-  const message = `${error ?? ""} ${reason}`.toLowerCase();
-  if (message.includes("timed out") || message.includes("timeout")) return "timed_out";
-  if (signal?.aborted || message.includes("cancelled") || message.includes("canceled") || message.includes("aborted")) {
-    return "aborted";
-  }
-  return error ? "failed" : "succeeded";
+  if (signal?.aborted) return "aborted";
+  return error === undefined ? "succeeded" : "failed";
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>

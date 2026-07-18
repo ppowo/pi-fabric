@@ -155,7 +155,31 @@ return self.name;
       { ...options, timeoutMs: 50 },
     );
     expect(result.error).toContain("timed out");
+    expect(result.terminationReason).toBe("timed_out");
     expect(Date.now() - startedAt).toBeLessThan(2_000);
+  });
+
+  it("classifies timeout and abort words in thrown runtime errors as runtime failures", async () => {
+    for (const message of ["business timeout was rejected", "operation was aborted upstream"]) {
+      const result = await new QuickJsRuntime().execute(
+        `throw new Error(${JSON.stringify(message)});`,
+        async () => undefined,
+        options,
+      );
+      expect(result.error).toContain(message);
+      expect(result.terminationReason).toBe("runtime_error");
+    }
+  });
+
+  it("returns a typed aborted termination for an external signal", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("stop"));
+    const result = await new QuickJsRuntime().execute(
+      "return 1;",
+      async () => undefined,
+      { ...options, signal: controller.signal },
+    );
+    expect(result.terminationReason).toBe("aborted");
   });
 
   it("extends the active deadline before a blocking host call runs", async () => {

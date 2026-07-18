@@ -2,9 +2,16 @@ import releaseSyncVariant from "@jitl/quickjs-singlefile-mjs-release-sync";
 import { newQuickJSWASMModuleFromVariant } from "quickjs-emscripten-core";
 import ts from "typescript";
 
+export type FabricSandboxTerminationReason =
+  | "completed"
+  | "runtime_error"
+  | "timed_out"
+  | "aborted";
+
 export interface FabricSandboxResult {
   value: unknown;
   logs: string[];
+  terminationReason: FabricSandboxTerminationReason;
   error?: string;
 }
 
@@ -439,7 +446,12 @@ export class QuickJsRuntime {
     options: FabricSandboxOptions,
   ): Promise<FabricSandboxResult> {
     if (options.signal?.aborted) {
-      return { value: undefined, logs: [], error: "Execution cancelled" };
+      return {
+        value: undefined,
+        logs: [],
+        terminationReason: "aborted",
+        error: "Execution cancelled",
+      };
     }
     const module = await quickJsModule();
     const context = module.newContext();
@@ -598,12 +610,25 @@ export class QuickJsRuntime {
 
       const setupResult = context.evalCode(guestSetup, "pi-fabric-setup.js");
       if (setupResult.error) {
+        const deadlineExceeded = interruptedByDeadline || Date.now() > executionDeadlineAt;
+        if (deadlineExceeded) timedOut = true;
         const error = options.signal?.aborted
           ? "Execution cancelled"
-          : formatValue(context.dump(setupResult.error));
+          : deadlineExceeded
+            ? timeoutMessage()
+            : formatValue(context.dump(setupResult.error));
         setupResult.error.dispose();
         abortHostCalls(error);
-        return { value: undefined, logs, error };
+        return {
+          value: undefined,
+          logs,
+          terminationReason: options.signal?.aborted
+            ? "aborted"
+            : deadlineExceeded
+              ? "timed_out"
+              : "runtime_error",
+          error,
+        };
       }
       setupResult.value.dispose();
 
@@ -622,7 +647,16 @@ export class QuickJsRuntime {
             : formatValue(context.dump(evaluation.error));
         evaluation.error.dispose();
         abortHostCalls(error);
-        return { value: undefined, logs, error };
+        return {
+          value: undefined,
+          logs,
+          terminationReason: options.signal?.aborted
+            ? "aborted"
+            : deadlineExceeded
+              ? "timed_out"
+              : "runtime_error",
+          error,
+        };
       }
 
       activePromiseHandle = evaluation.value;
@@ -661,21 +695,35 @@ export class QuickJsRuntime {
             : formatValue(context.dump(resolution.error));
         resolution.error.dispose();
         abortHostCalls(error);
-        return { value: undefined, logs, error };
+        return {
+          value: undefined,
+          logs,
+          terminationReason: options.signal?.aborted
+            ? "aborted"
+            : deadlineExceeded
+              ? "timed_out"
+              : "runtime_error",
+          error,
+        };
       }
       const value = context.dump(resolution.value);
       resolution.value.dispose();
-      return { value, logs };
+      return { value, logs, terminationReason: "completed" };
     } catch (error) {
+      const deadlineExceeded = timedOut || interruptedByDeadline || Date.now() > executionDeadlineAt;
+      if (deadlineExceeded) timedOut = true;
       abortHostCalls(error instanceof Error ? error.message : String(error));
       return {
         value: undefined,
         logs,
+        terminationReason: cancelled ? "aborted" : deadlineExceeded ? "timed_out" : "runtime_error",
         error: cancelled
           ? "Execution cancelled"
-          : error instanceof Error
-            ? error.message
-            : String(error),
+          : deadlineExceeded
+            ? timeoutMessage()
+            : error instanceof Error
+              ? error.message
+              : String(error),
       };
     } finally {
       if (timeout) clearTimeout(timeout);

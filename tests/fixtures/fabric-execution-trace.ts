@@ -34,7 +34,14 @@ export const recordedIntegrationTrace = (): FabricExecutionTraceV1 => {
   mesh.succeed({ events: 1 });
   mcp.succeed({ issues: 1 });
 
-  return recorder.seal("succeeded", ["Inspect", "Implement", "Verify"]);
+  const trace = recorder.seal("succeeded", ["Inspect", "Implement", "Verify"]);
+  // Preserve a pre-hardening V1 sample so compaction and memory continue to
+  // prove that already-persisted traces containing command/error prose load.
+  trace.operations[1]!.error = "exact edit failure";
+  trace.operations[5]!.args = { command: "pnpm test", timeout: 30 };
+  trace.operations[5]!.error = "typed test failure";
+  trace.operations[6]!.args = { command: "pnpm test", timeout: 30 };
+  return trace;
 };
 
 export const recordedParallelTrace = (): FabricExecutionTraceV1 => {
