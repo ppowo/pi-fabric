@@ -106,14 +106,23 @@ interface PreparedComplexity {
   }>;
 }
 
+interface StateHeadCommitProof {
+  version: 1;
+  status: "pending" | "committed";
+}
+
 interface StateHeadValue {
   protocolVersion?: number;
+  commitProof?: StateHeadCommitProof;
+  transitionSequence?: number;
   label: string;
+  from?: string;
   to: string;
   summary: string;
   evidence?: string[];
   tags?: string[];
   kind: StateTransitionKind;
+  complexity?: StateTransitionComplexity;
   transitionId: string;
   certificationStatus?: StateCertificationStatus;
   certificate?: StateCertificate;
@@ -250,6 +259,8 @@ const EVENT_RESULT_LIMIT = 8;
 const EVENT_TARGET_LIMIT = 16;
 const EVENT_ROLLBACK_LIMIT = 8;
 const TRANSITION_PROTOCOL_VERSION = 1;
+const DURABLE_HEAD_PROTOCOL_VERSION = 2;
+const HEAD_COMMIT_PROOF_VERSION = 1;
 
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
@@ -549,6 +560,32 @@ const toRecord = (
   };
 };
 
+const toHeadRecord = (head: StateHead): StateTransitionRecord | undefined => {
+  if (
+    typeof head.transitionSequence !== "number" ||
+    !Number.isSafeInteger(head.transitionSequence) ||
+    head.transitionSequence < 1
+  ) {
+    return undefined;
+  }
+  return {
+    transitionId: head.transitionId,
+    sequence: head.transitionSequence,
+    label: head.label,
+    ...(head.from !== undefined ? { from: head.from } : {}),
+    to: head.to,
+    summary: head.summary,
+    ...(head.evidence !== undefined ? { evidence: head.evidence } : {}),
+    ...(head.tags !== undefined ? { tags: head.tags } : {}),
+    kind: head.kind,
+    ...(head.complexity !== undefined ? { complexity: head.complexity } : {}),
+    ...(head.certificationStatus !== undefined
+      ? { certificationStatus: head.certificationStatus }
+      : {}),
+    ts: head.ts,
+  };
+};
+
 const toCertificationTarget = (value: unknown): StateCertificationTarget | undefined => {
   if (!value || typeof value !== "object") return undefined;
   const target = value as Record<string, unknown>;
@@ -670,6 +707,59 @@ const toCertificate = (
   };
 };
 
+const durableCurrentCertificate = (
+  head: StateHead,
+  latestOutcomes?: ReadonlyMap<string, TransitionOutcome>,
+): StateCertificate | undefined => {
+  const certificate = head.certificate;
+  if (
+    !certificate ||
+    certificate.certificationStatus !== "certified" ||
+    typeof certificate.certificateId !== "string" ||
+    typeof certificate.sequence !== "number" ||
+    !Array.isArray(certificate.targets) ||
+    typeof certificate.evidenceDigest !== "string" ||
+    typeof certificate.resultDigest !== "string" ||
+    typeof certificate.ts !== "number"
+  ) {
+    return undefined;
+  }
+  const certificateHead = toCertificationHead(certificate.head);
+  const targets = certificate.targets
+    .map(toCertificationTarget)
+    .filter((target): target is StateCertificationTarget => target !== undefined);
+  const target = targets.find(
+    (item) =>
+      item.transitionId === head.transitionId &&
+      item.label === head.label &&
+      item.to === head.to,
+  );
+  const latestOutcome = latestOutcomes?.get(head.transitionId);
+  if (
+    !target ||
+    certificateHead === null ||
+    certificateHead.transitionId !== head.transitionId ||
+    (certificateHead.labelDigest
+      ? certificateHead.labelDigest !== digest(head.label)
+      : certificateHead.label !== head.label) ||
+    (certificateHead.toDigest
+      ? certificateHead.toDigest !== digest(head.to)
+      : certificateHead.to !== head.to) ||
+    certificateHead.version !== head.version ||
+    (latestOutcome !== undefined &&
+      (latestOutcome.phase !== "certified" ||
+        latestOutcome.event.sequence !== certificate.sequence))
+  ) {
+    return undefined;
+  }
+  return {
+    ...certificate,
+    targets,
+    head: certificateHead,
+    current: true,
+  };
+};
+
 const toVerifyResult = (
   claim: string,
   command: string,
@@ -787,14 +877,18 @@ export class StateStore {
           (transition) => transition.transitionId === storedHead.transitionId,
         )
       : undefined;
-    const head =
-      storedHead && headRecord?.certificate
-        ? {
-            ...storedHead,
-            certificationStatus: "certified" as const,
-            certificate: headRecord.certificate,
-          }
-        : storedHead;
+    const head = storedHead
+      ? (() => {
+          const { certificate: _storedCertificate, ...baseHead } = storedHead;
+          return headRecord?.certificate
+            ? {
+                ...baseHead,
+                certificationStatus: "certified" as const,
+                certificate: headRecord.certificate,
+              }
+            : baseHead;
+        })()
+      : null;
     const complexity = {
       files: ledgers.length,
       decisionPoints: ledgers.reduce((total, ledger) => total + ledger.count, 0),
@@ -815,6 +909,24 @@ export class StateStore {
     const entry = this.store.get(CURRENT_KEY);
     if (!entry) return null;
     const head = this.toHead(entry);
+    if (head.protocolVersion === DURABLE_HEAD_PROTOCOL_VERSION) {
+      const proof = head.commitProof;
+      const hasValidSequence =
+        typeof head.transitionSequence === "number" &&
+        Number.isSafeInteger(head.transitionSequence) &&
+        head.transitionSequence > 0;
+      if (
+        !hasValidSequence ||
+        proof?.version !== HEAD_COMMIT_PROOF_VERSION
+      ) {
+        return null;
+      }
+      if (proof.status === "committed") return head;
+      if (proof.status !== "pending") return null;
+      return committedTransitionIds(this.stateEvents()).has(head.transitionId)
+        ? head
+        : null;
+    }
     const events = this.stateEvents();
     const committedIds = committedTransitionIds(events);
     if (head.protocolVersion === TRANSITION_PROTOCOL_VERSION) {
@@ -889,6 +1001,7 @@ export class StateStore {
     });
     const applied: AppliedStateWrite[] = [];
     let headWrite: AppliedStateWrite | undefined;
+    let commitMarkerPublished = false;
     try {
       for (const update of preparedComplexity?.updates ?? []) {
         const written = await this.store.put({
@@ -900,11 +1013,18 @@ export class StateStore {
         applied.push({ key: update.key, before: update.before, written });
       }
       const payload: StateHeadValue = {
-        protocolVersion: TRANSITION_PROTOCOL_VERSION,
+        protocolVersion: DURABLE_HEAD_PROTOCOL_VERSION,
+        commitProof: {
+          version: HEAD_COMMIT_PROOF_VERSION,
+          status: "pending",
+        },
+        transitionSequence: event.sequence,
         label: input.label,
+        ...(input.from !== undefined ? { from: input.from } : {}),
         to: input.to,
         summary: input.summary,
         kind,
+        ...(preparedComplexity ? { complexity: preparedComplexity.record } : {}),
         transitionId: event.id,
         ts,
         ...(input.evidence ? { evidence: input.evidence } : {}),
@@ -935,8 +1055,16 @@ export class StateStore {
           ts: Date.now(),
         },
       });
-      return { event, head: this.toHead(advanced.entry) };
+      commitMarkerPublished = true;
+      const committedHead = await this.markHeadCommitted(advanced.entry, identity);
+      return { event, head: this.toHead(committedHead) };
     } catch (error) {
+      if (commitMarkerPublished) {
+        throw new Error(
+          `State transition committed, but its durable head proof remains pending: ${boundedError(error)}`,
+          { cause: error },
+        );
+      }
       const rollback = await this.rollbackWrites(
         [...(headWrite ? [headWrite] : []), ...applied.reverse()],
         identity,
@@ -1000,6 +1128,40 @@ export class StateStore {
         ...(reportingError ? [`rejection reporting failed: ${reportingError}`] : []),
       ].join("; ");
       throw new Error(detail, { cause: error });
+    }
+  }
+
+  private async markHeadCommitted(
+    pending: MeshStateEntry,
+    identity: MeshIdentity,
+  ): Promise<MeshStateEntry> {
+    const value = pending.value as StateHeadValue;
+    try {
+      return await this.store.put({
+        key: CURRENT_KEY,
+        value: {
+          ...value,
+          commitProof: {
+            version: HEAD_COMMIT_PROOF_VERSION,
+            status: "committed",
+          },
+        } satisfies StateHeadValue,
+        ifVersion: pending.version,
+        identity,
+      });
+    } catch (error) {
+      if (!isCasError(error)) throw error;
+      const current = this.store.get(CURRENT_KEY);
+      if (
+        current &&
+        (current.value as StateHeadValue).transitionId === value.transitionId &&
+        (current.value as StateHeadValue).commitProof?.version ===
+          HEAD_COMMIT_PROOF_VERSION &&
+        (current.value as StateHeadValue).commitProof?.status === "committed"
+      ) {
+        return current;
+      }
+      return pending;
     }
   }
 
@@ -1119,11 +1281,20 @@ export class StateStore {
   } {
     const events = this.stateEvents();
     const committedIds = committedTransitionIds(events);
+    const currentHead = this.getHead();
     const records: StateTransitionRecord[] = [];
     for (const event of events) {
       const record = toRecord(event, committedIds);
       if (record) records.push(record);
     }
+    if (
+      currentHead &&
+      !records.some((record) => record.transitionId === currentHead.transitionId)
+    ) {
+      const currentRecord = toHeadRecord(currentHead);
+      if (currentRecord) records.push(currentRecord);
+    }
+    records.sort((left, right) => left.sequence - right.sequence);
     let lastRepresentation = -1;
     for (let index = records.length - 1; index >= 0; index--) {
       if (records[index]?.kind === "representation") {
@@ -1136,15 +1307,26 @@ export class StateStore {
         ? records
         : records.slice(lastRepresentation);
     const visibleIds = new Set(visibleRecords.map((record) => record.transitionId));
-    const currentHead = this.getHead();
     const latestOutcomes = latestTransitionOutcomes(events);
-    const certifications = events
+    const eventCertifications = events
       .map((event) => toCertificate(event, currentHead, latestOutcomes))
       .filter((certificate): certificate is StateCertificate => certificate !== undefined)
       .filter((certificate) =>
         certificate.targets.every((target) => visibleIds.has(target.transitionId)),
       )
       .reverse();
+    const durableCertificate = currentHead
+      ? durableCurrentCertificate(currentHead, latestOutcomes)
+      : undefined;
+    const certifications = durableCertificate
+      ? [
+          durableCertificate,
+          ...eventCertifications.filter(
+            (certificate) =>
+              certificate.certificateId !== durableCertificate.certificateId,
+          ),
+        ]
+      : eventCertifications;
     const certificatesBySequence = new Map(
       certifications.map((certificate) => [certificate.sequence, certificate]),
     );
@@ -1154,6 +1336,9 @@ export class StateStore {
       if (outcome?.phase !== "certified") continue;
       const certificate = certificatesBySequence.get(outcome.event.sequence);
       if (certificate) latestCertificate.set(record.transitionId, certificate);
+    }
+    if (durableCertificate) {
+      latestCertificate.set(currentHead!.transitionId, durableCertificate);
     }
     const archiveBoundaryId =
       input.includeArchived !== true && lastRepresentation > 0
@@ -1373,6 +1558,78 @@ export class StateStore {
     };
   }
 
+  private async persistCurrentCertificate(
+    certificate: StateCertificate,
+    verificationHead: StateHead,
+    identity: MeshIdentity,
+  ): Promise<StateCertificate> {
+    const current = this.store.get(CURRENT_KEY);
+    const currentValue = current?.value as StateHeadValue | undefined;
+    if (
+      !current ||
+      current.version !== verificationHead.version ||
+      currentValue?.transitionId !== verificationHead.transitionId ||
+      currentValue.label !== verificationHead.label ||
+      currentValue.to !== verificationHead.to
+    ) {
+      return { ...certificate, current: false };
+    }
+    const certificateHead = certificate.head;
+    if (certificateHead === null) return { ...certificate, current: false };
+    const nextVersion = current.version + 1;
+    const durableCertificate: StateCertificate = {
+      ...certificate,
+      head: { ...certificateHead, version: nextVersion },
+      current: true,
+    };
+    try {
+      const written = await this.store.put({
+        key: CURRENT_KEY,
+        value: {
+          ...currentValue,
+          certificate: durableCertificate,
+        } satisfies StateHeadValue,
+        ifVersion: current.version,
+        identity,
+      });
+      return written.version === nextVersion
+        ? durableCertificate
+        : { ...durableCertificate, current: false };
+    } catch (error) {
+      if (isCasError(error)) return { ...certificate, current: false };
+      throw error;
+    }
+  }
+
+  private async revokeCurrentCertificate(
+    verificationHead: StateHead,
+    identity: MeshIdentity,
+  ): Promise<void> {
+    const current = this.store.get(CURRENT_KEY);
+    const currentValue = current?.value as StateHeadValue | undefined;
+    if (
+      !current ||
+      current.version !== verificationHead.version ||
+      currentValue?.transitionId !== verificationHead.transitionId ||
+      currentValue.label !== verificationHead.label ||
+      currentValue.to !== verificationHead.to ||
+      currentValue.certificate === undefined
+    ) {
+      return;
+    }
+    const { certificate: _certificate, ...withoutCertificate } = currentValue;
+    try {
+      await this.store.put({
+        key: CURRENT_KEY,
+        value: withoutCertificate,
+        ifVersion: current.version,
+        identity,
+      });
+    } catch (error) {
+      if (!isCasError(error)) throw error;
+    }
+  }
+
   async verify(input: {
     labels?: string[];
     includeArchived?: boolean;
@@ -1517,6 +1774,11 @@ export class StateStore {
       targetChunks.push(boundedTargets.slice(index, index + EVENT_TARGET_LIMIT));
     }
     if (targetChunks.length === 0) targetChunks.push([]);
+    const targetsCurrentHead =
+      verificationHead !== null &&
+      certificationTargets.some(
+        (target) => target.transitionId === verificationHead.transitionId,
+      );
     const publishViolation = async (): Promise<string | undefined> => {
       const nonConfirmed = results.filter((result) => result.status !== "confirmed");
       try {
@@ -1550,9 +1812,21 @@ export class StateStore {
         return boundedError(error);
       }
     };
+    const recordViolation = async (): Promise<string | undefined> => {
+      const publishError = await publishViolation();
+      if (publishError || !targetsCurrentHead || !verificationHead) {
+        return publishError;
+      }
+      try {
+        await this.revokeCurrentCertificate(verificationHead, input.identity);
+        return undefined;
+      } catch (error) {
+        return `current certificate revocation failed: ${boundedError(error)}`;
+      }
+    };
 
     if (!certified) {
-      const reportingError = await publishViolation();
+      const reportingError = await recordViolation();
       return {
         results,
         certified: false,
@@ -1596,6 +1870,13 @@ export class StateStore {
       if (!certificateEvent) throw new Error("State certificate event was not recorded");
       const certificate = toCertificate(certificateEvent, this.getHead());
       if (!certificate) throw new Error("State certificate event was malformed");
+      const durableCertificate = verificationHead && certificate.current
+        ? await this.persistCurrentCertificate(
+            certificate,
+            verificationHead,
+            input.identity,
+          )
+        : certificate;
       return {
         results,
         certified: true,
@@ -1604,7 +1885,7 @@ export class StateStore {
         evidenceDigest,
         resultDigest,
         failures,
-        certificate,
+        certificate: durableCertificate,
       };
     } catch (error) {
       certified = false;
@@ -1615,7 +1896,7 @@ export class StateStore {
         error: certificationReportingError,
       });
       resultDigest = digest({ results, failures });
-      const violationReportingError = await publishViolation();
+      const violationReportingError = await recordViolation();
       const reportingError = violationReportingError
         ? `${certificationReportingError}; violation reporting failed: ${violationReportingError}`
         : certificationReportingError;

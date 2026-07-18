@@ -22,10 +22,10 @@ const identity: MeshIdentity = {
   sessionId: "test",
 };
 
-const createStore = (): MeshStore => {
+const createStore = (maxReadEvents = 100): MeshStore => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-state-"));
   roots.push(root);
-  return new MeshStore(root, 64 * 1024, 100);
+  return new MeshStore(root, 64 * 1024, maxReadEvents);
 };
 
 const context: FabricInvocationContext = {
@@ -53,7 +53,7 @@ describe("StateStore", () => {
       identity,
     );
     expect(head.to).toBe("drafted");
-    expect(head.version).toBe(1);
+    expect(head.version).toBe(2);
     expect(head.label).toBe("init");
 
     const second = await store.transition(
@@ -61,7 +61,7 @@ describe("StateStore", () => {
       identity,
     );
     expect(second.head.to).toBe("reviewed");
-    expect(second.head.version).toBe(2);
+    expect(second.head.version).toBe(4);
 
     const entry = mesh.get(CURRENT_KEY);
     expect(entry?.value).toMatchObject({ to: "reviewed", label: "review" });
@@ -360,7 +360,7 @@ describe("StateStore", () => {
       certificate: {
         current: true,
         targets: [{ transitionId: transition.event.id, label: "checked" }],
-        head: { transitionId: transition.event.id, version: 1 },
+        head: { transitionId: transition.event.id, version: 3 },
       },
     });
     expect(first.evidenceDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
@@ -376,7 +376,7 @@ describe("StateStore", () => {
     expect(certificateEvents[0]?.data).toMatchObject({
       certificationStatus: "certified",
       targets: [{ transitionId: transition.event.id, label: "checked", to: "checked-v1" }],
-      head: { transitionId: transition.event.id, version: 1 },
+      head: { transitionId: transition.event.id, version: 2 },
       evidenceDigest: first.evidenceDigest,
       resultDigest: first.resultDigest,
     });
@@ -790,7 +790,7 @@ describe("StateStore", () => {
             transitionId: "legacy-concurrent-head",
             ts: Date.now(),
           },
-          ifVersion: 1,
+          ifVersion: mesh.get(CURRENT_KEY)!.version,
           identity,
         });
       }
@@ -828,11 +828,11 @@ describe("StateStore", () => {
       { label: "init", to: "drafted", summary: "draft" },
       identity,
     );
-    expect(first.head.version).toBe(1);
+    expect(first.head.version).toBe(2);
 
     // Simulate a concurrent writer advancing the head version without
     // changing the to-label our transition chains from. Our appended event
-    // is already durable; the CAS retry must recover against version 2.
+    // is already durable; the CAS retry must recover against version 3.
     await mesh.put({
       key: CURRENT_KEY,
       value: {
@@ -843,10 +843,10 @@ describe("StateStore", () => {
         transitionId: "concurrent",
         ts: Date.now(),
       },
-      ifVersion: 1,
+      ifVersion: 2,
       identity,
     });
-    expect(mesh.get(CURRENT_KEY)?.version).toBe(2);
+    expect(mesh.get(CURRENT_KEY)?.version).toBe(3);
 
     const advanced = await store.advanceHead({
       payload: {
@@ -859,10 +859,10 @@ describe("StateStore", () => {
       },
       from: "drafted",
       force: false,
-      expectedVersion: 1,
+      expectedVersion: 2,
       identity,
     });
-    expect(advanced.version).toBe(3);
+    expect(advanced.version).toBe(4);
     expect(advanced.value).toMatchObject({ to: "reviewed", label: "review" });
   });
 
@@ -884,7 +884,7 @@ describe("StateStore", () => {
         transitionId: "concurrent",
         ts: Date.now(),
       },
-      ifVersion: 1,
+      ifVersion: 2,
       identity,
     });
 
@@ -900,12 +900,281 @@ describe("StateStore", () => {
         },
         from: "drafted",
         force: false,
-        expectedVersion: 1,
+        expectedVersion: 2,
         identity,
       }),
     ).rejects.toThrow(
       `State contention: head is at "merged", cannot transition from "drafted"`,
     );
+  });
+
+  it("retains the committed current head, synthesized record, certificate, and transitionability with maxReadEvents=5", async () => {
+    const mesh = createStore(5);
+    const store = new StateStore(mesh);
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-retained-head-"));
+    roots.push(project);
+    fs.mkdirSync(path.join(project, "src"));
+    const file = "src/current.ts";
+    fs.writeFileSync(path.join(project, file), "if (ready) run();\n");
+
+    await store.transition(
+      {
+        label: "baseline",
+        to: "before",
+        summary: "complexity baseline",
+        complexity: { files: [file] },
+      },
+      identity,
+      project,
+    );
+    fs.writeFileSync(path.join(project, file), "run();\n");
+    const current = await store.transition(
+      {
+        label: "retained-current",
+        from: "before",
+        to: "after",
+        summary: "the complete current transition survives retention",
+        evidence: ["test -f src/current.ts"],
+        tags: ["retention"],
+        kind: "representation",
+        complexity: { files: [file] },
+      },
+      identity,
+      project,
+    );
+    expect(current.head).toMatchObject({
+      commitProof: { version: 1, status: "committed" },
+      transitionSequence: current.event.sequence,
+      certificationStatus: "pending",
+    });
+
+    for (let index = 0; index < 6; index++) {
+      expect((await store.verify({ cwd: project, identity })).certified).toBe(true);
+    }
+    expect(
+      mesh.read({ topic: STATE_TOPIC }).some(
+        (event) => event.id === current.event.id || event.kind === "transition.committed",
+      ),
+    ).toBe(false);
+
+    expect(store.getHead()).toMatchObject({
+      transitionId: current.event.id,
+      to: "after",
+      commitProof: { status: "committed" },
+    });
+    expect(store.history().transitions).toEqual([
+      expect.objectContaining({
+        transitionId: current.event.id,
+        sequence: current.event.sequence,
+        label: "retained-current",
+        from: "before",
+        to: "after",
+        summary: "the complete current transition survives retention",
+        evidence: ["test -f src/current.ts"],
+        tags: ["retention"],
+        kind: "representation",
+        complexity: expect.objectContaining({ netDelta: -1 }),
+        certificationStatus: "certified",
+        certificate: expect.objectContaining({ current: true }),
+      }),
+    ]);
+    expect(store.get()).toMatchObject({
+      head: {
+        transitionId: current.event.id,
+        certificationStatus: "certified",
+        certificate: { current: true },
+      },
+      certification: {
+        current: { targets: [{ transitionId: current.event.id }] },
+      },
+    });
+
+    const next = await store.transition(
+      {
+        label: "after-retention",
+        from: "after",
+        to: "next",
+        summary: "future transitions remain possible",
+      },
+      identity,
+      project,
+    );
+    expect(next.head).toMatchObject({ to: "next", commitProof: { status: "committed" } });
+  });
+
+  it("durably revokes a current certificate after failure and event aging", async () => {
+    const mesh = createStore(5);
+    const store = new StateStore(mesh);
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-retained-revoke-"));
+    roots.push(project);
+    fs.writeFileSync(path.join(project, "passing"), "yes");
+    const transition = await store.transition(
+      {
+        label: "retained-revocation",
+        to: "checked",
+        summary: "the marker exists",
+        evidence: ["test -f passing"],
+      },
+      identity,
+      project,
+    );
+    expect((await store.verify({ cwd: project, identity })).certified).toBe(true);
+    fs.rmSync(path.join(project, "passing"));
+    expect(await store.verify({ cwd: project, identity })).toMatchObject({
+      certified: false,
+      violated: true,
+    });
+    for (let index = 0; index < 6; index++) {
+      await mesh.publish({
+        topic: STATE_TOPIC,
+        kind: "retention.noise",
+        from: identity,
+        data: { index },
+      });
+    }
+
+    expect(store.getHead()).toMatchObject({ transitionId: transition.event.id });
+    expect(store.get().certification.current).toBeNull();
+    expect(store.history().transitions).toEqual([
+      expect.not.objectContaining({ certificate: expect.anything() }),
+    ]);
+  });
+
+  it("retains a current certificate past the default 500-event read window", async () => {
+    const mesh = createStore(500);
+    const store = new StateStore(mesh);
+    const transition = await store.transition(
+      {
+        label: "default-retention",
+        to: "durable",
+        summary: "default retention cannot erase the current state",
+        evidence: ["true"],
+      },
+      identity,
+    );
+    expect((await store.verify({ cwd: os.tmpdir(), identity })).certified).toBe(true);
+    for (let index = 0; index < 501; index++) {
+      await mesh.publish({
+        topic: STATE_TOPIC,
+        kind: "retention.noise",
+        from: identity,
+        data: { index },
+      });
+    }
+
+    expect(store.get().head).toMatchObject({ transitionId: transition.event.id });
+    expect(store.history().transitions).toMatchObject([
+      { transitionId: transition.event.id, certificate: { current: true } },
+    ]);
+    expect(store.get().certification.current).toMatchObject({ current: true });
+  });
+
+  it("accepts pending heads only with a retained commit marker and never accepts rejected proposals", async () => {
+    const mesh = createStore(5);
+    const store = new StateStore(mesh);
+    const proposal = await mesh.publish({
+      topic: STATE_TOPIC,
+      kind: "transition",
+      from: identity,
+      data: {
+        protocolVersion: 1,
+        phase: "proposed",
+        label: "pending",
+        to: "pending-state",
+        summary: "pending proposal",
+        kind: "state",
+        ts: Date.now(),
+      },
+    });
+    await mesh.put({
+      key: CURRENT_KEY,
+      value: {
+        protocolVersion: 2,
+        commitProof: { version: 1, status: "pending" },
+        transitionSequence: proposal.sequence,
+        label: "pending",
+        to: "pending-state",
+        summary: "pending proposal",
+        kind: "state",
+        transitionId: proposal.id,
+        ts: Date.now(),
+      },
+      identity,
+    });
+    expect(store.getHead()).toBeNull();
+    await mesh.publish({
+      topic: STATE_TOPIC,
+      kind: "transition.committed",
+      from: identity,
+      data: { transitionId: proposal.id, phase: "committed" },
+    });
+    expect(store.getHead()).toMatchObject({ transitionId: proposal.id });
+    await mesh.publish({
+      topic: STATE_TOPIC,
+      kind: "transition.rejected",
+      from: identity,
+      data: { transitionId: proposal.id, phase: "rejected" },
+    });
+    expect(store.getHead()).toBeNull();
+    for (let index = 0; index < 5; index++) {
+      await mesh.publish({
+        topic: STATE_TOPIC,
+        kind: "retention.noise",
+        from: identity,
+        data: { index },
+      });
+    }
+    expect(store.getHead()).toBeNull();
+  });
+
+  it("does not make a certificate current when its persistence CAS loses to head advancement", async () => {
+    const mesh = createStore();
+    const store = new StateStore(mesh);
+    const transition = await store.transition(
+      {
+        label: "certificate-race",
+        to: "before-race",
+        summary: "the evidence passes before contention",
+        evidence: ["true"],
+      },
+      identity,
+    );
+    const put = mesh.put.bind(mesh);
+    let advanced = false;
+    vi.spyOn(mesh, "put").mockImplementation(async (input) => {
+      if (
+        input.key === CURRENT_KEY &&
+        (input.value as { certificate?: unknown }).certificate !== undefined &&
+        !advanced
+      ) {
+        advanced = true;
+        await put({
+          key: CURRENT_KEY,
+          value: {
+            label: "concurrent",
+            to: "after-race",
+            summary: "a concurrent transition won",
+            kind: "state",
+            transitionId: "concurrent-head",
+            ts: Date.now(),
+          },
+          ifVersion: input.ifVersion!,
+          identity,
+        });
+      }
+      return put(input);
+    });
+
+    const verification = await store.verify({ cwd: os.tmpdir(), identity });
+    expect(verification).toMatchObject({
+      certified: true,
+      certificate: {
+        current: false,
+        targets: [{ transitionId: transition.event.id }],
+      },
+    });
+    expect(store.getHead()).toMatchObject({ transitionId: "concurrent-head" });
+    expect(store.get().certification.current).toBeNull();
   });
 
   it("treats a representation transition as a Schema world-model revision", async () => {
