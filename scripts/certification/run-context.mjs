@@ -247,11 +247,35 @@ const createMemoryCertification = async ({ agentDir, cwd, sessionDir, contextRes
     invocationContext(cwd),
   );
   const rareHit = recalled.digestHits.find((hit) => hit.sessionId === SessionManager.open(rareSessionFile).getSessionId());
-  const rareExpansion = await provider.invoke(
-    "expand",
-    { session: rareSessionFile, entryIds: [rareEntryId] },
-    invocationContext(cwd),
+  const rareHydration = rareHit
+    ? await provider.invoke(
+      "recall",
+      {
+        scope: `session:${rareHit.sessionFile}`,
+        expectedSourceHash: rareHit.sourceHash,
+        query: "cold_exact_quasar_7f91 ΩMEGA雪",
+        queryMode: "literal",
+        pageSize: 20,
+      },
+      invocationContext(cwd),
+    )
+    : { segments: [], error: { code: "missing_cold_pointer" } };
+  const hydratedEntryIds = rareHydration.segments.flatMap((segment) =>
+    segment.entries
+      .filter((item) => item.matched && item.entry.entryId)
+      .map((item) => item.entry.entryId),
   );
+  const rareExpansion = rareHit
+    ? await provider.invoke(
+      "expand",
+      {
+        session: rareHit.sessionFile,
+        expectedSourceHash: rareHit.sourceHash,
+        entryIds: hydratedEntryIds,
+      },
+      invocationContext(cwd),
+    )
+    : { expanded: [], error: { code: "missing_cold_pointer" } };
 
   const sourceById = new Map(
     normalizeSession(contextFile, Number.MAX_SAFE_INTEGER).entries
@@ -276,9 +300,12 @@ const createMemoryCertification = async ({ agentDir, cwd, sessionDir, contextRes
     coverageComplete: recalled.coverage.complete,
     rareSessionTier: rareTier,
     rareRecallExact: Boolean(rareHit)
-      && rareHit.entryIds.includes(rareEntryId)
-      && rareExpansion.expanded.length === 1
-      && rareExpansion.expanded[0].text === coldRareFact,
+      && rareHydration.error === undefined
+      && hydratedEntryIds.includes(rareEntryId)
+      && rareExpansion.error === undefined
+      && rareExpansion.expanded.some(
+        (entry) => entry.entryId === rareEntryId && entry.text === coldRareFact,
+      ),
     emittedAddresses: emittedIds.length,
     expandedAddresses: expandedCorrectly,
     addressExpansionRate: emittedIds.length === 0 ? 0 : expandedCorrectly / emittedIds.length,
