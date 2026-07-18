@@ -26,6 +26,8 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "certify:context": "pnpm run build && node scripts/certify-context.mjs",
+    "benchmark:real-resume": "pnpm run build && node scripts/benchmark-real-resume.mjs",
     "lint:dead": "knip --no-gitignore",
     "check": "pnpm run typecheck && pnpm run test && pnpm run lint:dead && pnpm run build",
     "prepack": "pnpm run check"
