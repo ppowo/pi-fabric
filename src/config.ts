@@ -113,6 +113,8 @@ export interface FabricMemoryConfig {
   indexDir?: string;
   maxSessions: number;
   maxEntryChars: number;
+  indexThinking: boolean;
+  indexToolOutput: boolean;
   hotSessions?: number;
   digestTerms?: number;
   maxColdVocabularyBytes?: number;
@@ -221,6 +223,8 @@ export const DEFAULT_FABRIC_CONFIG: FabricConfig = {
     enabled: true,
     maxSessions: 500,
     maxEntryChars: 2_000,
+    indexThinking: false,
+    indexToolOutput: true,
     hotSessions: 50,
     digestTerms: 200,
     maxColdVocabularyBytes: 512 * 1024,
@@ -585,6 +589,14 @@ export const normalizeFabricConfig = (input: Record<string, unknown>): FabricCon
         DEFAULT_FABRIC_CONFIG.memory.maxEntryChars,
         100,
         1_000_000,
+      ),
+      indexThinking: booleanValue(
+        memory.indexThinking,
+        DEFAULT_FABRIC_CONFIG.memory.indexThinking ?? false,
+      ),
+      indexToolOutput: booleanValue(
+        memory.indexToolOutput,
+        DEFAULT_FABRIC_CONFIG.memory.indexToolOutput ?? true,
       ),
       hotSessions: boundedInteger(
         memory.hotSessions,

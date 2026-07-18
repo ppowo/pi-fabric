@@ -5,6 +5,7 @@ import type {
   FabricProviderListRequest,
 } from "../protocol.js";
 import type { FabricMemoryConfig } from "../config.js";
+import path from "node:path";
 import {
   AmbiguousSessionError,
   enumerateAllSessions,
@@ -13,6 +14,8 @@ import {
   type ResolveScopeInput,
   type SessionRef,
 } from "../memory/discovery.js";
+import type { LiveSessionBranch, MemoryBranches } from "../memory/lineage.js";
+import { reconstructSessionLineage } from "../memory/lineage.js";
 import { expandSessionEntriesChecked, normalizeSession } from "../memory/normalize.js";
 import {
   DEFAULT_HOT_SESSIONS,
@@ -54,6 +57,15 @@ const descriptors: FabricActionDescriptor[] = [
           type: "string",
           description: "SHA-256 from a prior pointer; stale sources are refused.",
         },
+        expectedLineageFingerprint: {
+          type: "string",
+          description: "Active-lineage fingerprint from a prior pointer; changed leaves are refused.",
+        },
+        branches: {
+          type: "string",
+          enum: ["active", "all"],
+          description: "Search the active parent-linked path (default) or every branch.",
+        },
         scope: {
           type: "string",
           description:
@@ -94,6 +106,15 @@ const descriptors: FabricActionDescriptor[] = [
           type: "string",
           description: "SHA-256 from a prior pointer; stale sources are refused.",
         },
+        expectedLineageFingerprint: {
+          type: "string",
+          description: "Active-lineage fingerprint from a prior pointer; changed leaves are refused.",
+        },
+        branches: {
+          type: "string",
+          enum: ["active", "all"],
+          description: "Expand on the active parent-linked path (default) or across every branch.",
+        },
         indices: { type: "array", items: { type: "number", minimum: 0 } },
         entryIds: { type: "array", items: { type: "string" } },
         operationAddresses: { type: "array", items: { type: "string" } },
@@ -120,6 +141,11 @@ const descriptors: FabricActionDescriptor[] = [
       type: "object",
       properties: {
         scope: { type: "string" },
+        branches: {
+          type: "string",
+          enum: ["active", "all"],
+          description: "Count the active parent-linked path (default) or every branch.",
+        },
       },
       additionalProperties: false,
     },
@@ -134,11 +160,27 @@ export interface MemoryProviderContext {
   config: FabricMemoryConfig;
   sessionId?: string;
   sessionFile?: string;
+  getLiveBranch?: () => LiveSessionBranch;
 }
 
-const resolveIndexOptions = (config: FabricMemoryConfig, agentDir: string): MemoryIndexOptions => ({
+const parseBranches = (value: unknown, action: string): MemoryBranches => {
+  if (value === undefined) return "active";
+  if (value === "active" || value === "all") return value;
+  throw new Error(`${action} branches must be "active" or "all"`);
+};
+
+const resolveIndexOptions = (
+  config: FabricMemoryConfig,
+  agentDir: string,
+  branches: MemoryBranches,
+  liveBranchForFile?: MemoryIndexOptions["liveBranchForFile"],
+): MemoryIndexOptions => ({
   indexDir: config.indexDir ?? `${agentDir}/fabric/memory-index`,
   maxEntryChars: config.maxEntryChars,
+  branches,
+  indexThinking: config.indexThinking ?? false,
+  indexToolOutput: config.indexToolOutput ?? true,
+  ...(liveBranchForFile ? { liveBranchForFile } : {}),
   hotSessions: config.hotSessions ?? DEFAULT_HOT_SESSIONS,
   digestTerms: config.digestTerms ?? 200,
   ...(config.maxColdVocabularyBytes === undefined
@@ -176,16 +218,33 @@ const resolveRefs = (
   return resolveScope(input);
 };
 
+const liveBranchResolver = (
+  context: MemoryProviderContext,
+): MemoryIndexOptions["liveBranchForFile"] | undefined => {
+  if (!context.sessionFile || !context.getLiveBranch) return undefined;
+  const current = path.resolve(context.sessionFile);
+  return (sessionFile) => path.resolve(sessionFile) === current
+    ? context.getLiveBranch?.()
+    : undefined;
+};
+
 const stalePointerError = (
   sessionFile: string,
-  expectedSourceHash: string,
+  expectedSourceHash: string | undefined,
   actualSourceHash: string,
+  expectedLineageFingerprint?: string,
+  actualLineageFingerprint?: string,
 ) => ({
   code: "stale_pointer",
-  message: "Session source changed after the pointer was issued.",
+  message: expectedLineageFingerprint !== undefined &&
+    expectedLineageFingerprint !== actualLineageFingerprint
+    ? "Session active lineage changed after the pointer was issued."
+    : "Session source changed after the pointer was issued.",
   sessionFile,
-  expectedSourceHash,
+  ...(expectedSourceHash === undefined ? {} : { expectedSourceHash }),
   actualSourceHash,
+  ...(expectedLineageFingerprint === undefined ? {} : { expectedLineageFingerprint }),
+  ...(actualLineageFingerprint === undefined ? {} : { actualLineageFingerprint }),
 });
 
 const addressError = (message: string, entryCount?: number) => ({
@@ -264,6 +323,10 @@ export class MemoryProvider implements FabricProvider {
     const expectedSourceHash = typeof args.expectedSourceHash === "string"
       ? args.expectedSourceHash
       : undefined;
+    const expectedLineageFingerprint = typeof args.expectedLineageFingerprint === "string"
+      ? args.expectedLineageFingerprint
+      : undefined;
+    const branches = parseBranches(args.branches, "memory.recall");
     const scope = typeof args.scope === "string" ? args.scope : undefined;
     const role = typeof args.role === "string" ? args.role : undefined;
     const tool = typeof args.tool === "string" ? args.tool : undefined;
@@ -276,18 +339,40 @@ export class MemoryProvider implements FabricProvider {
         : RECALL_DEFAULT_PAGE_SIZE;
 
     const refs = resolveRefs(scope, this.context, false);
-    const options = resolveIndexOptions(this.context.config, this.context.agentDir);
+    const liveResolver = liveBranchResolver(this.context);
+    const options = resolveIndexOptions(
+      this.context.config,
+      this.context.agentDir,
+      branches,
+      liveResolver,
+    );
     const hydrate = scope?.trim().startsWith("session:") ?? false;
-    if (expectedSourceHash !== undefined && !hydrate) {
-      throw new Error("memory.recall expectedSourceHash requires scope session:<id-or-path>");
+    if ((expectedSourceHash !== undefined || expectedLineageFingerprint !== undefined) && !hydrate) {
+      throw new Error("memory.recall integrity expectations require scope session:<id-or-path>");
     }
-    if (hydrate && expectedSourceHash !== undefined && refs[0]) {
+    if (hydrate && refs[0]) {
       const state = fingerprintSource(refs[0].file);
-      if (state && state.sourceHash !== expectedSourceHash) {
+      const lineage = reconstructSessionLineage(
+        refs[0].file,
+        branches,
+        liveResolver?.(refs[0].file),
+      );
+      const sourceChanged = expectedSourceHash !== undefined &&
+        state?.sourceHash !== expectedSourceHash;
+      const lineageChanged = expectedLineageFingerprint !== undefined &&
+        lineage.fingerprint !== expectedLineageFingerprint;
+      if (state && (sourceChanged || lineageChanged)) {
         return {
           scope: scope ?? "session",
           query: query ?? null,
-          error: stalePointerError(refs[0].file, expectedSourceHash, state.sourceHash),
+          branches,
+          error: stalePointerError(
+            refs[0].file,
+            expectedSourceHash,
+            state.sourceHash,
+            expectedLineageFingerprint,
+            lineage.fingerprint,
+          ),
           segments: [],
           digestHits: [],
           items: [],
@@ -333,15 +418,22 @@ export class MemoryProvider implements FabricProvider {
       hydrate,
       selectedRange,
     );
-    if (hydrate && expectedSourceHash !== undefined && index.shards[0]
-      && index.shards[0].sourceHash !== expectedSourceHash) {
+    const hydratedShard = index.shards[0];
+    const hydratedSourceChanged = expectedSourceHash !== undefined &&
+      hydratedShard?.sourceHash !== expectedSourceHash;
+    const hydratedLineageChanged = expectedLineageFingerprint !== undefined &&
+      hydratedShard?.lineageFingerprint !== expectedLineageFingerprint;
+    if (hydrate && hydratedShard && (hydratedSourceChanged || hydratedLineageChanged)) {
       return {
         scope: scope ?? "session",
         query: query ?? null,
+        branches,
         error: stalePointerError(
-          index.shards[0].sessionFile,
+          hydratedShard.sessionFile,
           expectedSourceHash,
-          index.shards[0].sourceHash,
+          hydratedShard.sourceHash,
+          expectedLineageFingerprint,
+          hydratedShard.lineageFingerprint,
         ),
         segments: [],
         digestHits: [],
@@ -405,6 +497,7 @@ export class MemoryProvider implements FabricProvider {
     };
     const pagedResult = {
       scope: scope ?? "session",
+      branches,
       query: query ?? null,
       queryMode,
       matchedCount: result.matchedCount,
@@ -433,6 +526,10 @@ export class MemoryProvider implements FabricProvider {
     const expectedSourceHash = typeof args.expectedSourceHash === "string"
       ? args.expectedSourceHash
       : undefined;
+    const expectedLineageFingerprint = typeof args.expectedLineageFingerprint === "string"
+      ? args.expectedLineageFingerprint
+      : undefined;
+    const branches = parseBranches(args.branches, "memory.expand");
     const rawIndices = args.indices;
     if (rawIndices !== undefined && !Array.isArray(rawIndices)) {
       throw new Error("memory.expand indices must be an array");
@@ -481,7 +578,13 @@ export class MemoryProvider implements FabricProvider {
         expanded: [],
       };
     }
+    const liveResolver = liveBranchResolver(this.context);
     const initialState = fingerprintSource(ref.file);
+    const initialLineage = reconstructSessionLineage(
+      ref.file,
+      branches,
+      liveResolver?.(ref.file),
+    );
     if (!initialState) {
       return {
         session: ref.file,
@@ -489,15 +592,35 @@ export class MemoryProvider implements FabricProvider {
         expanded: [],
       };
     }
-    if (expectedSourceHash !== undefined && initialState.sourceHash !== expectedSourceHash) {
+    const sourceChanged = expectedSourceHash !== undefined &&
+      initialState.sourceHash !== expectedSourceHash;
+    const lineageChanged = expectedLineageFingerprint !== undefined &&
+      initialLineage.fingerprint !== expectedLineageFingerprint;
+    if (sourceChanged || lineageChanged) {
       return {
         session: ref.file,
-        error: stalePointerError(ref.file, expectedSourceHash, initialState.sourceHash),
+        branches,
+        error: stalePointerError(
+          ref.file,
+          expectedSourceHash,
+          initialState.sourceHash,
+          expectedLineageFingerprint,
+          initialLineage.fingerprint,
+        ),
         expanded: [],
       };
     }
 
-    const entryCount = normalizeSession(ref.file, Number.MAX_SAFE_INTEGER).entries.length;
+    const expansionOptions = {
+      lineage: initialLineage,
+      indexThinking: true,
+      indexToolOutput: true,
+    };
+    const entryCount = normalizeSession(
+      ref.file,
+      Number.MAX_SAFE_INTEGER,
+      expansionOptions,
+    ).entries.length;
     const outOfBounds = indices.find((index) => index >= entryCount);
     if (outOfBounds !== undefined) {
       return {
@@ -519,7 +642,13 @@ export class MemoryProvider implements FabricProvider {
       operationAddresses.length === 0 &&
       (first === undefined || last === undefined)
     ) {
-      return { session: ref.file, sourceHash: initialState.sourceHash, expanded: [] };
+      return {
+        session: ref.file,
+        sourceHash: initialState.sourceHash,
+        branches,
+        lineageFingerprint: initialLineage.fingerprint,
+        expanded: [],
+      };
     }
 
     const selection: {
@@ -534,15 +663,26 @@ export class MemoryProvider implements FabricProvider {
     if (typeof first === "number" && typeof last === "number") {
       selection.entryRange = { first, last };
     }
-    const expansion = expandSessionEntriesChecked(ref.file, selection);
+    const expansion = expandSessionEntriesChecked(ref.file, selection, expansionOptions);
     const finalState = fingerprintSource(ref.file);
-    if (!finalState || finalState.sourceHash !== initialState.sourceHash) {
+    const finalLineage = reconstructSessionLineage(
+      ref.file,
+      branches,
+      liveResolver?.(ref.file),
+    );
+    if (
+      !finalState ||
+      finalState.sourceHash !== initialState.sourceHash ||
+      finalLineage.fingerprint !== initialLineage.fingerprint
+    ) {
       return {
         session: ref.file,
         error: stalePointerError(
           ref.file,
           expectedSourceHash ?? initialState.sourceHash,
           finalState?.sourceHash ?? "",
+          expectedLineageFingerprint ?? initialLineage.fingerprint,
+          finalLineage.fingerprint,
         ),
         expanded: [],
       };
@@ -551,17 +691,31 @@ export class MemoryProvider implements FabricProvider {
       return {
         session: ref.file,
         sourceHash: finalState.sourceHash,
+        branches,
+        lineageFingerprint: finalLineage.fingerprint,
         error: expansion.error,
         expanded: [],
       };
     }
-    return { session: ref.file, sourceHash: finalState.sourceHash, expanded: expansion.expanded };
+    return {
+      session: ref.file,
+      sourceHash: finalState.sourceHash,
+      branches,
+      lineageFingerprint: finalLineage.fingerprint,
+      expanded: expansion.expanded,
+    };
   }
 
   private async sessions(args: Record<string, unknown>): Promise<unknown> {
     const scope = typeof args.scope === "string" ? args.scope : undefined;
+    const branches = parseBranches(args.branches, "memory.sessions");
     const refs = resolveRefs(scope, this.context, true).slice(0, SESSIONS_MAX);
-    const options = resolveIndexOptions(this.context.config, this.context.agentDir);
+    const options = resolveIndexOptions(
+      this.context.config,
+      this.context.agentDir,
+      branches,
+      liveBranchResolver(this.context),
+    );
     const index = loadTieredIndex(refs, resolveTierRefs(refs, this.context), options);
     const shards = new Map(index.shards.map((shard) => [shard.sessionFile, shard]));
     const digests = new Map(index.digests.map((digest) => [digest.file, digest]));
@@ -576,8 +730,10 @@ export class MemoryProvider implements FabricProvider {
         mtime: ref.mtime,
         entryCount: shard?.entries.length ?? digest?.entryCount ?? 0,
         tier,
+        branches,
+        lineageFingerprint: shard?.lineageFingerprint ?? digest?.lineageFingerprint ?? null,
       };
     });
-    return { scope: scope ?? "session", sessions };
+    return { scope: scope ?? "session", branches, sessions };
   }
 }

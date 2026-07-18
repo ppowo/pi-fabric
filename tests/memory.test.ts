@@ -62,6 +62,8 @@ const makeMemoryConfig = (indexDir: string): FabricMemoryConfig => ({
   indexDir,
   maxSessions: 500,
   maxEntryChars: 2_000,
+  indexThinking: false,
+  indexToolOutput: true,
 });
 
 const invocationContext = (cwd: string): FabricInvocationContext => ({
@@ -157,8 +159,8 @@ describe("memory normalize", () => {
     expect(entries.map((e) => e.index)).toEqual([0, 1]);
   });
 
-  it("extractFullText handles assistant with thinking and toolCall blocks", () => {
-    const text = extractFullText({
+  it("excludes thinking by default and includes it only when configured", () => {
+    const raw = {
       type: "message",
       message: {
         role: "assistant",
@@ -168,10 +170,12 @@ describe("memory normalize", () => {
           { type: "toolCall", id: "c1", name: "grep", arguments: { pattern: "TODO" } },
         ],
       },
-    });
-    expect(text).toContain("reasoning here");
-    expect(text).toContain("response");
-    expect(text).toContain("Tool: grep(");
+    };
+    const defaultText = extractFullText(raw);
+    expect(defaultText).not.toContain("reasoning here");
+    expect(defaultText).toContain("response");
+    expect(defaultText).toContain("Tool: grep(");
+    expect(extractFullText(raw, { indexThinking: true })).toContain("reasoning here");
   });
 });
 

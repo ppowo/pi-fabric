@@ -140,6 +140,8 @@ describe("memory Fabric trace records", () => {
       indexDir,
       maxSessions: 100,
       maxEntryChars: 2_000,
+      indexThinking: false,
+      indexToolOutput: true,
       hotSessions: 1,
       digestTerms: 2,
     };

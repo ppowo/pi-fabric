@@ -3,8 +3,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { foldSessionDigest, type SessionDigest } from "./digest.js";
 import type { SessionRef } from "./discovery.js";
+import type { LiveSessionBranch, MemoryBranches, SessionLineage } from "./lineage.js";
+import { reconstructSessionLineage } from "./lineage.js";
 import type { NormalizedEntry } from "./normalize.js";
-import { normalizeSession } from "./normalize.js";
+import { DEFAULT_MEMORY_INDEX_PRIVACY, normalizeSession } from "./normalize.js";
 import { compareLexical, lexicalTermCounts, tokenizeLexical } from "./tokenize.js";
 
 export const MEMORY_CACHE_VERSION = 5;
@@ -23,6 +25,8 @@ interface CacheRecord {
   mtime: number;
   size: number;
   sourceHash: string;
+  branches: MemoryBranches;
+  lineageFingerprint: string;
   policy: string;
   cacheBytes: number;
   cacheSourceRatio: number;
@@ -53,6 +57,10 @@ export interface MemoryIndexOptions {
   maxSyncSessions?: number;
   maxSyncSourceBytes?: number;
   maxCacheCleanupFiles?: number;
+  branches?: MemoryBranches;
+  indexThinking?: boolean;
+  indexToolOutput?: boolean;
+  liveBranchForFile?: (sessionFile: string) => LiveSessionBranch | undefined;
 }
 
 export interface EntryRange {
@@ -66,15 +74,39 @@ const cacheBaseName = (sessionFile: string): string => {
   return `${hash}-${safeBase}`;
 };
 
-export const shardPathForSession = (sessionFile: string, indexDir: string): string =>
-  path.join(indexDir, `${cacheBaseName(sessionFile)}.json`);
+const cacheModeSuffix = (branches: MemoryBranches): string => branches === "all" ? ".all" : "";
 
-export const digestPathForSession = (sessionFile: string, indexDir: string): string =>
-  path.join(indexDir, `${cacheBaseName(sessionFile)}.digest.json`);
+export const shardPathForSession = (
+  sessionFile: string,
+  indexDir: string,
+  branches: MemoryBranches = "active",
+): string => path.join(indexDir, `${cacheBaseName(sessionFile)}${cacheModeSuffix(branches)}.json`);
 
-const shardPolicy = (options: MemoryIndexOptions): string => `entry:${options.maxEntryChars}`;
-const digestPolicy = (options: MemoryIndexOptions): string =>
-  `vocab:${options.maxColdVocabularyBytes ?? DEFAULT_MAX_COLD_VOCABULARY_BYTES};cache:${options.maxColdCacheBytes ?? DEFAULT_MAX_COLD_CACHE_BYTES}`;
+export const digestPathForSession = (
+  sessionFile: string,
+  indexDir: string,
+  branches: MemoryBranches = "active",
+): string => path.join(indexDir, `${cacheBaseName(sessionFile)}${cacheModeSuffix(branches)}.digest.json`);
+
+const policyPrivacy = (options: MemoryIndexOptions): string =>
+  `thinking:${options.indexThinking ?? DEFAULT_MEMORY_INDEX_PRIVACY.indexThinking};tool-output:${options.indexToolOutput ?? DEFAULT_MEMORY_INDEX_PRIVACY.indexToolOutput}`;
+const shardPolicy = (options: MemoryIndexOptions, lineage: SessionLineage): string =>
+  `entry:${options.maxEntryChars};branches:${lineage.branches};lineage:${lineage.fingerprint};${policyPrivacy(options)}`;
+const digestPolicy = (options: MemoryIndexOptions, lineage: SessionLineage): string =>
+  `vocab:${options.maxColdVocabularyBytes ?? DEFAULT_MAX_COLD_VOCABULARY_BYTES};cache:${options.maxColdCacheBytes ?? DEFAULT_MAX_COLD_CACHE_BYTES};branches:${lineage.branches};lineage:${lineage.fingerprint};${policyPrivacy(options)}`;
+
+const resolveLineage = (sessionFile: string, options: MemoryIndexOptions): SessionLineage =>
+  reconstructSessionLineage(
+    sessionFile,
+    options.branches ?? "active",
+    options.liveBranchForFile?.(sessionFile),
+  );
+
+const normalizationOptions = (options: MemoryIndexOptions, lineage: SessionLineage) => ({
+  lineage,
+  indexThinking: options.indexThinking ?? DEFAULT_MEMORY_INDEX_PRIVACY.indexThinking,
+  indexToolOutput: options.indexToolOutput ?? DEFAULT_MEMORY_INDEX_PRIVACY.indexToolOutput,
+});
 
 const readShardFile = (
   filePath: string,
@@ -91,6 +123,9 @@ const readShardFile = (
       typeof parsed.sessionId !== "string" ||
       typeof parsed.sourceHash !== "string" ||
       parsed.sourceHash.length !== 64 ||
+      (parsed.branches !== "active" && parsed.branches !== "all") ||
+      typeof parsed.lineageFingerprint !== "string" ||
+      parsed.lineageFingerprint.length !== 64 ||
       typeof parsed.policy !== "string" ||
       typeof parsed.cacheBytes !== "number" ||
       parsed.cacheBytes !== stat.size ||
@@ -130,6 +165,9 @@ const readDigestFile = (
       typeof parsed.file !== "string" ||
       typeof parsed.sourceHash !== "string" ||
       parsed.sourceHash.length !== 64 ||
+      (parsed.branches !== "active" && parsed.branches !== "all") ||
+      typeof parsed.lineageFingerprint !== "string" ||
+      parsed.lineageFingerprint.length !== 64 ||
       typeof parsed.policy !== "string" ||
       typeof parsed.cacheBytes !== "number" ||
       parsed.cacheBytes !== stat.size ||
@@ -227,7 +265,11 @@ const isCacheFresh = (
   cache.sourceHash === state.sourceHash &&
   cache.policy === policy;
 
-const missingShard = (ref: SessionRef, reason = "source_unavailable"): Shard => ({
+const missingShard = (
+  ref: SessionRef,
+  lineage: SessionLineage,
+  reason = "source_unavailable",
+): Shard => ({
   cacheVersion: MEMORY_CACHE_VERSION,
   kind: "shard",
   sessionFile: ref.file,
@@ -235,6 +277,8 @@ const missingShard = (ref: SessionRef, reason = "source_unavailable"): Shard => 
   mtime: 0,
   size: 0,
   sourceHash: "",
+  branches: lineage.branches,
+  lineageFingerprint: lineage.fingerprint,
   policy: reason,
   cacheBytes: 0,
   cacheSourceRatio: 0,
@@ -246,24 +290,40 @@ const missingShard = (ref: SessionRef, reason = "source_unavailable"): Shard => 
 });
 
 export const loadShard = (ref: SessionRef, options: MemoryIndexOptions): Shard => {
-  const filePath = shardPathForSession(ref.file, options.indexDir);
+  const lineage = resolveLineage(ref.file, options);
+  const filePath = shardPathForSession(ref.file, options.indexDir, lineage.branches);
   const state = fingerprintSource(ref.file);
   if (!state) {
     removeCacheFile(filePath);
-    return missingShard(ref);
+    return missingShard(ref, lineage);
   }
-  const policy = shardPolicy(options);
+  const policy = shardPolicy(options, lineage);
   const cached = readShardFile(
     filePath,
     options.maxSyncSourceBytes ?? DEFAULT_MAX_SYNC_SOURCE_BYTES,
   );
   if (isCacheFresh(cached, state, policy) && cached?.sessionFile === ref.file) return cached;
   if (fs.existsSync(filePath)) removeCacheFile(filePath);
-  const { entries, header, indexCoverage } = normalizeSession(ref.file, options.maxEntryChars);
+  const { entries, header, indexCoverage } = normalizeSession(
+    ref.file,
+    options.maxEntryChars,
+    normalizationOptions(options, lineage),
+  );
   const finalState = fingerprintSource(ref.file);
-  if (!finalState || finalState.sourceHash !== state.sourceHash) {
+  const finalLineage = resolveLineage(ref.file, options);
+  if (
+    !finalState ||
+    finalState.sourceHash !== state.sourceHash ||
+    finalLineage.fingerprint !== lineage.fingerprint
+  ) {
     removeCacheFile(filePath);
-    return missingShard(ref, "source_changed_during_index");
+    return missingShard(
+      ref,
+      finalLineage,
+      finalState?.sourceHash === state.sourceHash
+        ? "lineage_changed_during_index"
+        : "source_changed_during_index",
+    );
   }
   const shard = applyCacheMetrics<Shard>({
     cacheVersion: MEMORY_CACHE_VERSION,
@@ -271,6 +331,8 @@ export const loadShard = (ref: SessionRef, options: MemoryIndexOptions): Shard =
     sessionFile: ref.file,
     sessionId: header?.sessionId ?? ref.id,
     ...state,
+    branches: lineage.branches,
+    lineageFingerprint: lineage.fingerprint,
     policy,
     cacheBytes: 0,
     cacheSourceRatio: 0,
@@ -288,12 +350,31 @@ const hydrateShard = (
   options: MemoryIndexOptions,
   entryRange?: EntryRange,
 ): Shard => {
+  const lineage = resolveLineage(ref.file, options);
   const state = fingerprintSource(ref.file);
-  if (!state) return { ...missingShard(ref), tier: "cold" };
-  const { entries, header, indexCoverage } = normalizeSession(ref.file, options.maxEntryChars);
+  if (!state) return { ...missingShard(ref, lineage), tier: "cold" };
+  const { entries, header, indexCoverage } = normalizeSession(
+    ref.file,
+    options.maxEntryChars,
+    normalizationOptions(options, lineage),
+  );
   const finalState = fingerprintSource(ref.file);
-  if (!finalState || finalState.sourceHash !== state.sourceHash) {
-    return { ...missingShard(ref, "source_changed_during_index"), tier: "cold" };
+  const finalLineage = resolveLineage(ref.file, options);
+  if (
+    !finalState ||
+    finalState.sourceHash !== state.sourceHash ||
+    finalLineage.fingerprint !== lineage.fingerprint
+  ) {
+    return {
+      ...missingShard(
+        ref,
+        finalLineage,
+        finalState?.sourceHash === state.sourceHash
+          ? "lineage_changed_during_index"
+          : "source_changed_during_index",
+      ),
+      tier: "cold",
+    };
   }
   const selected = entryRange
     ? entries.filter((entry) => entry.index >= entryRange.first && entry.index <= entryRange.last)
@@ -304,7 +385,9 @@ const hydrateShard = (
     sessionFile: ref.file,
     sessionId: header?.sessionId ?? ref.id,
     ...state,
-    policy: shardPolicy(options),
+    branches: lineage.branches,
+    lineageFingerprint: lineage.fingerprint,
+    policy: shardPolicy(options, lineage),
     cacheBytes: 0,
     cacheSourceRatio: 0,
     entries: selected,
@@ -314,7 +397,11 @@ const hydrateShard = (
   };
 };
 
-const missingDigest = (ref: SessionRef, reason = "source_unavailable"): DigestShard => ({
+const missingDigest = (
+  ref: SessionRef,
+  lineage: SessionLineage,
+  reason = "source_unavailable",
+): DigestShard => ({
   cacheVersion: MEMORY_CACHE_VERSION,
   kind: "digest",
   sessionId: ref.id,
@@ -332,6 +419,8 @@ const missingDigest = (ref: SessionRef, reason = "source_unavailable"): DigestSh
   mtime: 0,
   size: 0,
   sourceHash: "",
+  branches: lineage.branches,
+  lineageFingerprint: lineage.fingerprint,
   policy: reason,
   cacheBytes: 0,
   cacheSourceRatio: 0,
@@ -378,13 +467,14 @@ const fitDigestCache = (digest: DigestShard, maxBytes: number): DigestShard => {
 };
 
 export const loadDigest = (ref: SessionRef, options: MemoryIndexOptions): DigestShard => {
-  const filePath = digestPathForSession(ref.file, options.indexDir);
+  const lineage = resolveLineage(ref.file, options);
+  const filePath = digestPathForSession(ref.file, options.indexDir, lineage.branches);
   const state = fingerprintSource(ref.file);
   if (!state) {
     removeCacheFile(filePath);
-    return missingDigest(ref);
+    return missingDigest(ref, lineage);
   }
-  const policy = digestPolicy(options);
+  const policy = digestPolicy(options, lineage);
   const maxCacheBytes = options.maxColdCacheBytes ?? DEFAULT_MAX_COLD_CACHE_BYTES;
   const cached = readDigestFile(filePath, maxCacheBytes);
   if (
@@ -394,11 +484,26 @@ export const loadDigest = (ref: SessionRef, options: MemoryIndexOptions): Digest
   ) return cached;
   if (fs.existsSync(filePath)) removeCacheFile(filePath);
 
-  const { entries, header, indexCoverage } = normalizeSession(ref.file, Number.MAX_SAFE_INTEGER);
+  const { entries, header, indexCoverage } = normalizeSession(
+    ref.file,
+    Number.MAX_SAFE_INTEGER,
+    normalizationOptions(options, lineage),
+  );
   const finalState = fingerprintSource(ref.file);
-  if (!finalState || finalState.sourceHash !== state.sourceHash) {
+  const finalLineage = resolveLineage(ref.file, options);
+  if (
+    !finalState ||
+    finalState.sourceHash !== state.sourceHash ||
+    finalLineage.fingerprint !== lineage.fingerprint
+  ) {
     removeCacheFile(filePath);
-    return missingDigest(ref, "source_changed_during_index");
+    return missingDigest(
+      ref,
+      finalLineage,
+      finalState?.sourceHash === state.sourceHash
+        ? "lineage_changed_during_index"
+        : "source_changed_during_index",
+    );
   }
   const digest = foldSessionDigest({
     sessionId: header?.sessionId ?? ref.id,
@@ -414,6 +519,8 @@ export const loadDigest = (ref: SessionRef, options: MemoryIndexOptions): Digest
     kind: "digest",
     ...digest,
     ...state,
+    branches: lineage.branches,
+    lineageFingerprint: lineage.fingerprint,
     policy,
     cacheBytes: 0,
     cacheSourceRatio: 0,
@@ -497,9 +604,14 @@ const cleanupCacheDirectory = (
         const source = kind === "shard" && typeof parsed.sessionFile === "string"
           ? parsed.sessionFile
           : kind === "digest" && typeof parsed.file === "string" ? parsed.file : null;
-        const expected = source && kind === "shard"
-          ? shardPathForSession(source, indexDir)
-          : source && kind === "digest" ? digestPathForSession(source, indexDir) : null;
+        const branches = parsed.branches === "active" || parsed.branches === "all"
+          ? parsed.branches
+          : null;
+        const expected = source && branches && kind === "shard"
+          ? shardPathForSession(source, indexDir, branches)
+          : source && branches && kind === "digest"
+            ? digestPathForSession(source, indexDir, branches)
+            : null;
         const structurallyValid = kind === "shard"
           ? readShardFile(cacheFile, cacheBytes) !== null
           : kind === "digest" ? readDigestFile(cacheFile, cacheBytes) !== null : false;
@@ -583,7 +695,11 @@ export const loadTieredIndex = (
         }
       } else if (tier === "hot") {
         const shard = loadShard(ref, options);
-        removeCacheFile(digestPathForSession(ref.file, options.indexDir));
+        removeCacheFile(digestPathForSession(
+          ref.file,
+          options.indexDir,
+          options.branches ?? "active",
+        ));
         shards.push(shard);
         if (shard.sourceHash) indexedSessions += 1;
         else reasons.add(shard.indexReason ?? "source_unavailable");
@@ -593,7 +709,11 @@ export const loadTieredIndex = (
         }
       } else {
         const digest = loadDigest(ref, options);
-        removeCacheFile(shardPathForSession(ref.file, options.indexDir));
+        removeCacheFile(shardPathForSession(
+          ref.file,
+          options.indexDir,
+          options.branches ?? "active",
+        ));
         digests.push(digest);
         if (digest.sourceHash) indexedSessions += 1;
         if (!digest.indexCoverage.complete) {

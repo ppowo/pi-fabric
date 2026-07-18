@@ -60,6 +60,8 @@ const memoryConfig = (indexDir: string, hotSessions = 1): FabricMemoryConfig => 
   indexDir,
   maxSessions: 500,
   maxEntryChars: 2_000,
+  indexThinking: false,
+  indexToolOutput: true,
   hotSessions,
   digestTerms: 200,
 });
@@ -263,8 +265,21 @@ describe("memory sleep cycle", () => {
       digestTerms: 200,
       maxColdVocabularyBytes: 512 * 1024,
       maxColdCacheBytes: 1024 * 1024,
+      indexThinking: false,
+      indexToolOutput: true,
     }));
-    expect(normalizeFabricConfig({ memory: { hotSessions: -1, digestTerms: 0 } }).memory)
-      .toEqual(expect.objectContaining({ hotSessions: 0, digestTerms: 1 }));
+    expect(normalizeFabricConfig({
+      memory: {
+        hotSessions: -1,
+        digestTerms: 0,
+        indexThinking: true,
+        indexToolOutput: false,
+      },
+    }).memory).toEqual(expect.objectContaining({
+      hotSessions: 0,
+      digestTerms: 1,
+      indexThinking: true,
+      indexToolOutput: false,
+    }));
   });
 });

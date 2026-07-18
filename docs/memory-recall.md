@@ -8,6 +8,34 @@ preferences, errors, or other prose concepts with regexes. Roles, tool names,
 timestamps, entry IDs, operation addresses, tool errors, and tool argument
 paths come from typed session fields.
 
+## Active branches
+
+`memory.recall`, `memory.sessions`, and `memory.expand` accept
+`branches: "active" | "all"`. The default is `"active"` for every scope,
+including `project`, `global`, and explicit `session:<id-or-path>` scopes.
+Only records carried on each session's active parent-linked path contribute to
+hot text, cold vocabulary, structural addresses, segments, and entry counts.
+An abandoned sibling therefore cannot match by default. `branches: "all"` is
+an explicit request to include every branch; responses, segments, cold
+pointers, and session rows identify their branch mode.
+
+For the current live session, Fabric calls the extension context's live
+`SessionManager.getBranch()` and `getLeafId()` getters for every memory action.
+This observes `/tree` navigation even when no new record has been appended. For
+another persisted session, Fabric matches Pi 0.80.6's persisted semantics: the
+last persisted non-header entry is the leaf, duplicate IDs resolve to the last
+record in the ID map, and `parentId` links are followed from that leaf to a
+root. Append order is never treated as one transcript. A parent cycle is
+stopped defensively and makes coverage incomplete with
+`invalid_parent_graph`.
+
+Each derived record carries `branches` and a SHA-256 `lineageFingerprint` over
+the selected branch mode, leaf, and active path IDs. Active and all caches have
+separate filenames. Cache policy includes branch mode, lineage fingerprint,
+and privacy settings, so navigation, append, or policy changes rebuild the
+relevant derived record without contaminating the other mode. `sourceHash`
+continues to cover the complete JSONL source, including off-lineage records.
+
 ## Cache V5
 
 Cache records use `cacheVersion: 5`. Older or malformed records are removed and
@@ -15,10 +43,11 @@ rebuilt from source; they are never migrated or interpreted as V5. Refresh also
 removes orphan records, records whose encoded cache path does not match their
 source identity, and records for deleted source sessions.
 
-Every cache record contains the exact session file path and a SHA-256
-`sourceHash`, in addition to source mtime and size. A same-size rewrite with a
-preserved mtime therefore invalidates the record. Cache directories and files
-are created with `0700` and `0600` permissions on a best-effort basis.
+Every cache record contains the exact session file path, branch mode,
+lineage fingerprint, privacy policy, and a SHA-256 `sourceHash`, in addition to
+source mtime and size. A same-size rewrite with a preserved mtime therefore
+invalidates the record. Cache directories and files are created with `0700`
+and `0600` permissions on a best-effort basis.
 
 A hot shard contains bounded normalized entry text plus `indexCoverage`. A cold
 digest contains:
@@ -29,6 +58,7 @@ digest contains:
   kind: "digest",
   sessionId, file, cwd,
   mtime, size, sourceHash,
+  branches, lineageFingerprint, policy,
   firstTs, lastTs, entryCount,
   filesTouched, toolHistogram, errorCount,
   vocabulary,   // sorted unique canonical strings; no posting lists
@@ -150,7 +180,7 @@ synchronization budgets, or regex limits.
 | --- | --- |
 | `session` | Current session, or newest session for the current cwd. |
 | `project` | Sessions in the current cwd's Pi session directory. |
-| `global` | Sessions under the agent directory. |
+| `global` | Sessions under the agent directory. This is explicit, never the default. |
 | `session:<id-or-path>` | One source session, explicitly hydrated without promotion. |
 
 Duplicate session IDs are ambiguous. `session:<id>` and `memory.expand` refuse
@@ -171,6 +201,8 @@ A cold result has session identity only:
   sessionId,
   sessionFile,
   sourceHash,
+  branches,
+  lineageFingerprint,
   matchedTerms
 }
 ```
@@ -182,7 +214,9 @@ path and pass the pointer hash:
 ```ts
 memory.recall({
   scope: `session:${pointer.sessionFile}`,
+  branches: pointer.branches,
   expectedSourceHash: pointer.sourceHash,
+  expectedLineageFingerprint: pointer.lineageFingerprint,
   query: "rare_token"
 })
 ```
@@ -205,16 +239,23 @@ stable entry IDs, operation addresses, or an inclusive range:
 ```ts
 memory.expand({
   session: pointer.sessionFile,
+  branches: pointer.branches,
   expectedSourceHash: pointer.sourceHash,
+  expectedLineageFingerprint: pointer.lineageFingerprint,
   indices: [12, 14]
 })
 memory.expand({ session: pointer.sessionFile, entryIds: ["entry-uuid"] })
 memory.expand({ session: pointer.sessionFile, operationAddresses: ["entry-uuid/7"] })
 ```
 
-Hydration and expansion compare `expectedSourceHash` with the current source.
-A rewrite returns structured `stale_pointer` and no source content. Results
-include the current source hash so callers can retain pointer integrity.
+Hydration and expansion compare `expectedSourceHash` with the current source
+and `expectedLineageFingerprint` with the selected live or persisted lineage.
+A rewrite, append, or active-leaf navigation returns structured
+`stale_pointer` and no source content when it changes an expected binding.
+Results include source hash, branch mode, and lineage fingerprint so callers
+can retain pointer integrity. Under active mode an off-lineage stable address
+returns `address_not_found`; the same address can be expanded only by an
+explicit `branches: "all"` request.
 
 A valid `FabricExecutionTraceV1` on an outer `fabric_exec` result emits one child
 record per operation immediately after the outer normalized entry. Each child
@@ -234,6 +275,33 @@ must be unique within each consumed details envelope; a duplicate rejects that
 envelope and marks coverage incomplete. Unknown or malformed details and all
 branch-summary prose remain non-semantic.
 
+## Local-cache privacy and deletion
+
+The memory index is local derived state, not an encryption or semantic-privacy
+boundary. Depending on configuration and tier, cache JSON can retain plaintext
+lexical vocabulary, cwd and file paths, source pointers and hashes, structural
+tool metadata, selected user/assistant/custom-message content, tool arguments,
+and (with the default `indexToolOutput: true`) selected tool output. Cold
+vocabulary alone can reveal exact words even though it has no posting lists.
+Thinking text is excluded by default but is plaintext when explicitly enabled.
+No secret scanning is attempted; privacy is structural inclusion or exclusion,
+not regex classification.
+
+Fabric requests `0700` for cache directories and `0600` for cache files, but
+this is best effort and inherits the host filesystem, account, backup, and
+administrative trust model. The cache is not encrypted. Project configuration
+is read only for a project Pi has marked trusted; otherwise only global Fabric
+configuration applies. A `global` memory search is an explicit scope and is
+not the default, but global indexing still creates local derived records for
+sessions selected by that explicit call.
+
+Deleting a Pi session removes the source of truth. A later memory refresh
+best-effort removes its orphaned cache records; delete the configured
+`memory.indexDir` as well when immediate cache removal is required. Removing
+that directory is safe because all records are disposable and rebuilt from
+remaining session JSONL. Deleting caches does not delete source sessions,
+filesystem backups, or copies outside the index directory.
+
 ## Configuration
 
 ```json
@@ -243,6 +311,8 @@ branch-summary prose remain non-semantic.
     "indexDir": "~/.pi/agent/fabric/memory-index",
     "maxSessions": 500,
     "maxEntryChars": 2000,
+    "indexThinking": false,
+    "indexToolOutput": true,
     "hotSessions": 50,
     "maxColdVocabularyBytes": 524288,
     "maxColdCacheBytes": 1048576,
@@ -261,6 +331,12 @@ branch-summary prose remain non-semantic.
   indexing budgets instead.
 - `maxEntryChars`: persisted hot entry-text Unicode-scalar limit; any cut marks
   lexical coverage incomplete, while expand re-reads full source.
+- `indexThinking`: assistant thinking blocks enter normalized text and lexical
+  vocabulary only when true. Default: false.
+- `indexToolOutput`: tool-result bodies, bash output, and typed Fabric operation
+  results enter derived text only when true. Default: true, deliberately chosen
+  for coding recall. When false, typed tool name/ref/action, error/outcome, and
+  structurally extracted path metadata remain searchable; output bodies do not.
 - `hotSessions`: globally newest sessions retaining hot shards.
 - `maxColdVocabularyBytes`: per-session canonical vocabulary bound.
 - `maxColdCacheBytes`: hard per-session cold cache-file bound.

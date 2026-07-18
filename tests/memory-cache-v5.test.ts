@@ -74,6 +74,8 @@ describe("memory cache V5", () => {
     indexDir,
     maxSessions: 10,
     maxEntryChars: 2_000,
+    indexThinking: false,
+    indexToolOutput: true,
     hotSessions: 50,
     digestTerms: 5,
     ...overrides,
@@ -249,7 +251,7 @@ describe("memory cache V5", () => {
 
     const pointer = await provider({ hotSessions: 1 }).invoke(
       "recall",
-      { scope: "project", query: "bounded" },
+      { scope: "project", branches: "all", query: "bounded" },
       invocationContext(cwd),
     ) as { digestHits: { sessionFile: string; sourceHash: string }[] };
     expect(pointer.digestHits[0]).toEqual(expect.objectContaining({
@@ -262,6 +264,7 @@ describe("memory cache V5", () => {
       {
         scope: `session:${pointer.digestHits[0]!.sessionFile}`,
         expectedSourceHash: pointer.digestHits[0]!.sourceHash,
+        branches: "all",
         query: "bounded",
         entryRange: { first: 1, last: 1 },
       },
@@ -273,7 +276,7 @@ describe("memory cache V5", () => {
 
     const expanded = await provider({ hotSessions: 1 }).invoke(
       "expand",
-      { session: "old", entryIds: ["entry-b"] },
+      { session: "old", branches: "all", entryIds: ["entry-b"] },
       invocationContext(cwd),
     ) as { expanded: { index: number; entryId: string; text: string }[] };
     expect(expanded.expanded).toEqual([{

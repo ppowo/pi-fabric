@@ -48,6 +48,8 @@ const config = (indexDir: string, overrides: Partial<FabricMemoryConfig> = {}): 
   indexDir,
   maxSessions: 500,
   maxEntryChars: 2_000,
+  indexThinking: false,
+  indexToolOutput: true,
   hotSessions: 50,
   ...overrides,
 });
@@ -110,13 +112,13 @@ describe("memory final integrity guarantees", () => {
       message("same-entry", "second", 1),
     ]);
     const ref = { id: "duplicates", file, cwd, mtime: fs.statSync(file).mtimeMs };
-    expect(loadShard(ref, { indexDir, maxEntryChars: 2_000 }).indexCoverage)
+    expect(loadShard(ref, { indexDir, maxEntryChars: 2_000, branches: "all" }).indexCoverage)
       .toEqual({ complete: false, reasons: ["duplicate_entry_id"] });
 
     const provider = new MemoryProvider({ agentDir, cwd, config: config(indexDir) });
     const ambiguous = await provider.invoke(
       "expand",
-      { session: file, entryIds: ["same-entry"] },
+      { session: file, branches: "all", entryIds: ["same-entry"] },
       invocation(cwd),
     ) as { error: { code: string; matches: number }; expanded: unknown[] };
     expect(ambiguous.error).toEqual(expect.objectContaining({ code: "ambiguous_address", matches: 2 }));
@@ -124,7 +126,7 @@ describe("memory final integrity guarantees", () => {
 
     const missing = await provider.invoke(
       "expand",
-      { session: file, entryIds: ["absent-entry"] },
+      { session: file, branches: "all", entryIds: ["absent-entry"] },
       invocation(cwd),
     ) as { error: { code: string; matches: number }; expanded: unknown[] };
     expect(missing.error).toEqual(expect.objectContaining({ code: "address_not_found", matches: 0 }));
@@ -155,7 +157,7 @@ describe("memory final integrity guarantees", () => {
     const provider = new MemoryProvider({ agentDir, cwd, config: config(indexDir, { maxEntryChars: 200_000 }) });
     const expanded = await provider.invoke(
       "expand",
-      { session: file, operationAddresses: ["same-carrier/0"] },
+      { session: file, branches: "all", operationAddresses: ["same-carrier/0"] },
       invocation(cwd),
     ) as { error: { code: string; matches: number }; expanded: unknown[] };
     expect(expanded.error).toEqual(expect.objectContaining({ code: "ambiguous_address", matches: 2 }));
@@ -331,7 +333,7 @@ describe("memory final integrity guarantees", () => {
     fs.utimesSync(browseFile, base + 2, base + 2);
     const browse = await provider.invoke(
       "recall",
-      { scope: `session:${browseFile}`, page: 2, pageSize: 2 },
+      { scope: `session:${browseFile}`, branches: "all", page: 2, pageSize: 2 },
       invocation(cwd),
     ) as { items: unknown[]; totalItems: number; totalMatches: number; hasNext: boolean };
     expect(browse).toEqual(expect.objectContaining({ totalItems: 5, totalMatches: 5, hasNext: true }));
@@ -350,7 +352,7 @@ describe("memory final integrity guarantees", () => {
     ]);
     const shard = loadShard(
       { id: "budget", file, cwd, mtime: fs.statSync(file).mtimeMs },
-      { indexDir, maxEntryChars: 2_000 },
+      { indexDir, maxEntryChars: 2_000, branches: "all" },
     );
     const result = await searchShards([shard], {
       query: "token",

@@ -5,6 +5,26 @@ import {
   type FabricBranchFactV1,
 } from "../compaction/branch-details.js";
 import { readFabricProjectionTrace } from "../compaction/trace-events.js";
+import type { SessionLineage } from "./lineage.js";
+
+export interface MemoryIndexPrivacyPolicy {
+  indexThinking: boolean;
+  indexToolOutput: boolean;
+}
+
+export const DEFAULT_MEMORY_INDEX_PRIVACY: MemoryIndexPrivacyPolicy = {
+  indexThinking: false,
+  indexToolOutput: true,
+};
+
+export interface NormalizeSessionOptions extends Partial<MemoryIndexPrivacyPolicy> {
+  lineage?: SessionLineage;
+}
+
+const privacyPolicy = (options: NormalizeSessionOptions = {}): MemoryIndexPrivacyPolicy => ({
+  indexThinking: options.indexThinking ?? DEFAULT_MEMORY_INDEX_PRIVACY.indexThinking,
+  indexToolOutput: options.indexToolOutput ?? DEFAULT_MEMORY_INDEX_PRIVACY.indexToolOutput,
+});
 
 /**
  * A typed, structure-derived projection of one session JSONL line.
@@ -171,6 +191,7 @@ const traceFilesTouched = (ref: string, tool: string, args: Record<string, Fabri
 const boundedTraceOperation = (
   parentEntryId: string,
   operation: NonNullable<ReturnType<typeof readFabricProjectionTrace>>["operations"][number],
+  includeToolOutput: boolean,
 ): NormalizedFabricOperation => {
   const address = `${parentEntryId}/${operation.sequence}`;
   const normalized: NormalizedFabricOperation = {
@@ -184,7 +205,8 @@ const boundedTraceOperation = (
     args: operation.args,
     outcome: operation.outcome,
     ...(operation.error !== undefined ? { error: operation.error } : {}),
-    ...(operation.result !== undefined ? { result: operation.result } : {}),
+    ...(includeToolOutput && operation.result !== undefined ? { result: operation.result } : {}),
+    ...(!includeToolOutput && operation.result !== undefined ? { resultOmitted: true } : {}),
   };
   if (Buffer.byteLength(JSON.stringify(normalized), "utf8") > TRACE_OPERATION_MAX_BYTES && normalized.result !== undefined) {
     delete normalized.result;
@@ -196,6 +218,7 @@ const boundedTraceOperation = (
 const traceChildren = (
   raw: Record<string, unknown>,
   base: Omit<NormalizedEntry, "index">,
+  policy: MemoryIndexPrivacyPolicy,
 ): Array<Omit<NormalizedEntry, "index">> => {
   if (base.type !== "message" || base.role !== "toolResult" || base.toolName !== "fabric_exec") return [];
   const message = raw.message;
@@ -203,7 +226,7 @@ const traceChildren = (
   const nested = readFabricProjectionTrace((message as Record<string, unknown>).details);
   if (!nested || nested.source !== "trace" || base.entryId === null) return [];
   return nested.operations.map((operation) => {
-    const normalized = boundedTraceOperation(base.entryId!, operation);
+    const normalized = boundedTraceOperation(base.entryId!, operation, policy.indexToolOutput);
     const filesTouched = traceFilesTouched(normalized.ref, normalized.tool, normalized.args);
     const text = `Fabric operation ${normalized.ref}\n${JSON.stringify(normalized)}`;
     return {
@@ -253,6 +276,7 @@ const branchFactChild = (
   fact: FabricBranchFactV1,
   base: Omit<NormalizedEntry, "index">,
   carrierFromId: string | null,
+  policy: MemoryIndexPrivacyPolicy,
 ): Omit<NormalizedEntry, "index"> => {
   const carrierEntryId = base.entryId!;
   const carrierParentId = base.parentId;
@@ -293,7 +317,7 @@ const branchFactChild = (
       args: fact.args,
       outcome: fact.outcome,
       ...(fact.error !== undefined ? { error: fact.error } : {}),
-      ...(fact.result !== undefined ? { result: fact.result } : {}),
+      ...(policy.indexToolOutput && fact.result !== undefined ? { result: fact.result } : {}),
     } : {}),
   };
   if (fact.kind === "user") {
@@ -337,7 +361,8 @@ const branchFactChild = (
     args: fact.args,
     outcome: fact.outcome,
     ...(fact.error !== undefined ? { error: fact.error } : {}),
-    ...(fact.result !== undefined ? { result: fact.result } : {}),
+    ...(policy.indexToolOutput && fact.result !== undefined ? { result: fact.result } : {}),
+    ...(!policy.indexToolOutput && fact.result !== undefined ? { resultOmitted: true } : {}),
   };
   if (Buffer.byteLength(JSON.stringify(operation), "utf8") > TRACE_OPERATION_MAX_BYTES && operation.result !== undefined) {
     delete operation.result;
@@ -366,7 +391,11 @@ const branchFactChild = (
  * typed message content arrays, tool-call name + args, tool-result content,
  * and bashExecution command + output. No regex over prose lives here.
  */
-export const extractFullText = (raw: Record<string, unknown>): string => {
+export const extractFullText = (
+  raw: Record<string, unknown>,
+  options: NormalizeSessionOptions = {},
+): string => {
+  const policy = privacyPolicy(options);
   const type = asString(raw.type);
   if (type === "message") {
     const message = raw.message as Record<string, unknown> | undefined;
@@ -385,7 +414,11 @@ export const extractFullText = (raw: Record<string, unknown>): string => {
           if (block === null || typeof block !== "object") continue;
           const record = block as Record<string, unknown>;
           if (record.type === "text" && typeof record.text === "string") parts.push(record.text);
-          else if (record.type === "thinking" && typeof record.thinking === "string") {
+          else if (
+            policy.indexThinking &&
+            record.type === "thinking" &&
+            typeof record.thinking === "string"
+          ) {
             parts.push(record.thinking);
           } else if (record.type === "toolCall") {
             const name = asString(record.name);
@@ -402,15 +435,18 @@ export const extractFullText = (raw: Record<string, unknown>): string => {
       let body = "";
       if (Array.isArray(message.content)) body = joinTextParts(message.content);
       else if (typeof message.content === "string") body = message.content;
-      const prefix = toolName ? `toolResult(${toolName})` : "toolResult";
-      return body ? `${prefix}: ${body}` : prefix;
+      const errorSuffix = message.isError === true ? " [error]" : "";
+      const prefix = toolName ? `toolResult(${toolName})${errorSuffix}` : `toolResult${errorSuffix}`;
+      return policy.indexToolOutput && body ? `${prefix}: ${body}` : prefix;
     }
     if (role === "bashExecution") {
       const command = asString(message.command);
       const output = asString(message.output);
       const exit = message.exitCode;
       const exitSuffix = typeof exit === "number" ? ` [exit ${exit}]` : "";
-      return `bash$ ${command}${exitSuffix}\n${output}`;
+      return policy.indexToolOutput && output
+        ? `bash$ ${command}${exitSuffix}\n${output}`
+        : `bash$ ${command}${exitSuffix}`;
     }
     if (role === "custom") {
       const customType = asString(message.customType);
@@ -493,6 +529,7 @@ const parseTimestamp = (raw: unknown): number | null => {
 export const normalizeSession = (
   sessionFile: string,
   maxEntryChars: number,
+  options: NormalizeSessionOptions = {},
 ): { entries: NormalizedEntry[]; header: SessionHeaderInfo | null; indexCoverage: NormalizationCoverage } => {
   let content: string;
   try {
@@ -505,7 +542,10 @@ export const normalizeSession = (
   const entries: NormalizedEntry[] = [];
   const reasons = new Set<string>();
   const seenBranchFactAddresses = new Set<string>();
+  const policy = privacyPolicy(options);
+  for (const reason of options.lineage?.coverageReasons ?? []) reasons.add(reason);
   let index = 0;
+  let rawOrdinal = 0;
   let sessionId = "";
   for (const line of lines) {
     const trimmed = line.trim();
@@ -526,6 +566,11 @@ export const normalizeSession = (
       continue;
     }
     const type = asString(raw.type);
+    const ordinal = rawOrdinal;
+    rawOrdinal += 1;
+    if (options.lineage && options.lineage.entryOrdinals !== null && !options.lineage.entryOrdinals.has(ordinal)) {
+      continue;
+    }
     if (
       type !== "message" &&
       type !== "compaction" &&
@@ -536,7 +581,7 @@ export const normalizeSession = (
     }
     const { role, toolName, isError } = entryRoleAndTool(raw);
     const filesTouched = extractFilesTouched(raw);
-    const fullText = extractFullText(raw);
+    const fullText = extractFullText(raw, policy);
     const { text, truncated } = truncate(fullText, maxEntryChars);
     if (!text.trim() && role === null) continue;
     const entryId = typeof raw.id === "string" ? raw.id : null;
@@ -558,7 +603,7 @@ export const normalizeSession = (
     entries.push({ ...base, index });
     if (truncated) reasons.add("max_entry_chars");
     index += 1;
-    for (const child of traceChildren(raw, base)) {
+    for (const child of traceChildren(raw, base, policy)) {
       const bounded = truncate(child.text, maxEntryChars);
       entries.push({ ...child, index, text: bounded.text, truncated: bounded.truncated });
       if (bounded.truncated) reasons.add("max_entry_chars");
@@ -586,7 +631,7 @@ export const normalizeSession = (
         for (const fact of details.facts) {
           if (seenBranchFactAddresses.has(fact.address)) continue;
           seenBranchFactAddresses.add(fact.address);
-          const child = branchFactChild(fact, base, carrierFromId);
+          const child = branchFactChild(fact, base, carrierFromId, policy);
           const bounded = truncate(child.text, maxEntryChars);
           entries.push({ ...child, index, text: bounded.text, truncated: bounded.truncated });
           if (bounded.truncated) reasons.add("max_entry_chars");
@@ -643,8 +688,9 @@ export const readSessionHeader = (sessionFile: string): SessionHeaderInfo | null
 export const expandSessionEntry = (
   sessionFile: string,
   index: number,
+  options: NormalizeSessionOptions = {},
 ): string | null => {
-  const { entries } = normalizeSession(sessionFile, Number.MAX_SAFE_INTEGER);
+  const { entries } = normalizeSession(sessionFile, Number.MAX_SAFE_INTEGER, options);
   return entries.find((entry) => entry.index === index)?.text ?? null;
 };
 
@@ -679,8 +725,9 @@ export interface ExpandedSessionEntry {
 export const expandSessionEntries = (
   sessionFile: string,
   selection: ExpandSessionSelection,
+  options: NormalizeSessionOptions = {},
 ): ExpandedSessionEntry[] => {
-  const { entries } = normalizeSession(sessionFile, Number.MAX_SAFE_INTEGER);
+  const { entries } = normalizeSession(sessionFile, Number.MAX_SAFE_INTEGER, options);
   const indices = new Set(selection.indices ?? []);
   const entryIds = new Set(selection.entryIds ?? []);
   const operationAddresses = new Set(selection.operationAddresses ?? []);
@@ -729,8 +776,9 @@ export type ExpandSessionResult =
 export const expandSessionEntriesChecked = (
   sessionFile: string,
   selection: ExpandSessionSelection,
+  options: NormalizeSessionOptions = {},
 ): ExpandSessionResult => {
-  const { entries } = normalizeSession(sessionFile, Number.MAX_SAFE_INTEGER);
+  const { entries } = normalizeSession(sessionFile, Number.MAX_SAFE_INTEGER, options);
   for (const address of new Set(selection.entryIds ?? [])) {
     const matches = entries.filter((entry) => entry.entryId === address).length;
     if (matches !== 1) {
@@ -765,5 +813,5 @@ export const expandSessionEntriesChecked = (
       };
     }
   }
-  return { expanded: expandSessionEntries(sessionFile, selection) };
+  return { expanded: expandSessionEntries(sessionFile, selection, options) };
 };

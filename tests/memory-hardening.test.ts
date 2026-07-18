@@ -60,6 +60,8 @@ describe("memory query and pointer hardening", () => {
     indexDir,
     maxSessions: 500,
     maxEntryChars: 100_000,
+    indexThinking: false,
+    indexToolOutput: true,
     hotSessions: 1,
     maxColdVocabularyBytes: 512 * 1024,
     maxColdCacheBytes: 1024 * 1024,
@@ -115,7 +117,7 @@ describe("memory query and pointer hardening", () => {
     const bounded = seed("bounded-regex.jsonl", "bounded-regex", ["first", "second"]);
     const boundedResult = await provider({ regexMaxHaystackTerms: 1 }).invoke(
       "recall",
-      { scope: `session:${bounded}`, query: "absent", queryMode: "regex" },
+      { scope: `session:${bounded}`, branches: "all", query: "absent", queryMode: "regex" },
       invocationContext(cwd),
     ) as { coverage: { complete: boolean; reasons: string[] } };
     expect(boundedResult.coverage.complete).toBe(false);
@@ -147,7 +149,7 @@ describe("memory query and pointer hardening", () => {
 
     const pointer = await provider().invoke(
       "recall",
-      { scope: "project", query: "needle" },
+      { scope: "project", branches: "all", query: "needle" },
       invocationContext(cwd),
     ) as { digestHits: Array<Record<string, unknown>> };
     expect(pointer.digestHits).toHaveLength(1);
@@ -164,6 +166,7 @@ describe("memory query and pointer hardening", () => {
       {
         scope: `session:${hit.sessionFile}`,
         expectedSourceHash: hit.sourceHash,
+        branches: "all",
         query: "needle",
       },
       invocationContext(cwd),
@@ -235,7 +238,7 @@ describe("memory query and pointer hardening", () => {
 
     const beyond = await provider().invoke(
       "expand",
-      { session: file, entryRange: { first: 0, last: 2 } },
+      { session: file, branches: "all", entryRange: { first: 0, last: 2 } },
       invocationContext(cwd),
     ) as { error: { code: string; entryCount: number } };
     expect(beyond.error).toEqual(expect.objectContaining({ code: "index_out_of_bounds", entryCount: 2 }));

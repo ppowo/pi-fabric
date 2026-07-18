@@ -249,6 +249,10 @@ export class FabricState {
         config: this.#config.memory,
         sessionId,
         ...(sessionFile ? { sessionFile } : {}),
+        getLiveBranch: () => ({
+          entries: context.sessionManager.getBranch(),
+          leafId: context.sessionManager.getLeafId(),
+        }),
       };
       this.#registry.register(new MemoryProvider(memoryContext));
     }

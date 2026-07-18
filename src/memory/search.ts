@@ -1,4 +1,5 @@
 import type { DigestEntryAddress } from "./digest.js";
+import type { MemoryBranches } from "./lineage.js";
 import type { NormalizedEntry } from "./normalize.js";
 import type { DigestShard, MemoryCoverage, Shard } from "./index.js";
 import { bm25Score, recentEntries, type ScoredEntry } from "./index.js";
@@ -56,6 +57,8 @@ interface SearchSegment {
   sessionId: string;
   sessionFile: string;
   sourceHash: string;
+  branches: MemoryBranches;
+  lineageFingerprint: string;
   sessionMtime: number;
   range: string;
   entryRange: { first: number; last: number };
@@ -70,6 +73,8 @@ interface DigestHit {
   sessionId: string;
   sessionFile: string;
   sourceHash: string;
+  branches: MemoryBranches;
+  lineageFingerprint: string;
   cwd: string;
   lastTs: number | null;
   sessionMtime: number;
@@ -184,6 +189,8 @@ const toDigestHit = (digest: DigestShard, score: number, matchedTerms: number): 
   sessionId: digest.sessionId,
   sessionFile: digest.file,
   sourceHash: digest.sourceHash,
+  branches: digest.branches,
+  lineageFingerprint: digest.lineageFingerprint,
   cwd: digest.cwd,
   lastTs: digest.lastTs,
   sessionMtime: digest.mtime,
@@ -482,6 +489,8 @@ const groupIntoResults = (
         sessionId: shard.sessionId,
         sessionFile: shard.sessionFile,
         sourceHash: shard.sourceHash,
+        branches: shard.branches,
+        lineageFingerprint: shard.lineageFingerprint,
         sessionMtime: shard.mtime,
         range,
         entryRange: { first: currentStart, last: lastIndex },
@@ -593,7 +602,7 @@ const formatDigestHit = (hit: DigestHit, browse: boolean): string => {
   const match = browse
     ? "is available as a cold session pointer"
     : `has ${hit.matchedTerms} matching lexical term${hit.matchedTerms === 1 ? "" : "s"}`;
-  return `> session ${hit.sessionId} (cold, ${hit.cwd}, ${timestamp}) ${match} — hydrate exact file ${JSON.stringify(hit.sessionFile)} with expectedSourceHash ${JSON.stringify(hit.sourceHash)}.`;
+  return `> session ${hit.sessionId} (cold, ${hit.cwd}, ${timestamp}, branches=${hit.branches}) ${match} — hydrate exact file ${JSON.stringify(hit.sessionFile)} with branches ${JSON.stringify(hit.branches)}, expectedSourceHash ${JSON.stringify(hit.sourceHash)}, and expectedLineageFingerprint ${JSON.stringify(hit.lineageFingerprint)}.`;
 };
 
 const formatSegment = (segment: SearchSegment): string => {
