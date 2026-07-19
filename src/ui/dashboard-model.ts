@@ -1,0 +1,524 @@
+import type {
+  FabricActivityCall,
+  FabricActivityItem,
+  FabricActivityKind,
+  FabricActivityPhase,
+  FabricActivityRun,
+} from "../activity/types.js";
+import type { GlobalActorDefinition } from "../actors/types.js";
+import type {
+  FabricDashboardSnapshot,
+  FabricUiActor,
+  FabricUiAgent,
+  FabricUiStateEntry,
+} from "./types.js";
+import { isActiveStatus, orderAgentsByCreation } from "./types.js";
+import {
+  buildProjectMeshTopology,
+  buildRunTopologyRows,
+  type FabricProjectMeshParticipant,
+  type FabricProjectMeshRoute,
+  type FabricProjectMeshTopic,
+} from "./topology.js";
+
+export type Entity =
+  | { id: string; kind: "agent"; label: string; status: string; value: FabricUiAgent }
+  | { id: string; kind: "actor"; label: string; status: string; value: FabricUiActor }
+  | {
+      id: string;
+      kind: "globalActor";
+      label: string;
+      status: string;
+      value: GlobalActorDefinition;
+    }
+  | { id: string; kind: "call"; label: string; status: string; value: FabricActivityCall }
+  | { id: string; kind: "item"; label: string; status: string; value: FabricActivityItem }
+  | { id: string; kind: "state"; label: string; status: string; value: FabricUiStateEntry }
+  | {
+      id: string;
+      kind: "meshParticipant";
+      label: string;
+      status: string;
+      value: FabricProjectMeshParticipant;
+    }
+  | {
+      id: string;
+      kind: "meshTopic";
+      label: string;
+      status: string;
+      value: FabricProjectMeshTopic;
+    }
+  | {
+      id: string;
+      kind: "meshRoute";
+      label: string;
+      status: string;
+      value: FabricProjectMeshRoute;
+    };
+
+type PanelKind = "phase" | "unphased" | "session";
+
+export interface PhasePanel {
+  id: string;
+  name: string;
+  status: string;
+  completed: number;
+  total: number;
+  phase?: FabricActivityPhase;
+  kind: PanelKind;
+  agents?: number;
+  tokens?: number;
+  elapsedMs?: number;
+}
+
+export type Pane = "phases" | "entities";
+export type OverviewView = "activity" | "topology";
+export type TopologyView = "run" | "mesh";
+
+type EntityGroupKind =
+  | FabricActivityKind
+  | "globalActor"
+  | "state"
+  | "meshParticipant"
+  | "meshTopic"
+  | "meshRoute";
+
+export interface EntityGroup {
+  kind: EntityGroupKind;
+  label: string;
+  entries: Array<{ entity: Entity; index: number }>;
+}
+
+const entityGroupOrder: readonly EntityGroupKind[] = [
+  "agent",
+  "actor",
+  "globalActor",
+  "tool",
+  "extension",
+  "mcp",
+  "mesh",
+  "task",
+  "custom",
+  "state",
+  "meshParticipant",
+  "meshTopic",
+  "meshRoute",
+];
+
+const entityGroupLabels: Record<EntityGroupKind, string> = {
+  agent: "Agents",
+  actor: "Actors",
+  globalActor: "Global templates",
+  tool: "Tools",
+  extension: "Extensions",
+  mcp: "MCP",
+  mesh: "Mesh",
+  task: "Tasks",
+  custom: "Custom items",
+  state: "Shared state",
+  meshParticipant: "Transient mesh agents",
+  meshTopic: "Topics",
+  meshRoute: "Recent routes",
+};
+
+const entityGroupKind = (entity: Entity): EntityGroupKind => {
+  if (entity.kind === "agent") return "agent";
+  if (entity.kind === "actor") return "actor";
+  if (entity.kind === "globalActor") return "globalActor";
+  if (entity.kind === "state") return "state";
+  if (entity.kind === "meshParticipant") return "meshParticipant";
+  if (entity.kind === "meshTopic") return "meshTopic";
+  if (entity.kind === "meshRoute") return "meshRoute";
+  if (entity.kind === "call") return entity.value.entityKind ?? entity.value.kind;
+  return entity.value.kind;
+};
+
+const entityGroupRanks = new Map(
+  entityGroupOrder.map((kind, index) => [kind, index] as const),
+);
+
+const orderEntitiesByGroup = (entities: Entity[]): Entity[] =>
+  entities
+    .map((entity, index) => ({ entity, index }))
+    .sort(
+      (left, right) =>
+        (entityGroupRanks.get(entityGroupKind(left.entity)) ?? Number.MAX_SAFE_INTEGER) -
+          (entityGroupRanks.get(entityGroupKind(right.entity)) ?? Number.MAX_SAFE_INTEGER) ||
+        left.index - right.index,
+    )
+    .map(({ entity }) => entity);
+
+export const groupEntities = (entities: Entity[]): EntityGroup[] => {
+  const indexed = entities.map((entity, index) => ({ entity, index }));
+  return entityGroupOrder.flatMap((kind) => {
+    const entries = indexed.filter(({ entity }) => entityGroupKind(entity) === kind);
+    return entries.length > 0 ? [{ kind, label: entityGroupLabels[kind], entries }] : [];
+  });
+};
+
+export type StatusFilter = "all" | "active" | "completed" | "failed";
+
+export const filters: StatusFilter[] = ["all", "active", "completed", "failed"];
+
+const linkedEntityId = (entityId: string | undefined, id: string): boolean =>
+  Boolean(entityId && (id.startsWith(entityId) || entityId.startsWith(id)));
+
+const linkedAgent = (call: FabricActivityCall, agent: FabricUiAgent): boolean =>
+  linkedEntityId(call.entityId, agent.id);
+
+const agentLaunchRefs = new Set(["agents.run", "agents.spawn"]);
+
+const UNPHASED_PANEL_ID = "__fabric_unphased";
+const SESSION_PANEL_ID = "__fabric_session";
+
+const callsForPanel = (
+  run: FabricActivityRun | undefined,
+  panel: PhasePanel,
+): FabricActivityCall[] => {
+  if (!run || panel.kind === "session") return [];
+  return run.calls.filter((call) =>
+    panel.kind === "unphased" ? !call.phaseId : call.phaseId === panel.id,
+  );
+};
+
+const itemsForPanel = (
+  run: FabricActivityRun | undefined,
+  panel: PhasePanel,
+): FabricActivityItem[] => {
+  if (!run || panel.kind === "session") return [];
+  return run.items.filter((item) =>
+    panel.kind === "unphased" ? !item.phaseId : item.phaseId === panel.id,
+  );
+};
+
+const entitiesFor = (
+  snapshot: FabricDashboardSnapshot,
+  run: FabricActivityRun | undefined,
+  panel: PhasePanel | undefined,
+): Entity[] => {
+  if (!panel || panel.kind === "session") {
+    const unlinkedAgents: Entity[] = orderAgentsByCreation(snapshot.agents)
+      .filter((agent) => agent.runId !== run?.id && isActiveStatus(agent.status))
+      .map((agent) => ({
+        id: `agent:${agent.id}`,
+        kind: "agent",
+        label: agent.name,
+        status: agent.status,
+        value: agent,
+      }));
+    const actors: Entity[] = snapshot.actors.map((actor) => ({
+      id: `actor:${actor.id}`,
+      kind: "actor",
+      label: actor.name,
+      status: actor.lastError ? "failed" : actor.status,
+      value: actor,
+    }));
+    const globalActors: Entity[] = snapshot.globalActors.map((definition) => ({
+      id: `globalActor:${definition.id}`,
+      kind: "globalActor",
+      label: definition.name,
+      status: "global",
+      value: definition,
+    }));
+    const state: Entity[] = snapshot.state.map((entry) => ({
+      id: `state:${entry.key}`,
+      kind: "state",
+      label: entry.label,
+      status: entry.status,
+      value: entry,
+    }));
+    return orderEntitiesByGroup([...unlinkedAgents, ...actors, ...globalActors, ...state]);
+  }
+
+  const calls = callsForPanel(run, panel);
+  const panelAgents = orderAgentsByCreation(snapshot.agents).filter((agent) => {
+    const ownedByPanel =
+      agent.runId === run?.id &&
+      (panel.kind === "unphased" ? !agent.phaseId : agent.phaseId === panel.id);
+    return ownedByPanel || (!agent.runId && calls.some((call) => linkedAgent(call, agent)));
+  });
+  const linkedAgents: Entity[] = panelAgents.map((agent) => ({
+    id: `agent:${agent.id}`,
+    kind: "agent",
+    label: agent.name,
+    status: agent.status,
+    value: agent,
+  }));
+  const visibleCalls: Entity[] = calls
+    .filter((call) => {
+      const representedAgentLaunch =
+        call.kind === "agent" &&
+        agentLaunchRefs.has(call.ref) &&
+        panelAgents.some((agent) => linkedAgent(call, agent));
+      const representedActorCreation =
+        call.kind === "actor" &&
+        call.ref === "agents.create" &&
+        snapshot.actors.some((actor) => linkedEntityId(call.entityId, actor.id));
+      return !representedAgentLaunch && !representedActorCreation;
+    })
+    .map((call) => ({
+      id: `call:${call.id}`,
+      kind: "call",
+      label: call.label,
+      status: call.status,
+      value: call,
+    }));
+  const items: Entity[] = itemsForPanel(run, panel).map((item) => ({
+    id: `item:${item.id}`,
+    kind: "item",
+    label: item.label,
+    status: item.status,
+    value: item,
+  }));
+  return orderEntitiesByGroup([...linkedAgents, ...visibleCalls, ...items]);
+};
+
+const runTopologyEntitiesFor = (
+  snapshot: FabricDashboardSnapshot,
+  run: FabricActivityRun | undefined,
+): Entity[] => {
+  if (!run) return [];
+  const agents = orderAgentsByCreation(snapshot.agents).filter((agent) => agent.runId === run.id);
+  return buildRunTopologyRows(run, agents)
+    .filter((row) => row.kind === "agent")
+    .map((row) => ({
+      id: row.entityId,
+      kind: "agent" as const,
+      label: row.agent.name,
+      status: row.agent.status,
+      value: row.agent,
+    }));
+};
+
+const projectMeshEntitiesFor = (snapshot: FabricDashboardSnapshot): Entity[] => {
+  const model = buildProjectMeshTopology({
+    actors: snapshot.actors,
+    agents: snapshot.agents,
+    state: snapshot.state,
+    events: snapshot.events,
+    now: snapshot.now,
+  });
+  return model.rows.flatMap((row): Entity[] => {
+    if (row.kind === "meshActor") {
+      return [
+        {
+          id: row.entityId,
+          kind: "actor",
+          label: row.actor.name,
+          status: row.actor.lastError ? "failed" : row.actor.status,
+          value: row.actor,
+        },
+      ];
+    }
+    if (row.kind === "meshAgent") {
+      if (row.participant.agent) {
+        return [
+          {
+            id: row.entityId,
+            kind: "agent",
+            label: row.participant.agent.name,
+            status: row.participant.agent.status,
+            value: row.participant.agent,
+          },
+        ];
+      }
+      return [
+        {
+          id: row.entityId,
+          kind: "meshParticipant",
+          label: row.participant.name,
+          status: row.participant.status,
+          value: row.participant,
+        },
+      ];
+    }
+    if (row.kind === "meshTopic") {
+      return [
+        {
+          id: row.entityId,
+          kind: "meshTopic",
+          label: row.topic.name,
+          status: row.topic.status,
+          value: row.topic,
+        },
+      ];
+    }
+    if (row.kind === "meshState") {
+      return [
+        {
+          id: row.entityId,
+          kind: "state",
+          label: row.state.label,
+          status: row.state.status,
+          value: row.state,
+        },
+      ];
+    }
+    if (row.kind === "meshRoute") {
+      return [
+        {
+          id: row.entityId,
+          kind: "meshRoute",
+          label: `${row.route.fromName} → ${row.route.targetName}`,
+          status: row.route.status,
+          value: row.route,
+        },
+      ];
+    }
+    return [];
+  });
+};
+
+export const entitiesForOverview = (
+  snapshot: FabricDashboardSnapshot,
+  run: FabricActivityRun | undefined,
+  panel: PhasePanel | undefined,
+  view: OverviewView,
+  topologyView: TopologyView,
+): Entity[] => {
+  if (view === "topology" && topologyView === "run") {
+    return runTopologyEntitiesFor(snapshot, run);
+  }
+  if (view === "topology" && topologyView === "mesh") {
+    return projectMeshEntitiesFor(snapshot);
+  }
+  return entitiesFor(snapshot, run, panel);
+};
+
+const panelStatus = (entities: Entity[], fallback: string): string => {
+  if (entities.some((entity) => ["failed", "timed_out", "error"].includes(entity.status))) {
+    return "failed";
+  }
+  if (entities.some((entity) => entity.status === "blocked")) return "blocked";
+  if (entities.some((entity) => isActiveStatus(entity.status))) return "running";
+  if (
+    entities.length > 0 &&
+    entities.every((entity) =>
+      ["completed", "done", "stopped", "cancelled", "global", "idle", "state"].includes(
+        entity.status,
+      ),
+    )
+  ) {
+    return "completed";
+  }
+  return fallback;
+};
+
+const withPanelProgress = (
+  snapshot: FabricDashboardSnapshot,
+  run: FabricActivityRun | undefined,
+  panel: PhasePanel,
+): PhasePanel => {
+  const entities = entitiesFor(snapshot, run, panel);
+  const status =
+    panel.kind === "session"
+      ? entities.some((entity) => ["failed", "timed_out", "error"].includes(entity.status))
+        ? "failed"
+        : entities.some((entity) => isActiveStatus(entity.status))
+          ? "running"
+          : "idle"
+      : panelStatus(entities, panel.status);
+  const agents = entities.filter((entity) => entity.kind === "agent");
+  const tokens = agents.reduce(
+    (sum, entity) =>
+      sum +
+      (entity.kind === "agent" && entity.value.usage
+        ? entity.value.usage.input + entity.value.usage.output
+        : 0),
+    0,
+  );
+  const starts = entities
+    .flatMap((entity) => {
+      if (entity.kind === "agent" || entity.kind === "call") return [entity.value.startedAt ?? 0];
+      if (entity.kind === "item") return [entity.value.createdAt];
+      return [];
+    })
+    .filter((value) => value > 0);
+  const startedAt = starts.length > 0 ? Math.min(...starts) : undefined;
+  const hasActive = entities.some((entity) => isActiveStatus(entity.status));
+  const finishes = entities
+    .flatMap((entity) => {
+      if (entity.kind === "agent" || entity.kind === "call") return [entity.value.finishedAt ?? 0];
+      if (entity.kind === "item") return [entity.value.finishedAt ?? 0];
+      return [];
+    })
+    .filter((value) => value > 0);
+  const finishedAt = hasActive
+    ? snapshot.now
+    : finishes.length > 0
+      ? Math.max(...finishes)
+      : undefined;
+  return {
+    ...panel,
+    status,
+    completed: entities.filter(
+      (entity) => entity.status === "completed" || entity.status === "done",
+    ).length,
+    total: Math.max(panel.total, entities.length),
+    ...(agents.length > 0 ? { agents: agents.length } : {}),
+    ...(tokens > 0 ? { tokens } : {}),
+    ...(startedAt && finishedAt ? { elapsedMs: Math.max(0, finishedAt - startedAt) } : {}),
+  };
+};
+
+export const phasePanels = (
+  snapshot: FabricDashboardSnapshot,
+  run: FabricActivityRun | undefined,
+): PhasePanel[] => {
+  const panels: PhasePanel[] = [];
+
+  if (run) {
+    const runActivity: PhasePanel = {
+      id: UNPHASED_PANEL_ID,
+      name: "Run activity",
+      status: run.status,
+      completed: 0,
+      total: 0,
+      kind: "unphased",
+    };
+    if (entitiesFor(snapshot, run, runActivity).length > 0) panels.push(runActivity);
+  }
+
+  panels.push(
+    ...(run?.phases.map((phase) => ({
+      id: phase.id,
+      name: phase.name,
+      status: phase.status,
+      completed: 0,
+      total: phase.total ?? 0,
+      phase,
+      kind: "phase" as const,
+    })) ?? []),
+  );
+
+  const session: PhasePanel = {
+    id: SESSION_PANEL_ID,
+    name: "Actors & shared state",
+    status: "idle",
+    completed: 0,
+    total: 0,
+    kind: "session",
+  };
+  const sessionEntities = entitiesFor(snapshot, run, session);
+  if (sessionEntities.length > 0 || panels.length === 0) panels.push(session);
+
+  return panels.map((panel) => withPanelProgress(snapshot, run, panel));
+};
+
+export const matchesFilter = (status: string, filter: StatusFilter): boolean => {
+  if (filter === "all") return true;
+  if (filter === "active") return isActiveStatus(status);
+  if (filter === "completed") return status === "completed" || status === "done";
+  return status === "failed" || status === "timed_out" || status === "blocked" || status === "error";
+};
+
+export const tokensFor = (
+  snapshot: FabricDashboardSnapshot,
+  run: FabricActivityRun | undefined,
+): number =>
+  snapshot.agents
+    .filter((agent) => !run || agent.runId === run.id)
+    .reduce(
+      (sum, agent) => sum + (agent.usage ? agent.usage.input + agent.usage.output : 0),
+      0,
+    );
