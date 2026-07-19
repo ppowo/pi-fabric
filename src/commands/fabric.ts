@@ -168,7 +168,7 @@ export function registerFabricCommand(pi: ExtensionAPI, deps: FabricCommandDeps)
     },
     async handler(argumentsText, context) {
       await state.ensure(context);
-      const [command = "status", ...argumentsList] = argumentsText
+      const [command = "dashboard", ...argumentsList] = argumentsText
         .trim()
         .split(/\s+/)
         .filter(Boolean);
