@@ -14,7 +14,7 @@ Every method takes a single options object.
 `args` is a `FabricAgentRequest`: `{ task, name?, runner?, transport?, model?, thinking?, tools?, timeoutMs?, extensions?, recursive?, worktree?, schema? }`.
 
 - `runner` is `pi` or `claude` and defaults to `subagents.runner` (`pi`).
-- `transport` is one of `auto`, `process`, `tmux`, `screen`, `localterm` (default `process`). `auto` tries LocalTerm, tmux, screen, then process.
+- `transport` is one of `auto`, `process`, `tmux`, `screen`, `localterm`, `herdr` (default `process`). `auto` tries Herdr when the parent runs inside a Herdr workspace, then LocalTerm, tmux, screen, and process.
 - Pi `model` values are `provider/id` keys from `tools.models()`; omitted uses `subagents.model` or inherits the host model. Claude values are `claude/<value>` keys from `agents.models({ runner: "claude" })`; omitted uses `subagents.claude.model` or Claude Code's runtime default. `agents.models()` defaults to the configured runner; Claude discovery is a local CLI control handshake and makes no model inference request.
 - `thinking` is the reasoning effort (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`); defaults to `subagents.thinking` (`medium`) and is clamped to the model's supported levels (next highest when unsupported).
 - `tools` defaults to `subagents.defaultTools`. Claude maps `read→Read`, `grep→Grep`, `find/ls→Glob`, `bash→Bash`, `edit→Edit`, and `write→Write`; other tool names fail before launch.

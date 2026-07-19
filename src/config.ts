@@ -5,7 +5,13 @@ import type { FabricRisk } from "./protocol.js";
 import { DEFAULT_FABRIC_THINKING, isFabricThinking, type FabricThinking } from "./thinking.js";
 
 type FabricApprovalMode = "allow" | "ask" | "deny";
-export type FabricSubagentTransport = "auto" | "process" | "tmux" | "screen" | "localterm";
+export type FabricSubagentTransport =
+  | "auto"
+  | "process"
+  | "tmux"
+  | "screen"
+  | "localterm"
+  | "herdr";
 export type FabricAgentRunner = "pi" | "claude";
 export type FabricUiWidgetMode = "auto" | "always" | "hidden";
 export type FabricResultFormat = "auto" | "yaml" | "json" | "text";
@@ -323,7 +329,8 @@ const transportValue = (
   value === "process" ||
   value === "tmux" ||
   value === "screen" ||
-  value === "localterm"
+  value === "localterm" ||
+  value === "herdr"
     ? value
     : fallback;
 

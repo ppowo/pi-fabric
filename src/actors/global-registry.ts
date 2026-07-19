@@ -22,7 +22,14 @@ const HOST_EVENTS = new Set<FabricActorHostEvent>([
 ]);
 const DELIVERIES = new Set<FabricActorDelivery>(["mailbox", "steer", "followUp", "nextTurn"]);
 const RESPONSE_MODES = new Set<FabricActorResponseMode>(["text", "directive"]);
-const TRANSPORTS = new Set<FabricSubagentTransport>(["auto", "process", "tmux", "screen", "localterm"]);
+const TRANSPORTS = new Set<FabricSubagentTransport>([
+  "auto",
+  "process",
+  "tmux",
+  "screen",
+  "localterm",
+  "herdr",
+]);
 
 interface RegistryFile {
   format: 1;

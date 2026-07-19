@@ -36,7 +36,7 @@ describe("Fabric configuration", () => {
       fullCodeMode: false,
       executor: { timeoutMs: 1, memoryLimitBytes: Number.MAX_SAFE_INTEGER },
       approvals: { write: "allow", agent: "invalid" },
-      subagents: { maxConcurrent: 100, maxPerExecution: 5_000, transport: "localterm" },
+      subagents: { maxConcurrent: 100, maxPerExecution: 5_000, transport: "herdr" },
       capture: {
         keepVisible: ["fabric_exec", "custom", "custom"],
         defaultRisk: "invalid",
@@ -57,7 +57,7 @@ describe("Fabric configuration", () => {
     expect(config.approvals.agent).toBe("allow");
     expect(config.subagents.maxConcurrent).toBe(32);
     expect(config.subagents.maxPerExecution).toBe(1_000);
-    expect(config.subagents.transport).toBe("localterm");
+    expect(config.subagents.transport).toBe("herdr");
     expect(config.capture.keepVisible).toEqual(["fabric_exec", "custom"]);
     expect(config.capture.defaultRisk).toBe("execute");
     expect(config.capture.risks).toMatchObject({ inspect: "read", mutate: "execute" });

@@ -1200,7 +1200,8 @@ export class ActorManager {
         record.transport === "process" ||
         record.transport === "tmux" ||
         record.transport === "screen" ||
-        record.transport === "localterm"
+        record.transport === "localterm" ||
+        record.transport === "herdr"
           ? { transport: record.transport }
           : {}),
         ...(typeof record.timeoutMs === "number" ? { timeoutMs: record.timeoutMs } : {}),

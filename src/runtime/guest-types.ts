@@ -1,7 +1,7 @@
 export const GUEST_TYPE_DECLARATIONS = `
 type JsonPrimitive = string | number | boolean | null;
 type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
-type FabricTransport = "auto" | "process" | "tmux" | "screen" | "localterm";
+type FabricTransport = "auto" | "process" | "tmux" | "screen" | "localterm" | "herdr";
 type FabricAgentRunner = "pi" | "claude";
 type FabricThinking = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 interface FabricAction {

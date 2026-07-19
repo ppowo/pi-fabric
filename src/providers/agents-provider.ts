@@ -26,7 +26,7 @@ const runProperties = {
   },
   transport: {
     type: "string",
-    enum: ["auto", "process", "tmux", "screen", "localterm"],
+    enum: ["auto", "process", "tmux", "screen", "localterm", "herdr"],
   },
   model: {
     type: "string",
@@ -422,7 +422,8 @@ const runRequest = (
     args.transport === "process" ||
     args.transport === "tmux" ||
     args.transport === "screen" ||
-    args.transport === "localterm"
+    args.transport === "localterm" ||
+    args.transport === "herdr"
       ? args.transport
       : undefined;
   const thinking = isFabricThinking(args.thinking) ? args.thinking : undefined;
@@ -505,7 +506,8 @@ const actorRequest = (
     args.transport === "process" ||
     args.transport === "tmux" ||
     args.transport === "screen" ||
-    args.transport === "localterm"
+    args.transport === "localterm" ||
+    args.transport === "herdr"
       ? { transport: args.transport }
       : {}),
     ...(typeof args.timeoutMs === "number" ? { timeoutMs: args.timeoutMs } : {}),
@@ -635,7 +637,7 @@ const waitWithActorProgress = async (
 export class AgentsProvider implements FabricProvider {
   readonly name = "agents";
   readonly description =
-    "The user-facing Main target, one-shot Pi or Claude Code agents, and persistent mailbox actors over process, tmux, screen, or LocalTerm";
+    "The user-facing Main target, one-shot Pi or Claude Code agents, and persistent mailbox actors over process, tmux, screen, LocalTerm, or Herdr";
 
   constructor(
     readonly manager: SubagentManager,

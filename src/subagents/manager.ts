@@ -18,6 +18,7 @@ import {
 } from "./claude-cli.js";
 import { Semaphore } from "./semaphore.js";
 import { removeTree } from "./rm.js";
+import { HerdrTransport } from "./transports/herdr-transport.js";
 import { LocaltermTransport } from "./transports/localterm-transport.js";
 import { ProcessTransport } from "./transports/process-transport.js";
 import { ScreenTransport } from "./transports/screen-transport.js";
@@ -254,6 +255,7 @@ export class SubagentManager {
       new TmuxTransport(),
       new ScreenTransport(),
       new LocaltermTransport(),
+      new HerdrTransport(),
     ];
     this.#transports = new Map(adapters.map((adapter) => [adapter.kind, adapter]));
   }
@@ -732,7 +734,7 @@ export class SubagentManager {
       }
       return adapter;
     }
-    for (const kind of ["localterm", "tmux", "screen", "process"] as const) {
+    for (const kind of ["herdr", "localterm", "tmux", "screen", "process"] as const) {
       const adapter = this.#transports.get(kind);
       if (adapter && (await adapter.available())) return adapter;
     }

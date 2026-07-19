@@ -87,7 +87,10 @@ Claude-backed children are intentionally **not recursively Fabric-equipped**: `r
 | `tmux`      | One detached tmux session per child                        | `tmux attach-session -t …`   |
 | `screen`    | One detached GNU Screen session per child                  | `screen -r …`                |
 | `localterm` | One pinned LocalTerm PTY per child                         | `localterm session attach …` |
-| `auto`      | Tries LocalTerm, tmux, screen, then process                | transport-specific           |
+| `herdr`     | One background Herdr tab per child                         | `herdr terminal attach …`    |
+| `auto`      | Tries Herdr, LocalTerm, tmux, screen, then process         | transport-specific           |
+
+Herdr uses its local socket API to create an argv-backed background tab atomically, without shell quoting or focus changes. Automatic selection is enabled only when the parent Pi process is already inside Herdr (`HERDR_ENV=1` with an injected workspace and socket); select `transport: "herdr"` under the same conditions. Each child can be opened directly with the attach command in its handle.
 
 LocalTerm already exposes the needed tmux-parity primitives: detached creation, pinning, listing, capture, exec, attach, and kill. Pi Fabric therefore requires no LocalTerm patch. Start its daemon before selecting it:
 
