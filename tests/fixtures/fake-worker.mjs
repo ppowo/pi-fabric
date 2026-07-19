@@ -46,7 +46,8 @@ if (task.includes("HANG")) {
     ? { action: "message", message: "fake actor advice" }
     : undefined;
   const now = Date.now();
-  const text = directive && !fail ? JSON.stringify(directive) : "fake worker complete";
+  const largeText = task.includes("LARGE_RESULT") ? "x".repeat(100_000) : undefined;
+  const text = largeText ?? (directive && !fail ? JSON.stringify(directive) : "fake worker complete");
   const record = {
     id: args.get("id"),
     name: args.get("name"),
@@ -65,7 +66,11 @@ if (task.includes("HANG")) {
     turns: 1,
     toolCalls: 0,
     text,
-    ...(directive && !fail ? { value: directive } : {}),
+    ...(largeText
+      ? { value: { output: largeText } }
+      : directive && !fail
+        ? { value: directive }
+        : {}),
     ...(fail ? { error: "Structured agent output was invalid: Unexpected token (output: not json)" } : {}),
     exitCode: 0,
     usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, cost: 0 },

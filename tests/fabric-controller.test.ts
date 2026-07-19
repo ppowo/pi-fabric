@@ -156,6 +156,34 @@ describe("FabricUiController dashboard wiring", () => {
     }
   });
 
+  it("coalesces bursty activity updates into a 10 Hz refresh", async () => {
+    vi.useFakeTimers();
+    const state = stubState();
+    state.config.ui.refreshMs = 500;
+    let onActivity = (): void => {};
+    vi.mocked(state.activity.subscribe).mockImplementation((listener) => {
+      onActivity = listener;
+      return () => {};
+    });
+    const context = {
+      mode: "tui",
+      ui: { setWidget: vi.fn(), notify: vi.fn() },
+    } as unknown as ExtensionContext;
+    const controller = new FabricUiController(state);
+    try {
+      controller.start(context);
+      expect(state.activity.runs).toHaveBeenCalledTimes(1);
+      for (let index = 0; index < 25; index++) onActivity();
+      await vi.advanceTimersByTimeAsync(99);
+      expect(state.activity.runs).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(state.activity.runs).toHaveBeenCalledTimes(2);
+    } finally {
+      controller.stop();
+      vi.useRealTimers();
+    }
+  });
+
   it("surfaces dashboard refresh failures while retaining the last snapshot", async () => {
     const state = stubState();
     vi.mocked(state.activity.runs).mockImplementation(() => {

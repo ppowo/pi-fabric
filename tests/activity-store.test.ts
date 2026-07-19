@@ -136,6 +136,37 @@ describe("FabricActivityStore", () => {
     expect(failed?.detail).toBeUndefined();
   });
 
+  it("bounds retained call payloads and run history", () => {
+    const store = new FabricActivityStore();
+    const large = "x".repeat(100_000);
+    store.start("bounded");
+    store.beginCall("bounded", {
+      callId: "large",
+      ref: "pi.write",
+      args: { path: "/tmp/large.txt", content: large },
+    });
+    store.finishCall("bounded", "large", {
+      success: true,
+      result: { ok: true, output: large },
+      preview: { diff: large },
+    });
+
+    const call = store.get("bounded")?.calls[0];
+    expect(call?.label).toContain("/tmp/large.txt");
+    expect(call?.args).toMatchObject({ fabricTruncated: true });
+    expect(call?.result).toMatchObject({ fabricTruncated: true });
+    expect(call?.preview).toMatchObject({ fabricTruncated: true });
+    expect(JSON.stringify(call).length).toBeLessThan(200_000);
+
+    store.finish("bounded", true);
+    for (let index = 0; index < 30; index++) {
+      store.start(`run-${index}`);
+      store.finish(`run-${index}`, true);
+    }
+    expect(store.runs()).toHaveLength(24);
+    expect(store.get("bounded")).toBeUndefined();
+  });
+
   it("marks failed calls and cancelled executions", () => {
     const store = new FabricActivityStore();
     store.start("run-2");

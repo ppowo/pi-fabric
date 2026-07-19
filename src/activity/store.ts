@@ -23,6 +23,7 @@ const MAX_NAME_CHARS = 120;
 const MAX_DESCRIPTION_CHARS = 500;
 const MAX_DETAIL_CHARS = 1_000;
 const MAX_DATA_CHARS = 8_000;
+const MAX_CALL_PAYLOAD_CHARS = 64_000;
 const MAX_CALL_SUMMARY_CHARS = 120;
 
 const terminalStatuses = new Set<FabricActivityStatus>([
@@ -45,21 +46,21 @@ const cleanId = (value: unknown, fallback: string): string => {
   return safe || fallback;
 };
 
-const boundedData = (value: unknown): unknown => {
+const boundedData = (value: unknown, maxChars = MAX_DATA_CHARS): unknown => {
   if (value === undefined) return undefined;
   try {
     const serialized = JSON.stringify(value, (_key, nested) =>
       typeof nested === "bigint" ? String(nested) : nested,
     );
     if (serialized === undefined) return undefined;
-    if (serialized.length <= MAX_DATA_CHARS) return JSON.parse(serialized) as unknown;
+    if (serialized.length <= maxChars) return JSON.parse(serialized) as unknown;
     return {
       fabricTruncated: true,
       originalChars: serialized.length,
-      preview: serialized.slice(0, MAX_DATA_CHARS - 100),
+      preview: serialized.slice(0, Math.max(1, maxChars - 100)),
     };
   } catch {
-    return cleanText(String(value), MAX_DATA_CHARS);
+    return cleanText(String(value), maxChars);
   }
 };
 
@@ -127,7 +128,13 @@ const isFailedResult = (value: unknown): boolean => {
 
 export class FabricActivityStore {
   readonly #runs = new Map<string, FabricActivityRun>();
+  readonly #callIndex = new Map<string, Map<string, FabricActivityCall>>();
   readonly #listeners = new Set<() => void>();
+  #revision = 0;
+
+  revision(): number {
+    return this.#revision;
+  }
 
   subscribe(listener: () => void): () => void {
     this.#listeners.add(listener);
@@ -137,6 +144,7 @@ export class FabricActivityStore {
   reset(): void {
     if (this.#runs.size === 0) return;
     this.#runs.clear();
+    this.#callIndex.clear();
     this.#emit();
   }
 
@@ -158,6 +166,7 @@ export class FabricActivityStore {
     };
     this.#runs.delete(id);
     this.#runs.set(id, run);
+    this.#callIndex.set(id, new Map());
     this.#prune();
     this.#emit();
     return structuredClone(run);
@@ -316,25 +325,32 @@ export class FabricActivityStore {
   ): void {
     const run = this.#require(runId);
     const now = Date.now();
-    if (run.calls.length >= MAX_CALLS) run.calls.splice(0, run.calls.length - MAX_CALLS + 1);
-    run.calls.push({
+    const index = this.#callIndex.get(runId) ?? new Map<string, FabricActivityCall>();
+    this.#callIndex.set(runId, index);
+    if (run.calls.length >= MAX_CALLS) {
+      const removed = run.calls.splice(0, run.calls.length - MAX_CALLS + 1);
+      for (const call of removed) index.delete(call.id);
+    }
+    const call: FabricActivityCall = {
       id: input.callId,
       ref: input.ref,
       label: labelForCall(input.ref, input.args),
       kind: kindForRef(input.ref),
       status: "running",
-      args: structuredClone(input.args),
+      args: boundedData(input.args, MAX_CALL_PAYLOAD_CHARS) as Record<string, unknown>,
       ...(run.currentPhaseId ? { phaseId: run.currentPhaseId } : {}),
       startedAt: now,
       updatedAt: now,
-    });
+    };
+    run.calls.push(call);
+    index.set(call.id, call);
     run.updatedAt = now;
     this.#emit();
   }
 
   updateCall(runId: string, callId: string, update: FabricInvocationActivityUpdate): void {
     const run = this.#require(runId);
-    const call = run.calls.find((candidate) => candidate.id === callId);
+    const call = this.#callIndex.get(runId)?.get(callId);
     if (!call) return;
     const now = Date.now();
     if (update.type === "progress") {
@@ -366,7 +382,7 @@ export class FabricActivityStore {
     input: { success: boolean; result?: unknown; preview?: unknown; error?: string },
   ): void {
     const run = this.#require(runId);
-    const call = run.calls.find((candidate) => candidate.id === callId);
+    const call = this.#callIndex.get(runId)?.get(callId);
     if (!call) return;
     const now = Date.now();
     const resultFailed = isFailedResult(input.result);
@@ -375,8 +391,12 @@ export class FabricActivityStore {
     call.finishedAt = now;
     const error = cleanText(input.error, MAX_DETAIL_CHARS);
     if (error) call.error = error;
-    if (input.result !== undefined) call.result = structuredClone(input.result);
-    if (input.preview !== undefined) call.preview = structuredClone(input.preview);
+    if (input.result !== undefined) {
+      call.result = boundedData(input.result, MAX_CALL_PAYLOAD_CHARS);
+    }
+    if (input.preview !== undefined) {
+      call.preview = boundedData(input.preview, MAX_CALL_PAYLOAD_CHARS);
+    }
     const metrics = metricsFrom(input.result);
     if (metrics) call.metrics = { ...(call.metrics ?? {}), ...metrics };
     if (call.status === "completed") {
@@ -462,11 +482,14 @@ export class FabricActivityStore {
       .sort((left, right) => left.updatedAt - right.updatedAt);
     while (this.#runs.size > MAX_RUNS && removable.length > 0) {
       const run = removable.shift();
-      if (run) this.#runs.delete(run.id);
+      if (!run) break;
+      this.#runs.delete(run.id);
+      this.#callIndex.delete(run.id);
     }
   }
 
   #emit(): void {
+    this.#revision++;
     for (const listener of this.#listeners) {
       try {
         listener();

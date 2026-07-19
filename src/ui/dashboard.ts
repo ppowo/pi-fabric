@@ -46,7 +46,10 @@ import { formatClock, formatDuration, formatTokens, padToWidth, safeText, wrapPl
 import { highlightCode } from "./highlight.js";
 import { INHERIT_VALUE, type ModelSource } from "./model-picker.js";
 import { formatJsonAsYaml } from "./structured.js";
-import { buildProjectMeshTopology } from "./topology.js";
+import {
+  buildProjectMeshTopology,
+  type FabricProjectMeshModel,
+} from "./topology.js";
 import type { FabricAgentTranscript, FabricTranscriptEntry } from "./transcript.js";
 import type { FabricDashboardSnapshot, FabricUiActor, FabricUiAgent } from "./types.js";
 import { isActiveStatus } from "./types.js";
@@ -284,7 +287,15 @@ export class FabricDashboard implements Component, Focusable {
     const panels = phasePanels(snapshot, run);
     this.syncPhase(run, panels);
     const panel = panels[this.phaseIndex];
-    const allEntities = entitiesForOverview(snapshot, run, panel, this.overviewView, this.topologyView);
+    const projectMesh = this.projectMesh(snapshot);
+    const allEntities = entitiesForOverview(
+      snapshot,
+      run,
+      panel,
+      this.overviewView,
+      this.topologyView,
+      projectMesh,
+    );
     const entities = allEntities.filter(
       (entity) => entity.kind === "main" || matchesFilter(entity.status, this.filter),
     );
@@ -643,7 +654,15 @@ export class FabricDashboard implements Component, Focusable {
     const panels = phasePanels(snapshot, run);
     this.syncPhase(run, panels);
     const panel = panels[this.phaseIndex];
-    const allEntities = entitiesForOverview(snapshot, run, panel, this.overviewView, this.topologyView);
+    const projectMesh = this.projectMesh(snapshot);
+    const allEntities = entitiesForOverview(
+      snapshot,
+      run,
+      panel,
+      this.overviewView,
+      this.topologyView,
+      projectMesh,
+    );
     const entities = allEntities.filter(
       (entity) => entity.kind === "main" || matchesFilter(entity.status, this.filter),
     );
@@ -653,7 +672,15 @@ export class FabricDashboard implements Component, Focusable {
       if (detail) return this.renderDetail(width, snapshot, detail);
       this.closeDetail();
     }
-    return this.renderOverview(width, snapshot, run, panels, entities, allEntities);
+    return this.renderOverview(
+      width,
+      snapshot,
+      run,
+      panels,
+      entities,
+      allEntities,
+      projectMesh,
+    );
   }
 
   invalidate(): void {
@@ -1011,6 +1038,18 @@ export class FabricDashboard implements Component, Focusable {
     return lines.map((line) => truncateToWidth(line, width, ""));
   }
 
+  private projectMesh(snapshot: FabricDashboardSnapshot): FabricProjectMeshModel | undefined {
+    if (this.overviewView !== "topology" || this.topologyView !== "mesh") return undefined;
+    return buildProjectMeshTopology({
+      main: snapshot.main,
+      actors: snapshot.actors,
+      agents: snapshot.agents,
+      state: snapshot.state,
+      events: snapshot.events,
+      now: snapshot.now,
+    });
+  }
+
   private renderOverview(
     width: number,
     snapshot: FabricDashboardSnapshot,
@@ -1018,6 +1057,7 @@ export class FabricDashboard implements Component, Focusable {
     panels: PhasePanel[],
     entities: Entity[],
     allEntities: Entity[],
+    meshModel?: FabricProjectMeshModel,
   ): string[] {
     if (width < 24) {
       return [truncateToWidth("too narrow · need 24 cols", width)];
@@ -1044,17 +1084,6 @@ export class FabricDashboard implements Component, Focusable {
     const elapsed = run
       ? formatDuration(((hasDetachedWork ? snapshot.now : run.finishedAt) ?? snapshot.now) - run.startedAt)
       : undefined;
-    const meshModel =
-      this.overviewView === "topology" && this.topologyView === "mesh"
-        ? buildProjectMeshTopology({
-            main: snapshot.main,
-            actors: snapshot.actors,
-            agents: snapshot.agents,
-            state: snapshot.state,
-            events: snapshot.events,
-            now: snapshot.now,
-          })
-        : undefined;
     const activeActors = snapshot.actors.filter((actor) => isActiveStatus(actor.status)).length;
     const summary = (
       meshModel
@@ -1152,6 +1181,7 @@ export class FabricDashboard implements Component, Focusable {
         entities,
         width: innerWidth,
         height: maxBody,
+        ...(meshModel ? { model: meshModel } : {}),
       })) {
         lines.push(this.row(width, line));
       }

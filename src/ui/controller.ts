@@ -2,15 +2,13 @@ import path from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import type { CodePreviewSettings } from "pi-code-previews";
+import type { FabricActivityRun } from "../activity/types.js";
 import type { FabricActorHostEvent } from "../actors/types.js";
 import type { FabricState } from "../fabric-state.js";
 import type { FabricThinking } from "../thinking.js";
 import type { MeshEvent } from "../mesh/store.js";
-import {
-  FabricDashboard,
-  type FabricDashboardMessageTarget,
-} from "./dashboard.js";
-import { buildClaudeModelSource, buildModelSource, type ModelSource } from "./model-picker.js";
+import type { FabricDashboardMessageTarget } from "./dashboard.js";
+import type { ModelSource } from "./model-picker.js";
 import { createDashboardSnapshot } from "./snapshot.js";
 import { isActiveStatus, type FabricDashboardSnapshot, type FabricUiActor, type FabricUiAgent } from "./types.js";
 import { FabricWidget, shouldShowFabricWidget } from "./widget.js";
@@ -21,6 +19,8 @@ import {
 } from "./transcript.js";
 
 const WIDGET_ID = "pi-fabric";
+const ACTIVITY_REFRESH_MS = 100;
+const IDLE_REFRESH_MS = 2_000;
 
 const emptySnapshot = (): FabricDashboardSnapshot => {
   const now = Date.now();
@@ -60,6 +60,10 @@ export class FabricUiController {
   #widgetMounted = false;
   #widget: FabricWidget | undefined;
   #lastRefreshErrorAt = 0;
+  #lastRefreshAt = 0;
+  #dashboardOpen = false;
+  #activityRevision: number | undefined;
+  #activityRuns: FabricActivityRun[] = [];
   readonly #transcripts = new AgentTranscriptReader();
 
   constructor(
@@ -77,12 +81,11 @@ export class FabricUiController {
     }
     this.#activityUnsubscribe = this.state.activity.subscribe(() => this.#scheduleRefresh());
     this.#refresh();
-    this.#timer = setInterval(() => this.#refresh(), this.state.config.ui.refreshMs);
-    this.#timer.unref();
+    this.#schedulePoll();
   }
 
   stop(): void {
-    if (this.#timer) clearInterval(this.#timer);
+    if (this.#timer) clearTimeout(this.#timer);
     if (this.#scheduledRefresh) clearTimeout(this.#scheduledRefresh);
     this.#timer = undefined;
     this.#scheduledRefresh = undefined;
@@ -99,6 +102,10 @@ export class FabricUiController {
     this.#meshOffset = 0;
     this.#snapshot = emptySnapshot();
     this.#lastRefreshErrorAt = 0;
+    this.#lastRefreshAt = 0;
+    this.#dashboardOpen = false;
+    this.#activityRevision = undefined;
+    this.#activityRuns = [];
     this.#transcripts.clear();
   }
 
@@ -113,6 +120,8 @@ export class FabricUiController {
     }
     if (!this.#context) this.start(context);
     else this.#refresh();
+    const [{ FabricDashboard }, { buildClaudeModelSource, buildModelSource }] =
+      await Promise.all([import("./dashboard.js"), import("./model-picker.js")]);
     const modelSource = buildModelSource(context.modelRegistry);
     let claudeModelSource: ModelSource | undefined;
     if (this.#snapshot.actors.some((actor) => actor.runner === "claude")) {
@@ -213,55 +222,94 @@ export class FabricUiController {
         context.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }
     };
-    await context.ui.custom<void>(
-      (tui, theme, _keybindings, done) =>
-        new FabricDashboard(tui, theme, () => this.#snapshot, () => done(undefined), {
-          modelSource,
-          ...(this.codePreviewSettings
-            ? { codePreviewSettings: this.codePreviewSettings }
-            : {}),
-          ...(claudeModelSource ? { claudeModelSource } : {}),
-          onTargetMessage,
-          onAgentStop,
-          agentTranscript: (agent) => this.#transcripts.read(this.#agentTranscriptSource(agent)),
-          actorTranscript: (actor) => this.#transcripts.read(this.#actorTranscriptSource(actor)),
-          loadOlderTranscript: (target) =>
-            this.#transcripts.loadOlder(this.#transcriptSource(target)),
-          loadFullTranscript: (target) =>
-            this.#transcripts.loadAll(this.#transcriptSource(target)),
-          onActorModel,
-          onActorThinking,
-          onActorEvents,
-          onClearMessages,
-          onActorInstructions,
-          onGlobalInstructions,
-          onImportActor,
-          onExportActor,
-          onRemoveGlobalActor,
-        }),
-      {
-        overlay: true,
-        overlayOptions: {
-          width: "94%",
-          minWidth: 40,
-          maxHeight: "90%",
-          anchor: "center",
-          margin: 1,
+    this.#dashboardOpen = true;
+    this.#schedulePoll(true);
+    try {
+      await context.ui.custom<void>(
+        (tui, theme, _keybindings, done) =>
+          new FabricDashboard(tui, theme, () => this.#snapshot, () => done(undefined), {
+            modelSource,
+            ...(this.codePreviewSettings
+              ? { codePreviewSettings: this.codePreviewSettings }
+              : {}),
+            ...(claudeModelSource ? { claudeModelSource } : {}),
+            onTargetMessage,
+            onAgentStop,
+            agentTranscript: (agent) => this.#transcripts.read(this.#agentTranscriptSource(agent)),
+            actorTranscript: (actor) => this.#transcripts.read(this.#actorTranscriptSource(actor)),
+            loadOlderTranscript: (target) =>
+              this.#transcripts.loadOlder(this.#transcriptSource(target)),
+            loadFullTranscript: (target) =>
+              this.#transcripts.loadAll(this.#transcriptSource(target)),
+            onActorModel,
+            onActorThinking,
+            onActorEvents,
+            onClearMessages,
+            onActorInstructions,
+            onGlobalInstructions,
+            onImportActor,
+            onExportActor,
+            onRemoveGlobalActor,
+          }),
+        {
+          overlay: true,
+          overlayOptions: {
+            width: "94%",
+            minWidth: 40,
+            maxHeight: "90%",
+            anchor: "center",
+            margin: 1,
+          },
         },
-      },
-    );
+      );
+    } finally {
+      this.#dashboardOpen = false;
+      this.#schedulePoll(true);
+    }
   }
 
   snapshot(): FabricDashboardSnapshot {
     return structuredClone(this.#snapshot);
   }
 
+  #schedulePoll(reset = false): void {
+    if (reset && this.#timer) {
+      clearTimeout(this.#timer);
+      this.#timer = undefined;
+    }
+    if (this.#timer || !this.#context) return;
+    const active =
+      this.#snapshot.runs.some((run) => run.status === "running") ||
+      this.#snapshot.agents.some((agent) => isActiveStatus(agent.status)) ||
+      this.#snapshot.actors.some(
+        (actor) =>
+          isActiveStatus(actor.status) ||
+          Boolean(actor.worker && isActiveStatus(actor.worker.status)),
+      );
+    const delay =
+      this.#dashboardOpen || active
+        ? this.state.config.ui.refreshMs
+        : Math.max(this.state.config.ui.refreshMs, IDLE_REFRESH_MS);
+    this.#timer = setTimeout(() => {
+      this.#timer = undefined;
+      this.#refresh();
+      this.#schedulePoll();
+    }, delay);
+    this.#timer.unref();
+  }
+
   #scheduleRefresh(): void {
     if (this.#scheduledRefresh || !this.#context) return;
+    const elapsed = performance.now() - this.#lastRefreshAt;
+    const delay = Math.max(
+      0,
+      Math.min(ACTIVITY_REFRESH_MS, this.state.config.ui.refreshMs) - elapsed,
+    );
     this.#scheduledRefresh = setTimeout(() => {
       this.#scheduledRefresh = undefined;
       this.#refresh();
-    }, 16);
+      this.#schedulePoll(true);
+    }, delay);
     this.#scheduledRefresh.unref();
   }
 
@@ -296,14 +344,22 @@ export class FabricUiController {
   #enrichToolActivity(snapshot: FabricDashboardSnapshot): void {
     if (!this.state.config.ui.showNestedToolCalls) return;
     const currentRunId = snapshot.runs[0]?.id;
-    for (const agent of snapshot.agents) {
-      if (!isActiveStatus(agent.status) && agent.runId !== currentRunId) continue;
+    const maxOwners = Math.max(1, (this.state.config.ui.maxRows ?? 6) * 2);
+    let owners = 0;
+    const agents = snapshot.agents
+      .filter((agent) => isActiveStatus(agent.status) || agent.runId === currentRunId)
+      .sort(
+        (left, right) =>
+          Number(isActiveStatus(right.status)) - Number(isActiveStatus(left.status)),
+      );
+    for (const agent of agents) {
+      if (owners++ >= maxOwners) break;
       const transcript = this.#transcripts.read(this.#agentTranscriptSource(agent));
       const tools = recentTranscriptTools(transcript, 3);
       if (tools.length > 0) agent.toolActivity = tools;
     }
     for (const actor of snapshot.actors) {
-      if (!actor.worker) continue;
+      if (!actor.worker || owners++ >= maxOwners) continue;
       const transcript = this.#transcripts.read(this.#agentTranscriptSource(actor.worker));
       const tools = recentTranscriptTools(transcript, 3);
       if (tools.length > 0) actor.worker.toolActivity = tools;
@@ -311,12 +367,28 @@ export class FabricUiController {
   }
 
   #refresh(): void {
+    this.#lastRefreshAt = performance.now();
     const context = this.#context;
     if (!context || !this.state.initialized) return;
     try {
       this.#pollMesh();
-      this.#snapshot = createDashboardSnapshot(this.state, this.#events, context);
-      this.#enrichToolActivity(this.#snapshot);
+      const revision =
+        typeof this.state.activity.revision === "function"
+          ? this.state.activity.revision()
+          : undefined;
+      if (revision === undefined || revision !== this.#activityRevision) {
+        this.#activityRuns = this.state.activity.runs();
+        this.#activityRevision = revision;
+      }
+      this.#snapshot = createDashboardSnapshot(
+        this.state,
+        this.#events,
+        context,
+        this.#activityRuns,
+      );
+      if (shouldShowFabricWidget(this.#snapshot, this.state.config.ui.widget)) {
+        this.#enrichToolActivity(this.#snapshot);
+      }
       this.#renderWidget(context);
       if (this.#widgetTui && this.#widget?.hasChanged()) this.#widgetTui.requestRender();
     } catch (error) {

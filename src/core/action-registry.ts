@@ -85,10 +85,27 @@ const PREVIEW_ARG_CHARS = 2_000;
 const WRITE_PREVIEW_CONTENT_CHARS = 16_000;
 const PREVIEW_ARG_KEYS = 32;
 const PREVIEW_RESULT_CHARS = 16_000;
+const PREVIEW_NESTED_CHARS = 16_000;
+const MAX_AUDIT_VALUE_CHARS = 64_000;
 const MAX_VALIDATION_MESSAGE_CHARS = 2_000;
 
 const truncateString = (value: string, max: number): string =>
   value.length <= max ? value : `${value.slice(0, max)}…`;
+
+const boundedPreviewValue = (value: unknown, maxChars: number): unknown => {
+  if (value === undefined || value === null || typeof value !== "object") return value;
+  try {
+    const serialized = JSON.stringify(value);
+    if (serialized.length <= maxChars) return JSON.parse(serialized) as unknown;
+    return {
+      fabricTruncated: true,
+      originalChars: serialized.length,
+      preview: serialized.slice(0, Math.max(1, maxChars - 100)),
+    };
+  } catch {
+    return truncateString(String(value), maxChars);
+  }
+};
 
 const previewArgs = (ref: string, args: Record<string, unknown>): Record<string, unknown> => {
   const out: Record<string, unknown> = {};
@@ -99,7 +116,10 @@ const previewArgs = (ref: string, args: Record<string, unknown>): Record<string,
       ref === "pi.write" && key === "content"
         ? WRITE_PREVIEW_CONTENT_CHARS
         : PREVIEW_ARG_CHARS;
-    out[key] = typeof value === "string" ? truncateString(value, maxChars) : value;
+    out[key] =
+      typeof value === "string"
+        ? truncateString(value, maxChars)
+        : boundedPreviewValue(value, PREVIEW_NESTED_CHARS);
   }
   return out;
 };
@@ -108,12 +128,17 @@ const previewResult = (value: unknown): unknown => {
   if (typeof value === "string") return truncateString(value, PREVIEW_RESULT_CHARS);
   if (value !== null && typeof value === "object" && !Array.isArray(value)) {
     const out: Record<string, unknown> = {};
+    let count = 0;
     for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
-      out[key] = typeof val === "string" ? truncateString(val, PREVIEW_RESULT_CHARS) : val;
+      if (count++ >= PREVIEW_ARG_KEYS) break;
+      out[key] =
+        typeof val === "string"
+          ? truncateString(val, PREVIEW_RESULT_CHARS)
+          : boundedPreviewValue(val, PREVIEW_NESTED_CHARS);
     }
     return out;
   }
-  return value;
+  return boundedPreviewValue(value, PREVIEW_RESULT_CHARS);
 };
 
 const failedResultError = (value: unknown): string | undefined => {
@@ -308,13 +333,17 @@ export class ActionRegistry {
 
       failureStage = "invoke";
       const nestedToolCallId = `${NESTED_TOOL_CALL_ID_PREFIX}${randomUUID()}`;
+      const argsPreview = previewArgs(ref, preparedArgs);
       const activeAudit: FabricCallAudit = {
         ref,
         nestedToolCallId,
         startedAt: Date.now(),
         tool: action.name,
         provider: action.provider,
-        args: previewArgs(ref, preparedArgs),
+        args: boundedPreviewValue(
+          argsPreview,
+          MAX_AUDIT_VALUE_CHARS,
+        ) as Record<string, unknown>,
       };
       audit = activeAudit;
       context.audits.push(activeAudit);
@@ -322,7 +351,7 @@ export class ActionRegistry {
         type: "call_start",
         callId: nestedToolCallId,
         ref,
-        args: preparedArgs,
+        args: argsPreview,
       });
       context.update(`Calling ${ref}`);
       const value = await provider.invoke(actionName, preparedArgs, {
@@ -359,13 +388,14 @@ export class ActionRegistry {
       if (resultError) activeAudit.error = resultError;
       activeAudit.resultChars = bounded.chars;
       activeAudit.resultTruncated = bounded.truncated;
-      activeAudit.result = previewResult(bounded.value);
+      const resultPreview = previewResult(bounded.value);
+      activeAudit.result = boundedPreviewValue(resultPreview, MAX_AUDIT_VALUE_CHARS);
       activeAudit.endedAt = Date.now();
       context.observeInvocation?.({
         type: "call_end",
         callId: nestedToolCallId,
         success: resultError === undefined,
-        result: value,
+        result: resultPreview,
         ...(activeAudit.preview !== undefined ? { preview: activeAudit.preview } : {}),
         ...(resultError ? { error: resultError } : {}),
       });

@@ -17,6 +17,7 @@ import { isActiveStatus, orderAgentsByCreation } from "./types.js";
 import {
   buildProjectMeshTopology,
   buildRunTopologyRows,
+  type FabricProjectMeshModel,
   type FabricProjectMeshParticipant,
   type FabricProjectMeshRoute,
   type FabricProjectMeshTopic,
@@ -312,8 +313,11 @@ const runTopologyEntitiesFor = (
   return [mainEntity(snapshot), ...agentEntities];
 };
 
-const projectMeshEntitiesFor = (snapshot: FabricDashboardSnapshot): Entity[] => {
-  const model = buildProjectMeshTopology({
+const projectMeshEntitiesFor = (
+  snapshot: FabricDashboardSnapshot,
+  topology?: FabricProjectMeshModel,
+): Entity[] => {
+  const model = topology ?? buildProjectMeshTopology({
     main: snapshot.main,
     actors: snapshot.actors,
     agents: snapshot.agents,
@@ -399,12 +403,13 @@ export const entitiesForOverview = (
   panel: PhasePanel | undefined,
   view: OverviewView,
   topologyView: TopologyView,
+  projectMesh?: FabricProjectMeshModel,
 ): Entity[] => {
   if (view === "topology" && topologyView === "run") {
     return runTopologyEntitiesFor(snapshot, run);
   }
   if (view === "topology" && topologyView === "mesh") {
-    return projectMeshEntitiesFor(snapshot);
+    return projectMeshEntitiesFor(snapshot, projectMesh);
   }
   return entitiesFor(snapshot, run, panel);
 };
@@ -432,8 +437,9 @@ const withPanelProgress = (
   snapshot: FabricDashboardSnapshot,
   run: FabricActivityRun | undefined,
   panel: PhasePanel,
+  projectedEntities?: Entity[],
 ): PhasePanel => {
-  const entities = entitiesFor(snapshot, run, panel);
+  const entities = projectedEntities ?? entitiesFor(snapshot, run, panel);
   const progressEntities =
     panel.kind === "session" ? entities : entities.filter((entity) => entity.kind !== "main");
   const status =
@@ -489,11 +495,102 @@ const withPanelProgress = (
   };
 };
 
+const activityEntitiesByPanel = (
+  snapshot: FabricDashboardSnapshot,
+  run: FabricActivityRun,
+): Map<string, Entity[]> => {
+  const calls = new Map<string, FabricActivityCall[]>();
+  const items = new Map<string, FabricActivityItem[]>();
+  const agents = new Map<string, Map<string, FabricUiAgent>>();
+  const keyFor = (phaseId: string | undefined): string => phaseId ?? UNPHASED_PANEL_ID;
+  for (const call of run.calls) {
+    const key = keyFor(call.phaseId);
+    const bucket = calls.get(key) ?? [];
+    bucket.push(call);
+    calls.set(key, bucket);
+  }
+  for (const item of run.items) {
+    const key = keyFor(item.phaseId);
+    const bucket = items.get(key) ?? [];
+    bucket.push(item);
+    items.set(key, bucket);
+  }
+  const detachedAgents: FabricUiAgent[] = [];
+  for (const agent of snapshot.agents) {
+    if (agent.runId === run.id) {
+      const key = keyFor(agent.phaseId);
+      const bucket = agents.get(key) ?? new Map<string, FabricUiAgent>();
+      bucket.set(agent.id, agent);
+      agents.set(key, bucket);
+    } else if (!agent.runId) {
+      detachedAgents.push(agent);
+    }
+  }
+  if (detachedAgents.length > 0) {
+    for (const [key, panelCalls] of calls) {
+      for (const call of panelCalls) {
+        for (const agent of detachedAgents) {
+          if (!linkedAgent(call, agent)) continue;
+          const bucket = agents.get(key) ?? new Map<string, FabricUiAgent>();
+          bucket.set(agent.id, agent);
+          agents.set(key, bucket);
+        }
+      }
+    }
+  }
+  const keys = new Set<string>([
+    UNPHASED_PANEL_ID,
+    ...run.phases.map((phase) => phase.id),
+  ]);
+  const projected = new Map<string, Entity[]>();
+  for (const key of keys) {
+    const panelAgents = [...(agents.get(key)?.values() ?? [])];
+    const agentEntities: Entity[] = panelAgents.map((agent) => ({
+      id: `agent:${agent.id}`,
+      kind: "agent",
+      label: agent.name,
+      status: agent.status,
+      value: agent,
+    }));
+    const callEntities: Entity[] = (calls.get(key) ?? [])
+      .filter((call) => {
+        const representedAgentLaunch =
+          call.kind === "agent" &&
+          agentLaunchRefs.has(call.ref) &&
+          panelAgents.some((agent) => linkedAgent(call, agent));
+        const representedActorCreation =
+          call.kind === "actor" &&
+          call.ref === "agents.create" &&
+          snapshot.actors.some((actor) => linkedEntityId(call.entityId, actor.id));
+        return !representedAgentLaunch && !representedActorCreation;
+      })
+      .map((call) => ({
+        id: `call:${call.id}`,
+        kind: "call" as const,
+        label: call.label,
+        status: call.status,
+        value: call,
+      }));
+    const itemEntities: Entity[] = (items.get(key) ?? []).map((item) => ({
+      id: `item:${item.id}`,
+      kind: "item",
+      label: item.label,
+      status: item.status,
+      value: item,
+    }));
+    projected.set(key, [...agentEntities, ...callEntities, ...itemEntities]);
+  }
+  return projected;
+};
+
 export const phasePanels = (
   snapshot: FabricDashboardSnapshot,
   run: FabricActivityRun | undefined,
 ): PhasePanel[] => {
   const panels: PhasePanel[] = [];
+  const activityEntities = run
+    ? activityEntitiesByPanel(snapshot, run)
+    : new Map<string, Entity[]>();
 
   if (run) {
     const runActivity: PhasePanel = {
@@ -504,9 +601,7 @@ export const phasePanels = (
       total: 0,
       kind: "unphased",
     };
-    if (entitiesFor(snapshot, run, runActivity).some((entity) => entity.kind !== "main")) {
-      panels.push(runActivity);
-    }
+    if ((activityEntities.get(UNPHASED_PANEL_ID)?.length ?? 0) > 0) panels.push(runActivity);
   }
 
   panels.push(
@@ -532,7 +627,14 @@ export const phasePanels = (
   const sessionEntities = entitiesFor(snapshot, run, session);
   if (sessionEntities.length > 0 || panels.length === 0) panels.push(session);
 
-  return panels.map((panel) => withPanelProgress(snapshot, run, panel));
+  return panels.map((panel) =>
+    withPanelProgress(
+      snapshot,
+      run,
+      panel,
+      panel.kind === "session" ? sessionEntities : activityEntities.get(panel.id) ?? [],
+    ),
+  );
 };
 
 export const matchesFilter = (status: string, filter: StatusFilter): boolean => {

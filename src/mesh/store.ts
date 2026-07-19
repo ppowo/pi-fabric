@@ -96,6 +96,9 @@ export class MeshStore {
   readonly #statePath: string;
   readonly #counterPath: string;
   readonly #lockPath: string;
+  #stateCache:
+    | { device: number; inode: number; size: number; modifiedAt: number; state: MeshStateFile }
+    | undefined;
 
   constructor(
     readonly root: string,
@@ -249,14 +252,14 @@ export class MeshStore {
 
   get(key: string): MeshStateEntry | undefined {
     this.#validateKey(key);
-    const entry = readState(this.#statePath).entries[key];
+    const entry = this.#readCachedState().entries[key];
     return entry ? jsonClone(entry) : undefined;
   }
 
   list(prefix = "", limit = 100): MeshStateEntry[] {
     if (prefix) this.#validateKey(prefix);
     const boundedLimit = Math.max(1, Math.min(Math.floor(limit), this.maxReadEvents));
-    return Object.values(readState(this.#statePath).entries)
+    return Object.values(this.#readCachedState().entries)
       .filter((entry) => !prefix || entry.key.startsWith(prefix))
       .sort((left, right) => left.key.localeCompare(right.key))
       .slice(0, boundedLimit)
@@ -301,6 +304,7 @@ export class MeshStore {
       state.versions ??= {};
       state.versions[input.key] = entry.version;
       atomicWrite(this.#statePath, state);
+      this.#cacheState(state);
       return jsonClone(entry);
     });
   }
@@ -325,6 +329,7 @@ export class MeshStore {
             `Mesh compare-and-swap failed for ${input.key}: expected version ${input.ifVersion}, found ${actualVersion}`,
           );
         }
+        this.#cacheState(state);
         return { deleted: false };
       }
       if (input.ifVersion !== undefined && existing.version !== input.ifVersion) {
@@ -336,8 +341,47 @@ export class MeshStore {
       state.versions ??= {};
       state.versions[input.key] = existing.version;
       atomicWrite(this.#statePath, state);
+      this.#cacheState(state);
       return { deleted: true, version: existing.version };
     });
+  }
+
+  #readCachedState(): MeshStateFile {
+    try {
+      const stat = fs.statSync(this.#statePath);
+      const cached = this.#stateCache;
+      if (
+        cached &&
+        cached.device === stat.dev &&
+        cached.inode === stat.ino &&
+        cached.size === stat.size &&
+        cached.modifiedAt === stat.mtimeMs
+      ) {
+        return cached.state;
+      }
+    } catch (error) {
+      this.#stateCache = undefined;
+      if (errorCode(error) === "ENOENT") return { format: 1, entries: {} };
+      throw error;
+    }
+    const state = readState(this.#statePath);
+    this.#cacheState(state);
+    return state;
+  }
+
+  #cacheState(state: MeshStateFile): void {
+    try {
+      const stat = fs.statSync(this.#statePath);
+      this.#stateCache = {
+        device: stat.dev,
+        inode: stat.ino,
+        size: stat.size,
+        modifiedAt: stat.mtimeMs,
+        state,
+      };
+    } catch {
+      this.#stateCache = undefined;
+    }
   }
 
   async #withLock<T>(operation: () => T): Promise<T> {

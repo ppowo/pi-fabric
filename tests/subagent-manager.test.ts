@@ -30,6 +30,29 @@ describe("SubagentManager", () => {
     expect(result.text).toBe("fake worker complete");
     expect(result.transport).toBe("process");
     expect(manager.list()).toHaveLength(1);
+    fs.rmSync(path.join(manager.runDirectory(result.id)!, "status.json"));
+    expect(manager.status(result.id).status).toBe("completed");
+  });
+
+  it("keeps full results in the API and compact projections for the dashboard", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-manager-"));
+    roots.push(root);
+    const manager = new SubagentManager(process.cwd(), DEFAULT_FABRIC_CONFIG.subagents, {
+      workerPath: path.resolve("tests/fixtures/fake-worker.mjs"),
+      runRoot: root,
+      fullCodeMode: false,
+    });
+    managers.push(manager);
+    const result = await manager.run({ task: "LARGE_RESULT", transport: "process" });
+    expect(result.text).toHaveLength(100_000);
+    expect((result.value as { output: string }).output).toHaveLength(100_000);
+
+    const records = manager.listForUi();
+    const compact = records[0] as SubagentRunRecord;
+    expect(compact.text.length).toBeLessThanOrEqual(16_001);
+    expect(compact.value).toMatchObject({ fabricTruncated: true });
+    expect(manager.listForUi()).toBe(records);
+    expect((manager.status(result.id) as SubagentRunRecord).text).toHaveLength(100_000);
   });
 
   it("readLog returns the run's event stream and status", async () => {

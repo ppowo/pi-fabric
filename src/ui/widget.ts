@@ -170,11 +170,18 @@ export class FabricWidget implements Component {
   #lastLines: string[] | undefined;
   #leaseKey: string | undefined;
   #leasedRows = 0;
+  #pending:
+    | { width: number; snapshot: FabricDashboardSnapshot; lines: string[] }
+    | undefined;
 
   render(width: number): string[] {
     if (width <= 0) return [];
-    const { lines: content, leaseKey } = this.#buildContent();
-    const lines = this.#leaseContent(this.#boundContent(content, width), leaseKey);
+    const snapshot = this.snapshot();
+    const lines =
+      this.#pending?.width === width && this.#pending.snapshot === snapshot
+        ? this.#pending.lines
+        : this.#renderLines(snapshot, width);
+    this.#pending = undefined;
     this.#lastWidth = width;
     this.#lastLines = lines;
     return lines;
@@ -182,18 +189,25 @@ export class FabricWidget implements Component {
 
   hasChanged(): boolean {
     if (this.#lastWidth === undefined || this.#lastLines === undefined) return true;
-    const { lines: content, leaseKey } = this.#buildContent();
-    const lines = this.#leaseContent(
-      this.#boundContent(content, this.#lastWidth),
-      leaseKey,
+    const snapshot = this.snapshot();
+    const lines = this.#renderLines(snapshot, this.#lastWidth);
+    this.#pending = { width: this.#lastWidth, snapshot, lines };
+    return (
+      lines.length !== this.#lastLines.length ||
+      lines.some((line, index) => line !== this.#lastLines?.[index])
     );
-    return JSON.stringify(lines) !== JSON.stringify(this.#lastLines);
   }
 
-  invalidate(): void {}
+  invalidate(): void {
+    this.#pending = undefined;
+  }
 
-  #buildContent(): { lines: string[]; leaseKey: string } {
-    const snapshot = this.snapshot();
+  #renderLines(snapshot: FabricDashboardSnapshot, width: number): string[] {
+    const { lines: content, leaseKey } = this.#buildContent(snapshot);
+    return this.#leaseContent(this.#boundContent(content, width), leaseKey);
+  }
+
+  #buildContent(snapshot: FabricDashboardSnapshot): { lines: string[]; leaseKey: string } {
     const candidateRun = snapshot.runs[0];
     const candidateFinishedAt = candidateRun?.finishedAt ?? candidateRun?.updatedAt ?? 0;
     const run =

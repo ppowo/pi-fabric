@@ -9,6 +9,7 @@ import {
   buildRunTopologyRows,
   windowProjectMeshTopology,
   windowRunTopologyRows,
+  type FabricProjectMeshModel,
 } from "./topology.js";
 import type { FabricDashboardSnapshot } from "./types.js";
 import { isActiveStatus } from "./types.js";
@@ -22,6 +23,7 @@ export const renderProjectMeshPanel = ({
   entities,
   width,
   height,
+  model: providedModel,
 }: {
   theme: Theme;
   filter: StatusFilter;
@@ -31,8 +33,9 @@ export const renderProjectMeshPanel = ({
   entities: Entity[];
   width: number;
   height: number;
+  model?: FabricProjectMeshModel;
 }): string[] => {
-  const model = buildProjectMeshTopology({
+  const model = providedModel ?? buildProjectMeshTopology({
     main: snapshot.main,
     actors: snapshot.actors,
     agents: snapshot.agents,

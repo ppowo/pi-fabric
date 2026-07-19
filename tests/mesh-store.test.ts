@@ -62,6 +62,16 @@ describe("MeshStore", () => {
     ]);
   });
 
+  it("invalidates cached state when another store replaces the file", async () => {
+    const writer = createStore();
+    const reader = new MeshStore(writer.root, 64 * 1024, 100);
+    await writer.put({ key: "shared/value", value: { revision: 1 }, identity });
+    expect(reader.get("shared/value")?.value).toEqual({ revision: 1 });
+
+    await writer.put({ key: "shared/value", value: { revision: 2 }, identity });
+    expect(reader.get("shared/value")?.value).toEqual({ revision: 2 });
+  });
+
   it("supports compare-and-swap shared state", async () => {
     const store = createStore();
     const created = await store.put({

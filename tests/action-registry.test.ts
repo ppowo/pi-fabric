@@ -223,6 +223,30 @@ describe("ActionRegistry", () => {
     });
   });
 
+  it("bounds retained audit previews without shrinking provider results", async () => {
+    const registry = new ActionRegistry();
+    const large = "x".repeat(20_000);
+    registry.register({
+      ...provider(),
+      async invoke() {
+        return Object.fromEntries(
+          Array.from({ length: 8 }, (_, index) => [`field${index}`, large]),
+        );
+      },
+    });
+    const audits: FabricCallAudit[] = [];
+    const result = (await registry.invoke("demo.echo", { value: "large" }, {
+      ...context,
+      approve: async () => {},
+      audits,
+      maxResultChars: 1_000_000,
+    })) as Record<string, string>;
+
+    expect(result.field0).toHaveLength(20_000);
+    expect(audits[0]?.result).toMatchObject({ fabricTruncated: true });
+    expect(JSON.stringify(audits[0]?.result).length).toBeLessThanOrEqual(64_000);
+  });
+
   it("caps nested results before crossing the sandbox bridge", async () => {
     const registry = new ActionRegistry();
     registry.register(provider());

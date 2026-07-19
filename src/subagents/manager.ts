@@ -51,6 +51,8 @@ const STATUS_POLL_MS = 100;
 const NESTED_SNAPSHOT_POLL_MS = 500;
 const TRANSPORT_EXIT_GRACE_MS = 1_000;
 const MAX_NAME_LENGTH = 60;
+const MAX_UI_TEXT_CHARS = 16_000;
+const MAX_UI_VALUE_CHARS = 64_000;
 
 interface ManagedSubagent {
   id: string;
@@ -76,6 +78,8 @@ interface ManagedSubagent {
   worktree?: string;
   nestedSnapshot?: SubagentRunRecord[];
   nestedSnapshotAt?: number;
+  latestRecord?: SubagentRunRecord;
+  latestUiRecord?: SubagentRunRecord;
   settled: boolean;
   background: boolean;
 }
@@ -100,6 +104,33 @@ const readRecord = (filePath: string): SubagentRunRecord | undefined => {
   } catch {
     return undefined;
   }
+};
+
+const boundedUiValue = (value: unknown): unknown => {
+  if (value === undefined) return undefined;
+  try {
+    const serialized = JSON.stringify(value);
+    if (serialized.length <= MAX_UI_VALUE_CHARS) return JSON.parse(serialized) as unknown;
+    return {
+      fabricTruncated: true,
+      originalChars: serialized.length,
+      preview: serialized.slice(0, MAX_UI_VALUE_CHARS - 100),
+    };
+  } catch {
+    return String(value).slice(0, MAX_UI_VALUE_CHARS);
+  }
+};
+
+const compactUiRecord = (record: SubagentRunRecord): SubagentRunRecord => {
+  const { text, value, nestedAgents, ...rest } = record;
+  return {
+    ...rest,
+    text: text.length <= MAX_UI_TEXT_CHARS ? text : `${text.slice(0, MAX_UI_TEXT_CHARS)}…`,
+    ...(value !== undefined ? { value: boundedUiValue(value) } : {}),
+    ...(nestedAgents && nestedAgents.length > 0
+      ? { nestedAgents: nestedAgents.map((nested) => compactUiRecord(nested)) }
+      : {}),
+  };
 };
 
 const readNestedAgents = (runDirectory: string, depth = 0): SubagentRunRecord[] => {
@@ -211,6 +242,10 @@ export class SubagentManager {
   readonly #budgetOwned: boolean;
   #budgetSummaryCache: { at: number; value: FabricBudgetSummary } | undefined;
   #claudeModelsCache: { at: number; value: ClaudeModelInfo[] } | undefined;
+  #uiListRevision = 0;
+  #uiListCache:
+    | { revision: number; value: Array<SubagentRunRecord | SubagentHandleInfo> }
+    | undefined;
   #closing = false;
 
   constructor(
@@ -432,6 +467,7 @@ export class SubagentManager {
         signal.addEventListener("abort", managed.abortHandler, { once: true });
       }
       this.#runs.set(id, managed);
+      this.#invalidateUiList();
       void this.#monitor(managed, timeoutMs);
       return this.#handleInfo(managed, "running");
     } catch (error) {
@@ -464,13 +500,37 @@ export class SubagentManager {
 
   status(id: string): SubagentRunRecord | SubagentHandleInfo {
     const managed = this.#requireRun(id);
-    const record = readRecord(managed.statusFile);
+    const record = managed.latestRecord ?? readRecord(managed.statusFile);
     if (!record) return this.#handleInfo(managed, "running");
-    return this.#withTransportMetadata(record, managed);
+    managed.latestRecord = record;
+    if (!managed.latestUiRecord) {
+      managed.latestUiRecord = compactUiRecord(record);
+      this.#invalidateUiList();
+    }
+    return structuredClone(this.#withTransportMetadata(record, managed));
   }
 
   list(): Array<SubagentRunRecord | SubagentHandleInfo> {
     return [...this.#runs.keys()].map((id) => this.status(id));
+  }
+
+  listForUi(): Array<SubagentRunRecord | SubagentHandleInfo> {
+    if (this.#uiListCache?.revision === this.#uiListRevision) {
+      return this.#uiListCache.value;
+    }
+    const value = [...this.#runs.values()].map((managed) => {
+      let record = managed.latestUiRecord;
+      if (!record) {
+        const latest = managed.latestRecord ?? readRecord(managed.statusFile);
+        if (!latest) return this.#handleInfo(managed, "running");
+        managed.latestRecord = latest;
+        record = compactUiRecord(latest);
+        managed.latestUiRecord = record;
+      }
+      return structuredClone(compactUiRecord(this.#withTransportMetadata(record, managed)));
+    });
+    this.#uiListCache = { revision: this.#uiListRevision, value };
+    return value;
   }
 
   runDirectory(id: string): string | undefined {
@@ -614,6 +674,19 @@ export class SubagentManager {
     let firstObservedDeadAt: number | undefined;
     while (!managed.settled) {
       const record = readRecord(managed.statusFile);
+      if (record) {
+        const previous = managed.latestRecord;
+        managed.latestRecord = record;
+        if (
+          !previous ||
+          previous.updatedAt !== record.updatedAt ||
+          previous.status !== record.status ||
+          previous.currentTool !== record.currentTool
+        ) {
+          managed.latestUiRecord = compactUiRecord(record);
+          this.#invalidateUiList();
+        }
+      }
       if (managed.recursive) this.#nestedAgents(managed);
       if (record?.runnerSessionId && !managed.runnerSessionId) {
         managed.runnerSessionId = record.runnerSessionId;
@@ -626,7 +699,11 @@ export class SubagentManager {
         await managed.transport.stop();
         await this.#waitForTransportExit(managed);
         const completed = readRecord(managed.statusFile);
-        if (completed && terminalStatuses.has(completed.status)) {
+        if (
+          completed &&
+          terminalStatuses.has(completed.status) &&
+          completed.status !== "stopped"
+        ) {
           this.#settle(
             managed,
             this.#withTransportMetadata(completed, managed) as SubagentRunResult,
@@ -688,6 +765,9 @@ export class SubagentManager {
       const summary = this.#budgetSummary();
       if (summary) result.budget = summary;
     }
+    managed.latestRecord = result;
+    managed.latestUiRecord = compactUiRecord(result);
+    this.#invalidateUiList();
     managed.resolve(result);
     if (
       managed.background &&
@@ -741,6 +821,11 @@ export class SubagentManager {
     throw new Error("No Fabric subagent transport is available");
   }
 
+  #invalidateUiList(): void {
+    this.#uiListRevision++;
+    this.#uiListCache = undefined;
+  }
+
   #requireRun(id: string): ManagedSubagent {
     const managed = this.#runs.get(id);
     if (!managed) throw new Error(`Unknown Fabric subagent: ${id}`);
@@ -787,7 +872,10 @@ export class SubagentManager {
     }
     managed.nestedSnapshotAt = now;
     const discovered = readNestedAgents(managed.runDirectory);
-    if (discovered.length > 0) managed.nestedSnapshot = discovered;
+    if (discovered.length > 0) {
+      managed.nestedSnapshot = discovered;
+      this.#invalidateUiList();
+    }
     return managed.nestedSnapshot ? structuredClone(managed.nestedSnapshot) : [];
   }
 
