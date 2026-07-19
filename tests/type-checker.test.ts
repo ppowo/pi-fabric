@@ -9,6 +9,8 @@ describe("Fabric guest type checker", () => {
       GUEST_TYPE_DECLARATIONS,
     );
     expect(result.errors).toEqual([]);
+    expect(result.javascript).toContain("async function __piFabricMain()");
+    expect(result.javascript).not.toContain("path: string");
   });
 
   it("accepts dynamic MCP namespaces and orchestration helpers", () => {

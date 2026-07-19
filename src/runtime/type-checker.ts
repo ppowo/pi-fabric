@@ -9,84 +9,163 @@ export interface FabricTypeError {
 
 export interface FabricTypeCheckResult {
   errors: FabricTypeError[];
+  javascript?: string;
 }
 
-export const typeCheckFabricCode = (
-  code: string,
-  declarations: string,
-): FabricTypeCheckResult => {
-  const virtualFile = path.resolve("/__pi_fabric_guest__.ts");
-  const declarationLineCount = declarations.split("\n").length;
-  const sourceText = `${declarations}\nasync function __piFabricMain() {\n${code}\n}\n`;
-  // Functional-errors-only: disable strict type-correctness (null-safety,
-  // union narrowing, implicit any, strict function types) so valid code isn't
-  // blocked. Genuine breakage still fails fast at type-check (syntax, undefined
-  // names, wrong arity); the rest surfaces as a runtime error from the sandbox.
-  const compilerOptions: ts.CompilerOptions = {
-    target: ts.ScriptTarget.ES2022,
-    module: ts.ModuleKind.ESNext,
-    moduleResolution: ts.ModuleResolutionKind.NodeNext,
-    strict: false,
-    noImplicitAny: false,
-    strictNullChecks: false,
-    strictFunctionTypes: false,
-    strictBindCallApply: false,
-    alwaysStrict: false,
-    strictPropertyInitialization: false,
-    noImplicitThis: false,
-    useUnknownInCatchVariables: false,
-    noEmit: true,
-    skipLibCheck: true,
-    lib: ["lib.es2022.d.ts"],
-  };
-  const baseHost = ts.createCompilerHost(compilerOptions, true);
-  const sourceFile = ts.createSourceFile(virtualFile, sourceText, ts.ScriptTarget.ES2022, true);
-  const host: ts.CompilerHost = {
-    ...baseHost,
-    fileExists: (fileName) => fileName === virtualFile || baseHost.fileExists(fileName),
-    readFile: (fileName) => (fileName === virtualFile ? sourceText : baseHost.readFile(fileName)),
-    getSourceFile: (fileName, languageVersion, onError, shouldCreateNewSourceFile) =>
-      fileName === virtualFile
-        ? sourceFile
-        : baseHost.getSourceFile(
-            fileName,
-            languageVersion,
-            onError,
-            shouldCreateNewSourceFile,
-          ),
-  };
-  const program = ts.createProgram([virtualFile], compilerOptions, host);
-  // Pure type-correctness codes — drop so only functional errors reach the
-  // model. Property-access/assignability/narrowing fall through to a runtime
-  // error; undefined-name (2304) and wrong-arity (2554) are kept (real breakage).
-  // Excess-property (2350/2561) is deliberately KEPT — it catches typo'd
-  // argument keys, which are functional (wrong tool shape). Only pure
-  // type-correctness (narrowing/assignability/null/any) is dropped below.
-  const TYPE_CORRECTNESS_CODES = new Set<number>([
-    2339, 2551,                               // property access / union narrowing -> runtime
-    2322, 2345, 2367,                         // not-assignable -> runtime
-    2531, 2532, 18047, 18048,                 // possibly null/undefined
-    7006, 7008, 7019, 7031, 7032, 7033, 7034, // implicit any
-  ]);
-  const diagnostics = [
-    ...program.getSyntacticDiagnostics(sourceFile),
-    ...program.getSemanticDiagnostics(sourceFile).filter(
-      (diagnostic) => !TYPE_CORRECTNESS_CODES.has(diagnostic.code),
-    ),
-  ];
-  return {
-    errors: diagnostics.map((diagnostic) => {
+const compilerOptions: ts.CompilerOptions = {
+  target: ts.ScriptTarget.ES2022,
+  module: ts.ModuleKind.ESNext,
+  moduleResolution: ts.ModuleResolutionKind.NodeNext,
+  strict: false,
+  noImplicitAny: false,
+  strictNullChecks: false,
+  strictFunctionTypes: false,
+  strictBindCallApply: false,
+  alwaysStrict: false,
+  strictPropertyInitialization: false,
+  noImplicitThis: false,
+  useUnknownInCatchVariables: false,
+  noEmit: false,
+  skipLibCheck: true,
+  lib: ["lib.es2022.d.ts"],
+};
+
+const TYPE_CORRECTNESS_CODES = new Set<number>([
+  2339, 2551,
+  2322, 2345, 2367,
+  2531, 2532, 18047, 18048,
+  7006, 7008, 7019, 7031, 7032, 7033, 7034,
+]);
+
+let nextCheckerId = 0;
+
+class FabricTypeChecker {
+  readonly #guestFile: string;
+  readonly #declarationFile: string;
+  readonly #baseHost = ts.createCompilerHost(compilerOptions, true);
+  readonly #stableFiles = new Map<string, ts.SourceFile>();
+  readonly #declarationSource: ts.SourceFile;
+  readonly #host: ts.CompilerHost;
+  #sourceText = "";
+  #sourceFile: ts.SourceFile;
+  #program: ts.Program | undefined;
+
+  constructor(readonly declarations: string) {
+    const id = ++nextCheckerId;
+    this.#guestFile = path.resolve(`/__pi_fabric_guest_${id}.ts`);
+    this.#declarationFile = path.resolve(`/__pi_fabric_globals_${id}.d.ts`);
+    this.#sourceFile = ts.createSourceFile(
+      this.#guestFile,
+      "",
+      ts.ScriptTarget.ES2022,
+      true,
+    );
+    this.#declarationSource = ts.createSourceFile(
+      this.#declarationFile,
+      declarations,
+      ts.ScriptTarget.ES2022,
+      true,
+    );
+    this.#host = {
+      ...this.#baseHost,
+      fileExists: (fileName) =>
+        fileName === this.#guestFile ||
+        fileName === this.#declarationFile ||
+        this.#baseHost.fileExists(fileName),
+      readFile: (fileName) => {
+        if (fileName === this.#guestFile) return this.#sourceText;
+        if (fileName === this.#declarationFile) return this.declarations;
+        return this.#baseHost.readFile(fileName);
+      },
+      getSourceFile: (fileName, languageVersion, onError, shouldCreateNewSourceFile) => {
+        if (fileName === this.#guestFile) return this.#sourceFile;
+        if (fileName === this.#declarationFile) return this.#declarationSource;
+        const cached = this.#stableFiles.get(fileName);
+        if (cached) return cached;
+        const source = this.#baseHost.getSourceFile(
+          fileName,
+          languageVersion,
+          onError,
+          shouldCreateNewSourceFile,
+        );
+        if (source) this.#stableFiles.set(fileName, source);
+        return source;
+      },
+    };
+  }
+
+  check(code: string): FabricTypeCheckResult {
+    this.#sourceText = `async function __piFabricMain() {\n${code}\n}\n`;
+    this.#sourceFile = ts.createSourceFile(
+      this.#guestFile,
+      this.#sourceText,
+      ts.ScriptTarget.ES2022,
+      true,
+    );
+    const program = ts.createProgram({
+      rootNames: [this.#declarationFile, this.#guestFile],
+      options: compilerOptions,
+      host: this.#host,
+      ...(this.#program ? { oldProgram: this.#program } : {}),
+    });
+    this.#program = program;
+    const diagnostics = [
+      ...program.getSyntacticDiagnostics(this.#sourceFile),
+      ...program
+        .getSemanticDiagnostics(this.#sourceFile)
+        .filter((diagnostic) => !TYPE_CORRECTNESS_CODES.has(diagnostic.code)),
+    ];
+    const errors = diagnostics.map((diagnostic) => {
       const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n");
       if (!diagnostic.file || diagnostic.start === undefined) {
         return { line: 0, column: 0, message };
       }
       const position = diagnostic.file.getLineAndCharacterOfPosition(diagnostic.start);
-      const line = position.line - declarationLineCount;
       return {
-        line: Math.max(1, line),
+        line: Math.max(1, position.line),
         column: position.character + 1,
         message,
       };
-    }),
-  };
+    });
+    if (errors.length > 0) return { errors };
+
+    let javascript: string | undefined;
+    program.emit(this.#sourceFile, (fileName, content) => {
+      if (fileName.endsWith(".js")) javascript = content;
+    });
+    return { errors, ...(javascript ? { javascript } : {}) };
+  }
+}
+
+const checkerCache = new Map<string, FabricTypeChecker>();
+const MAX_CHECKERS = 4;
+
+const checkerFor = (declarations: string): FabricTypeChecker => {
+  const cached = checkerCache.get(declarations);
+  if (cached) {
+    checkerCache.delete(declarations);
+    checkerCache.set(declarations, cached);
+    return cached;
+  }
+  const checker = new FabricTypeChecker(declarations);
+  checkerCache.set(declarations, checker);
+  while (checkerCache.size > MAX_CHECKERS) {
+    const oldest = checkerCache.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    checkerCache.delete(oldest);
+  }
+  return checker;
 };
+
+export const transpileFabricCode = (code: string): string =>
+  ts.transpileModule(`async function __piFabricMain() {\n${code}\n}\n`, {
+    compilerOptions: {
+      target: ts.ScriptTarget.ES2022,
+      module: ts.ModuleKind.ESNext,
+    },
+  }).outputText;
+
+export const typeCheckFabricCode = (
+  code: string,
+  declarations: string,
+): FabricTypeCheckResult => checkerFor(declarations).check(code);

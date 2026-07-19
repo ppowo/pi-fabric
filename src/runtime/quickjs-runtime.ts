@@ -1,6 +1,6 @@
 import releaseSyncVariant from "@jitl/quickjs-singlefile-mjs-release-sync";
 import { newQuickJSWASMModuleFromVariant } from "quickjs-emscripten-core";
-import ts from "typescript";
+import { transpileFabricCode } from "./type-checker.js";
 
 export type FabricSandboxTerminationReason =
   | "completed"
@@ -26,6 +26,7 @@ export interface FabricSandboxOptions {
     ref: string,
     args: Record<string, unknown>,
   ): number | undefined;
+  transpiledCode?: string;
 }
 
 export type FabricHostCall = (
@@ -451,14 +452,6 @@ globalThis.clearInterval = (id) => { __timerCallbacks.delete(id); };
 })();
 `;
 
-const transpile = (code: string): string =>
-  ts.transpileModule(code, {
-    compilerOptions: {
-      target: ts.ScriptTarget.ES2022,
-      module: ts.ModuleKind.ESNext,
-    },
-  }).outputText;
-
 const formatValue = (value: unknown): string => {
   if (typeof value === "string") return value;
   if (value instanceof Error) return value.stack ?? value.message;
@@ -475,29 +468,25 @@ const jsonText = (value: unknown): string => {
   return serialized;
 };
 
-const jsonHandle = (context: any, value: unknown): any => {
-  if (value === undefined) return context.undefined;
-  const result = context.evalCode(`JSON.parse(${JSON.stringify(jsonText(value))})`);
-  return context.unwrapResult(result);
-};
-
-const resolveQuickJsPromise = async (
+const jsonHandle = (
   context: any,
-  runtime: any,
-  promiseHandle: any,
-  hardDeadlineMs: () => number,
-): Promise<any> => {
-  const resolution = context.resolvePromise(promiseHandle);
-  let settled = false;
-  void resolution.finally(() => {
-    settled = true;
-  });
-  while (!settled) {
-    if (Date.now() > hardDeadlineMs()) break;
-    runtime.executePendingJobs();
-    await new Promise((resolve) => setImmediate(resolve));
+  jsonObject: any,
+  jsonParse: any,
+  value: unknown,
+): any => {
+  if (value === undefined) return context.undefined;
+  if (value === null) return context.null;
+  if (typeof value === "string") return context.newString(value);
+  if (typeof value === "boolean") return value ? context.true : context.false;
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? context.newNumber(value) : context.null;
   }
-  return resolution;
+  const serialized = context.newString(jsonText(value));
+  try {
+    return context.unwrapResult(context.callFunction(jsonParse, jsonObject, serialized));
+  } finally {
+    serialized.dispose();
+  }
 };
 
 export class QuickJsRuntime {
@@ -517,6 +506,8 @@ export class QuickJsRuntime {
     const module = await quickJsModule();
     const context = module.newContext();
     const runtime = context.runtime;
+    const jsonObject = context.getProp(context.global, "JSON");
+    const jsonParse = context.getProp(jsonObject, "parse");
     const executionStartedAt = Date.now();
     let effectiveTimeoutMs = options.timeoutMs;
     let executionDeadlineAt = executionStartedAt + effectiveTimeoutMs;
@@ -623,7 +614,7 @@ export class QuickJsRuntime {
           const task = hostCall(reference, args, hostAbortController.signal)
             .then((value) => {
               if (closing || promise.alive === false) return;
-              const handle = jsonHandle(context, value);
+              const handle = jsonHandle(context, jsonObject, jsonParse, value);
               promise.resolve(handle);
               handle.dispose();
             })
@@ -662,7 +653,7 @@ export class QuickJsRuntime {
       context.setProp(context.global, "print", printFunction);
       printFunction.dispose();
 
-      const strings = jsonHandle(context, options.strings ?? {});
+      const strings = jsonHandle(context, jsonObject, jsonParse, options.strings ?? {});
       context.setProp(context.global, "π", strings);
       strings.dispose();
       const tokenBudget = context.newNumber(options.tokenBudget ?? Number.POSITIVE_INFINITY);
@@ -695,7 +686,8 @@ export class QuickJsRuntime {
 
       executionGate = context.newPromise();
       context.setProp(context.global, "__fabricExecutionGate", executionGate.handle);
-      const wrappedCode = `Promise.race([(async function __piFabricMain() {\n${transpile(code)}\n})(), globalThis.__fabricExecutionGate])`;
+      const guestProgram = options.transpiledCode ?? transpileFabricCode(code);
+      const wrappedCode = `${guestProgram}\nPromise.race([__piFabricMain(), globalThis.__fabricExecutionGate])`;
       const evaluation = context.evalCode(wrappedCode, "pi-fabric-guest.js");
       runtime.executePendingJobs();
       if (evaluation.error) {
@@ -736,12 +728,8 @@ export class QuickJsRuntime {
         rejectDeadline = reject;
         scheduleDeadline();
       });
-      pendingResolution = resolveQuickJsPromise(
-        context,
-        runtime,
-        activePromiseHandle,
-        () => executionDeadlineAt + 5_000,
-      );
+      pendingResolution = context.resolvePromise(activePromiseHandle);
+      runtime.executePendingJobs();
       const resolution = await Promise.race([pendingResolution, deadline, cancellation]);
       pendingResolution = undefined;
       activePromiseHandle.dispose();
@@ -821,6 +809,8 @@ export class QuickJsRuntime {
       if (activePromiseHandle?.alive !== false) activePromiseHandle?.dispose();
       if (executionGate?.alive !== false) executionGate?.dispose();
       runtime.executePendingJobs();
+      jsonParse.dispose();
+      jsonObject.dispose();
       context.dispose();
     }
   }

@@ -225,6 +225,31 @@ return self.name;
     expect(result.value).toEqual({ process: "undefined", require: "undefined" });
   });
 
+  it("waits for host calls without spinning the Node event loop", async () => {
+    const immediate = vi.spyOn(globalThis, "setImmediate");
+    try {
+      const result = await new QuickJsRuntime().execute(
+        'return tools.call({ ref: "demo.wait" });',
+        async () => new Promise((resolve) => setTimeout(() => resolve("done"), 40)),
+        options,
+      );
+      expect(result.value).toBe("done");
+      expect(immediate).not.toHaveBeenCalled();
+    } finally {
+      immediate.mockRestore();
+    }
+  });
+
+  it("resumes guest timers through event-driven job pumping", async () => {
+    const result = await new QuickJsRuntime().execute(
+      'return new Promise((resolve) => setTimeout(() => resolve("timer done"), 20));',
+      async () => undefined,
+      options,
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.value).toBe("timer done");
+  });
+
   it("times out unresolved guest promises", async () => {
     const startedAt = Date.now();
     const result = await new QuickJsRuntime().execute(
