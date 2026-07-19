@@ -8,6 +8,7 @@ import { GlobalActorRegistry } from "../src/actors/global-registry.js";
 import { DEFAULT_FABRIC_CONFIG } from "../src/config.js";
 import type { FabricMainAgentDeliveryRequest } from "../src/main-agent.js";
 import { MeshStore, type MeshIdentity } from "../src/mesh/store.js";
+import type { FabricPeerInfo } from "../src/peer-session.js";
 import type { FabricInvocationContext } from "../src/protocol.js";
 import { AgentsProvider } from "../src/providers/agents-provider.js";
 import { SubagentManager } from "../src/subagents/manager.js";
@@ -26,7 +27,7 @@ const context: FabricInvocationContext = {
   activity() {},
 };
 
-const setup = () => {
+const setup = (peers: FabricPeerInfo[] = []) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-agents-provider-"));
   roots.push(root);
   const mesh = new MeshStore(path.join(root, "mesh"), 64 * 1024, 100);
@@ -78,7 +79,14 @@ const setup = () => {
   });
   actorManagers.push(actors);
   const globalActors = new GlobalActorRegistry(root, 64 * 1024);
-  const provider = new AgentsProvider(subagents, actors, globalActors, mainAgent);
+  const provider = new AgentsProvider(
+    subagents,
+    actors,
+    globalActors,
+    mainAgent,
+    undefined,
+    { list: () => peers },
+  );
   return { root, actors, globalActors, provider, mainDeliveries };
 };
 
@@ -105,6 +113,27 @@ const createRequest = {
 };
 
 describe("AgentsProvider runner support", () => {
+  it("lists live peer sessions separately from Main", async () => {
+    const peer: FabricPeerInfo = {
+      id: "session:peer",
+      name: "Peer peer",
+      kind: "peer",
+      status: "idle",
+      runner: "pi",
+      transport: "host",
+      cwd: process.cwd(),
+      sessionId: "peer",
+      startedAt: 1,
+      updatedAt: 2,
+      pendingMessages: false,
+      local: false,
+    };
+    const { provider } = setup([peer]);
+
+    await expect(provider.invoke("peers", {}, context)).resolves.toEqual([peer]);
+    expect((await provider.describe("peers", context))?.risk).toBe("read");
+  });
+
   it("attaches a structured child-tool preview to blocking agent runs", async () => {
     const { provider } = setup();
     const previews: unknown[] = [];

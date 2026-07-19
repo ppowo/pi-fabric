@@ -42,6 +42,7 @@ Use `/fabric agents` to list children and `/fabric attach <id>` for the attach c
 
 Any Fabric-equipped Pi participant (the user-facing Main session, a recursive child, or a persistent Pi actor) can message another known target without discarding its context. Ordinary non-recursive Pi children and Claude children/actors can receive host-routed messages, but cannot initiate `agents.*` calls because they do not run Fabric themselves.
 
+- `agents.peers()` lists other live root Pi sessions sharing the project mesh. The current dashboard owner remains **Main**; other roots are named `Peer <session-prefix>`. Peer records expire after missed heartbeats and can be passed directly to `agents.steer` or `agents.followUp`.
 - `agents.main()` returns the root user-facing Pi target as `{ id, name: "Main", kind: "main", status, ... }`. The stable alias `"main"` is also accepted anywhere a steerable target id is expected. Recursive children and Pi actors inherit the exact root Main id, so the alias does not accidentally target their private child session.
 - `agents.steer({ id, message, data? })` targets Main, a running one-shot child, or a persistent actor. Main receives a host custom message after the current turn's tools and before the next model call; a one-shot child receives the same between-turn queue semantics; an actor receives a serial mailbox item (equivalent to `tell`). Returns `{ queued, messageId, routed }`.
 - `agents.followUp({ id, message, data? })` targets Main or a running one-shot child after its current run settles, or enqueues the same serial actor mailbox. When Main is idle, Pi may start the requested turn immediately.
@@ -52,6 +53,8 @@ Any Fabric-equipped Pi participant (the user-facing Main session, a recursive ch
 
 ```ts
 const main = await agents.main();
+const peers = await agents.peers();
+if (peers[0]) await agents.steer({ id: peers[0].id, message: "Coordinate on the shared migration." });
 await agents.followUp({ id: main.id, message: "After the audit, reconcile the worker findings." });
 const handle = await agents.spawn({ task: "Audit auth flows.", tools: ["read", "grep", "find", "ls"] });
 // Watch progress, then redirect between turns without losing the child's context.

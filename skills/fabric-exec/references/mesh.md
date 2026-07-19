@@ -7,6 +7,7 @@ Every method takes a single options object. Mesh data defaults to `<project>/.pi
 ## Identity and presence
 
 - `mesh.self()` returns `{ id, name, kind, sessionId? }` where `kind` is `main`, `actor`, or `agent`. A recursive child uses its parent run id with kind `agent`; a persistent Pi actor uses its actor id; only the user-facing root session uses kind `main`.
+- `agents.peers()` returns heartbeat-backed presence for other live root Pi sessions. The local dashboard owner is **Main**; concurrent roots are **Peers**.
 - `mesh.members({ limit? })` returns actor presence across live Fabric sessions as entries with `{ key, value, version, updatedAt, updatedBy }` (the `value` is a `FabricActorInfo`).
 
 ## Topics (durable channels)

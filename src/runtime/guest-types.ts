@@ -44,6 +44,22 @@ interface FabricMainAgentInfo {
   pendingMessages: boolean;
   local: boolean;
 }
+interface FabricPeerInfo {
+  id: string;
+  name: string;
+  kind: "peer";
+  status: "idle" | "running";
+  runner: "pi";
+  transport: "host";
+  cwd: string;
+  sessionId: string;
+  model?: string;
+  thinking?: string;
+  startedAt: number;
+  updatedAt: number;
+  pendingMessages: boolean;
+  local: false;
+}
 interface FabricAgentHandle {
   id: string;
   name: string;
@@ -230,6 +246,7 @@ interface FabricAgentsApi {
   status(args: { id: string }): Promise<FabricAgentResult | FabricAgentHandle | FabricMainAgentInfo>;
   list(): Promise<Array<FabricAgentResult | FabricAgentHandle>>;
   main(): Promise<FabricMainAgentInfo>;
+  peers(): Promise<FabricPeerInfo[]>;
   models(args?: { runner?: FabricAgentRunner; refresh?: boolean }): Promise<FabricModelInfo[]>;
   stop(args: { id: string }): Promise<FabricAgentResult>;
   cleanup(args: { id: string; deleteBranch?: boolean }): Promise<{ cleaned: boolean }>;

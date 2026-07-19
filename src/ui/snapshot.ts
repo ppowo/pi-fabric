@@ -168,7 +168,7 @@ export const createDashboardSnapshot = (
 
   const meshEntries = state.config.mesh.enabled ? state.mesh.list("", 200) : [];
   const stateEntries = meshEntries
-    .filter((entry) => !entry.key.startsWith("actors/"))
+    .filter((entry) => !entry.key.startsWith("actors/") && !entry.key.startsWith("sessions/"))
     .map(stateEntry)
     .sort((left, right) => {
       const leftActive = activeStatuses.has(left.status) ? 1 : 0;
@@ -181,6 +181,7 @@ export const createDashboardSnapshot = (
     now: Date.now(),
     runs: orderedRuns,
     main: state.mainAgentInfo(context),
+    peers: typeof state.peerInfos === "function" ? state.peerInfos() : [],
     widgetDismissedAt: state.widgetDismissedAt,
     globalActors: state.globalActors.list(),
     agents: orderAgentsByCreation(agents).slice(-MAX_UI_AGENTS),

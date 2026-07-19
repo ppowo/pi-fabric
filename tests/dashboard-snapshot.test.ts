@@ -60,9 +60,11 @@ const fakeState = (
   runs: FabricActivityRun[],
   records: SubagentRunRecord[],
   actors: unknown[] = [],
+  peers: unknown[] = [],
 ): FabricState =>
   ({
     activity: { runs: () => runs },
+    peerInfos: () => peers,
     mainAgentInfo: () => ({
       id: "session:test",
       name: "Main",
@@ -97,6 +99,27 @@ describe("dashboard snapshot agent ownership", () => {
       local: true,
     });
     expect(snapshot.agents).toEqual([]);
+  });
+
+  it("includes concurrent root sessions as peers without relabeling Main", () => {
+    const peer = {
+      id: "session:peer-session",
+      name: "Peer peer-ses",
+      kind: "peer",
+      status: "running",
+      runner: "pi",
+      transport: "host",
+      cwd: "/tmp/project",
+      sessionId: "peer-session",
+      startedAt: 1,
+      updatedAt: 2,
+      pendingMessages: false,
+      local: false,
+    };
+    const snapshot = createDashboardSnapshot(fakeState([], [], [], [peer]), []);
+
+    expect(snapshot.main.name).toBe("Main");
+    expect(snapshot.peers).toEqual([peer]);
   });
 
   it("orders agents by creation regardless of status or recent activity", () => {

@@ -75,4 +75,6 @@ Read the line-numbered error â†’ `await tools.describe({ref})` for the schema â†
 ## Orchestration surfaces (opt-in)
 Multi-agent orchestration is opt-in: load `/skill:fabric-workflow`, `/skill:fabric-council`, `/skill:fabric-rlm`, or `/skill:fabric-fusion` (API detail in `references/agents.md`, `references/mesh.md`).
 
+`agents.main()` returns the dashboard-owning root Pi session; `agents.peers()` lists other live root sessions in the shared project mesh as `Peer <session-prefix>` targets. Peers support `agents.steer()` and `agents.followUp()` by exact id.
+
 Agent requests and persistent actors accept `runner: "pi" | "claude"`. Pi is the default and is required for `recursive: true`, `rlm.query()`, and actors that must call Fabric or mesh APIs themselves. Claude invokes the official `claude -p` harness; it supports mapped Claude Code tools and host-managed persistent actors, but not recursive/direct Fabric APIs. Use `agents.models({ runner: "claude" })` for runtime-enumerated `claude/<value>` model keys.

@@ -39,6 +39,7 @@ const emptySnapshot = (): FabricDashboardSnapshot => {
       pendingMessages: false,
       local: true,
     },
+    peers: [],
     agents: [],
     actors: [],
     globalActors: [],
@@ -292,6 +293,7 @@ export class FabricUiController {
     if (this.#timer || !this.#context) return;
     const active =
       this.#snapshot.runs.some((run) => run.status === "running") ||
+      this.#snapshot.peers.length > 0 ||
       this.#snapshot.agents.some((agent) => isActiveStatus(agent.status)) ||
       this.#snapshot.actors.some(
         (actor) =>

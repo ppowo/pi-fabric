@@ -104,10 +104,14 @@ Set `worktree: true` to create a dedicated Git worktree and `pi-fabric/<name>-<i
 
 ## Steering running agents
 
+The dashboard-owning root Pi session is **Main**. Other live root Pi sessions sharing the project mesh are **Peers**, named `Peer <session-prefix>`. `agents.peers()` returns their live heartbeat records; stopped or crashed sessions disappear after the presence lease expires. Peers are steerable by exact id from the dashboard or through `agents.steer`/`agents.followUp`.
+
 Fabric messaging is target-oriented rather than tied to fixed planner/worker roles. The user-facing Pi session is a first-class target named **Main**: `agents.main()` returns its exact identity, and the stable alias `"main"` works with `agents.steer` and `agents.followUp`. Main, recursive Pi children, and persistent Pi actors can initiate Fabric calls; ordinary non-recursive Pi children and Claude children/actors can receive host-routed messages but cannot initiate `agents.*` themselves.
 
 ```ts
 const main = await agents.main();
+const peers = await agents.peers();
+if (peers[0]) await agents.steer({ id: peers[0].id, message: "Coordinate on the shared migration." });
 await agents.followUp({ id: main.id, message: "After the audit, reconcile the findings." });
 
 const handle = await agents.spawn({ task: "Audit auth flows.", tools: ["read", "grep", "find", "ls"] });

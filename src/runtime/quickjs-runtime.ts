@@ -209,6 +209,7 @@ globalThis.agents = Object.freeze({
   status: (args) => __call("agents.status", args),
   list: () => __call("agents.list", {}),
   main: () => __call("agents.main", {}),
+  peers: () => __call("agents.peers", {}),
   models: (args = {}) => __call("agents.models", args),
   stop: (args) => __call("agents.stop", args),
   cleanup: (args) => __call("agents.cleanup", args),

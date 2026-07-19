@@ -108,6 +108,12 @@ export const entityTail = (entity: Entity, now: number): string => {
       .filter((value): value is string => Boolean(value))
       .join(" · ");
   }
+  if (entity.kind === "peer") {
+    const peer = entity.value;
+    return [peer.sessionId, peer.model, `${formatDuration(Math.max(0, now - peer.updatedAt))} ago`]
+      .filter((value): value is string => Boolean(value))
+      .join(" · ");
+  }
   if (entity.kind === "meshParticipant") {
     const participant = entity.value;
     return [

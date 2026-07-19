@@ -12,6 +12,7 @@ import { ActionRegistry } from "./core/action-registry.js";
 import { CompactController, type CompactLastCommit, type CompactPendingIntent } from "./core/compact-controller.js";
 import { FabricExecutionService } from "./execution-service.js";
 import { MeshStore, type MeshIdentity } from "./mesh/store.js";
+import { PeerSessionRegistry, type FabricPeerInfo } from "./peer-session.js";
 import {
   MainAgentController,
   resolveFabricIdentity,
@@ -53,6 +54,7 @@ export class FabricState {
   #mesh: MeshStore | undefined;
   #identity: MeshIdentity | undefined;
   #mainAgent: MainAgentController | undefined;
+  #peers: PeerSessionRegistry | undefined;
   #agentsProvider: AgentsProvider | undefined;
   #compact: CompactController | undefined;
   #schema: SchemaController | undefined;
@@ -122,6 +124,10 @@ export class FabricState {
     return this.#mainAgent.info(context);
   }
 
+  peerInfos(): FabricPeerInfo[] {
+    return this.#peers?.list() ?? [];
+  }
+
   async queueUserMessage(
     targetId: string,
     message: string,
@@ -189,6 +195,14 @@ export class FabricState {
       this.#config.mesh.maxEventBytes,
       this.#config.mesh.maxReadEvents,
     );
+    this.#peers = new PeerSessionRegistry(
+      this.#mesh,
+      identity,
+      mainAgent,
+      context,
+      this.#config.mesh.enabled,
+    );
+    await this.#peers.start();
     if (this.#config.mesh.enabled) {
       this.#registry.register(new MeshProvider(this.#mesh, identity));
       this.#registry.register(new StateProvider(this.#mesh, identity));
@@ -276,6 +290,7 @@ export class FabricState {
       this.#globalActors,
       mainAgent,
       () => this.#config?.ui.showNestedToolCalls ?? true,
+      this.#peers,
     );
     this.#registry.register(this.#agentsProvider);
     if (this.#config.memory.enabled) {
@@ -403,6 +418,7 @@ export class FabricState {
   }
 
   async shutdown(): Promise<void> {
+    await this.#peers?.close();
     await this.#registry?.close();
     this.#registry = undefined;
     this.#config = undefined;
@@ -413,6 +429,7 @@ export class FabricState {
     this.#mesh = undefined;
     this.#identity = undefined;
     this.#mainAgent = undefined;
+    this.#peers = undefined;
     this.#agentsProvider = undefined;
     this.#compact = undefined;
     this.#schema = undefined;
@@ -442,6 +459,7 @@ export class FabricState {
 
   async #closeInternal(): Promise<void> {
     if (!this.#registry) return;
+    await this.#peers?.close();
     const externalNames = new Set(this.#externalProviders.keys());
     await this.#registry.close(externalNames);
     this.#registry = undefined;
@@ -451,6 +469,7 @@ export class FabricState {
     this.#mesh = undefined;
     this.#identity = undefined;
     this.#mainAgent = undefined;
+    this.#peers = undefined;
     this.#agentsProvider = undefined;
     this.#compact = undefined;
     this.#schema = undefined;

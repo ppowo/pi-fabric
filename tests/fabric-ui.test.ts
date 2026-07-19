@@ -78,6 +78,7 @@ const snapshot = (): FabricDashboardSnapshot => {
   return {
     now,
     main: mainAgent(now),
+    peers: [],
     runs: [
       {
         id: "run-1",
@@ -2236,6 +2237,7 @@ describe("Fabric dashboard global actors and instructions editor", () => {
     return {
       now,
       main: mainAgent(now, "idle"),
+      peers: [],
       runs: [],
       agents: [],
       actors: [

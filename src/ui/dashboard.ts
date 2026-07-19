@@ -94,7 +94,7 @@ const safeMarkdownText = (value: string): string =>
 export interface FabricDashboardMessageTarget {
   id: string;
   name: string;
-  kind: "main" | "agent" | "actor" | "meshParticipant";
+  kind: "main" | "peer" | "agent" | "actor" | "meshParticipant";
 }
 
 type FabricTranscriptTarget = FabricUiAgent | FabricUiActor;
@@ -716,6 +716,9 @@ export class FabricDashboard implements Component, Focusable {
     if (entity.kind === "main") {
       return { id: entity.value.id, name: "Main", kind: "main" };
     }
+    if (entity.kind === "peer") {
+      return { id: entity.value.id, name: entity.value.name, kind: "peer" };
+    }
     if (entity.kind === "agent") {
       return { id: entity.value.id, name: entity.value.name, kind: "agent" };
     }
@@ -1275,6 +1278,14 @@ export class FabricDashboard implements Component, Focusable {
       ].filter((value): value is string => Boolean(value));
       return `Main actions: ${actions.join(" · ")}`;
     }
+    if (entity.kind === "peer") {
+      const actions = [
+        this.canMessage(entity, "steer") ? "s steer" : undefined,
+        this.canMessage(entity, "followUp") ? "u follow-up" : undefined,
+        "enter details",
+      ].filter((value): value is string => Boolean(value));
+      return `peer actions: ${actions.join(" · ")}`;
+    }
     if (entity.kind === "actor" && entity.status !== "stopped") {
       const actions = [
         this.actorTranscript
@@ -1457,13 +1468,15 @@ export class FabricDashboard implements Component, Focusable {
     const kindLabel =
       entity.kind === "main"
         ? "main agent"
-        : entity.kind === "meshParticipant"
-        ? "mesh agent"
-        : entity.kind === "meshTopic"
-          ? "topic"
-          : entity.kind === "meshRoute"
-            ? "route"
-            : entity.kind;
+        : entity.kind === "peer"
+          ? "peer session"
+          : entity.kind === "meshParticipant"
+            ? "mesh agent"
+            : entity.kind === "meshTopic"
+              ? "topic"
+              : entity.kind === "meshRoute"
+                ? "route"
+                : entity.kind;
     const lines = [this.topBorder(width, `${kindLabel} · ${entity.label}${viewLabel}`)];
     const content = transcriptView
       ? this.transcriptLines(entity, innerWidth)
@@ -1759,6 +1772,15 @@ export class FabricDashboard implements Component, Focusable {
         ? `Main Pi agent actions: ${actions.join(" · ")}`
         : "Main Pi agent controls are unavailable in this session.";
     }
+    if (entity.kind === "peer") {
+      const actions = [
+        this.canMessage(entity, "steer") ? "s steer over mesh" : undefined,
+        this.canMessage(entity, "followUp") ? "u queue follow-up over mesh" : undefined,
+      ].filter((value): value is string => Boolean(value));
+      return actions.length > 0
+        ? `Peer session actions: ${actions.join(" · ")}`
+        : "Peer session is read-only.";
+    }
     if (entity.kind === "agent") {
       const armed =
         this.pendingStop?.id === entity.value.id && this.pendingStop.expiresAt > Date.now();
@@ -1974,6 +1996,19 @@ export class FabricDashboard implements Component, Focusable {
         "Elapsed",
         main.startedAt ? formatDuration(Math.max(0, now - main.startedAt)) : undefined,
       );
+    } else if (entity.kind === "peer") {
+      const peer = entity.value;
+      field("ID", peer.id);
+      field("Scope", "concurrent root Pi session");
+      field("Runner", peer.runner);
+      field("Model", peer.model);
+      field("Thinking", peer.thinking);
+      field("Transport", peer.transport);
+      field("Session", peer.sessionId);
+      field("Working directory", peer.cwd);
+      field("Pending messages", peer.pendingMessages ? "yes" : "no");
+      field("Last heartbeat", new Date(peer.updatedAt).toLocaleString());
+      field("Elapsed", formatDuration(Math.max(0, now - peer.startedAt)));
     } else if (entity.kind === "agent") {
       const agent = entity.value;
       field("ID", agent.id);

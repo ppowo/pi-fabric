@@ -11,6 +11,7 @@ import type {
   FabricUiActor,
   FabricUiAgent,
   FabricUiMain,
+  FabricUiPeer,
   FabricUiStateEntry,
 } from "./types.js";
 import { isActiveStatus, orderAgentsByCreation } from "./types.js";
@@ -25,6 +26,7 @@ import {
 
 export type Entity =
   | { id: string; kind: "main"; label: string; status: string; value: FabricUiMain }
+  | { id: string; kind: "peer"; label: string; status: string; value: FabricUiPeer }
   | { id: string; kind: "agent"; label: string; status: string; value: FabricUiAgent }
   | { id: string; kind: "actor"; label: string; status: string; value: FabricUiActor }
   | {
@@ -81,6 +83,7 @@ export type TopologyView = "run" | "mesh";
 type EntityGroupKind =
   | FabricActivityKind
   | "globalActor"
+  | "peer"
   | "state"
   | "meshParticipant"
   | "meshTopic"
@@ -94,6 +97,7 @@ export interface EntityGroup {
 
 const entityGroupOrder: readonly EntityGroupKind[] = [
   "agent",
+  "peer",
   "actor",
   "globalActor",
   "tool",
@@ -110,6 +114,7 @@ const entityGroupOrder: readonly EntityGroupKind[] = [
 
 const entityGroupLabels: Record<EntityGroupKind, string> = {
   agent: "Agents",
+  peer: "Peers",
   actor: "Actors",
   globalActor: "Global templates",
   tool: "Tools",
@@ -126,6 +131,7 @@ const entityGroupLabels: Record<EntityGroupKind, string> = {
 
 const entityGroupKind = (entity: Entity): EntityGroupKind => {
   if (entity.kind === "main" || entity.kind === "agent") return "agent";
+  if (entity.kind === "peer") return "peer";
   if (entity.kind === "actor") return "actor";
   if (entity.kind === "globalActor") return "globalActor";
   if (entity.kind === "state") return "state";
@@ -217,6 +223,13 @@ const entitiesFor = (
         status: agent.status,
         value: agent,
       }));
+    const peers: Entity[] = snapshot.peers.map((peer) => ({
+      id: `peer:${peer.id}`,
+      kind: "peer",
+      label: peer.name,
+      status: peer.status,
+      value: peer,
+    }));
     const actors: Entity[] = snapshot.actors.map((actor) => ({
       id: `actor:${actor.id}`,
       kind: "actor",
@@ -241,6 +254,7 @@ const entitiesFor = (
     return orderEntitiesByGroup([
       mainEntity(snapshot),
       ...unlinkedAgents,
+      ...peers,
       ...actors,
       ...globalActors,
       ...state,
@@ -618,7 +632,7 @@ export const phasePanels = (
 
   const session: PhasePanel = {
     id: SESSION_PANEL_ID,
-    name: "Actors & shared state",
+    name: "Peers, actors & shared state",
     status: "idle",
     completed: 0,
     total: 0,

@@ -5,6 +5,7 @@ import type {
   FabricAgentMessageResult,
   FabricMainAgentTarget,
 } from "../main-agent.js";
+import type { FabricPeerSource } from "../peer-session.js";
 import type {
   FabricActionDescriptor,
   FabricInvocationContext,
@@ -101,6 +102,12 @@ const descriptors: FabricActionDescriptor[] = [
     name: "main",
     description:
       "Return the root user-facing Main Pi agent target. The stable alias main is also accepted by agents.steer and agents.followUp.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    risk: "read",
+  },
+  {
+    name: "peers",
+    description: "List other live root Pi sessions sharing this project mesh. The dashboard-owning session remains Main; these targets are named peers.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     risk: "read",
   },
@@ -658,6 +665,7 @@ export class AgentsProvider implements FabricProvider {
     readonly globalActors: GlobalActorRegistry,
     readonly mainAgent: FabricMainAgentTarget,
     readonly nestedToolsEnabled: () => boolean = () => true,
+    readonly peers: FabricPeerSource = { list: () => [] },
   ) {}
 
   async list(
@@ -733,6 +741,8 @@ export class AgentsProvider implements FabricProvider {
         return this.manager.list();
       case "main":
         return this.mainAgent.info(context.extensionContext);
+      case "peers":
+        return this.peers.list();
       case "models": {
         const runner =
           args.runner === "pi" || args.runner === "claude"
