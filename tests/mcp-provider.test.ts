@@ -19,6 +19,8 @@ describe("McpProvider", () => {
   it("discovers and calls a stdio server through mcporter", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-mcp-"));
     const configPath = path.join(directory, "mcporter.json");
+    const countFile = path.join(directory, "tools-list.log");
+    fs.writeFileSync(countFile, "");
     fs.writeFileSync(
       configPath,
       JSON.stringify({
@@ -26,10 +28,18 @@ describe("McpProvider", () => {
           test: {
             command: process.execPath,
             args: [path.resolve("tests/fixtures/fake-mcp-server.mjs")],
+            env: {
+              PI_FABRIC_MCP_COUNT_FILE: countFile,
+              PI_FABRIC_MCP_COUNT_LABEL: "test",
+            },
           },
           "fal-ai": {
             command: process.execPath,
             args: [path.resolve("tests/fixtures/fake-mcp-server.mjs")],
+            env: {
+              PI_FABRIC_MCP_COUNT_FILE: countFile,
+              PI_FABRIC_MCP_COUNT_LABEL: "fal-ai",
+            },
           },
         },
         imports: [],
@@ -80,6 +90,10 @@ describe("McpProvider", () => {
             name: "dynamic-server",
             command: process.execPath,
             args: [path.resolve("tests/fixtures/fake-mcp-server.mjs")],
+            env: {
+              PI_FABRIC_MCP_COUNT_FILE: countFile,
+              PI_FABRIC_MCP_COUNT_LABEL: "dynamic-server",
+            },
           },
           context,
         ),
@@ -87,6 +101,11 @@ describe("McpProvider", () => {
       await expect(
         provider.invoke("dynamic_server.echo_value", { value: "dynamic" }, context),
       ).resolves.toMatchObject({ text: "echo:dynamic" });
+      expect(fs.readFileSync(countFile, "utf8").trim().split("\n").sort()).toEqual([
+        "dynamic-server",
+        "fal-ai",
+        "test",
+      ]);
     } finally {
       await provider.close();
       fs.rmSync(directory, { recursive: true, force: true });

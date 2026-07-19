@@ -877,6 +877,25 @@ return true;
     expect(trace.counts.droppedValues).toBeGreaterThan(0);
   });
 
+  it("bounds large call traces while preserving operation order", () => {
+    const recorder = new FabricExecutionTraceRecorder();
+    for (let index = 0; index < 500; index++) {
+      recorder
+        .issueCall("pi.bash", { command: `${index}:${"x".repeat(16_000)}` })
+        .succeed(undefined);
+    }
+
+    const trace = recorder.seal("succeeded", []);
+    expect(trace.operations).toHaveLength(500);
+    expect(trace.operations.map((operation) => operation.sequence)).toEqual(
+      Array.from({ length: 500 }, (_, index) => index),
+    );
+    expect(Buffer.byteLength(JSON.stringify(trace), "utf8")).toBeLessThanOrEqual(
+      FABRIC_EXECUTION_TRACE_MAX_BYTES,
+    );
+    expect(trace.counts.droppedValues).toBeGreaterThan(0);
+  });
+
   it("enforces the total UTF-8 envelope bound with explicit drops", () => {
     const recorder = new FabricExecutionTraceRecorder();
     const phases = Array.from(

@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import readline from "node:readline";
 
 const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -18,6 +19,12 @@ input.on("line", (line) => {
     return;
   }
   if (request.method === "tools/list") {
+    if (process.env.PI_FABRIC_MCP_COUNT_FILE) {
+      fs.appendFileSync(
+        process.env.PI_FABRIC_MCP_COUNT_FILE,
+        `${process.env.PI_FABRIC_MCP_COUNT_LABEL ?? "server"}\n`,
+      );
+    }
     respond(request.id, {
       tools: [
         {

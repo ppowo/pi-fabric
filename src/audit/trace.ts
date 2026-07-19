@@ -512,32 +512,67 @@ export class FabricExecutionTraceRecorder {
     };
 
     let traceBytes = serializedBytes(trace);
-    for (let index = trace.operations.length - 1; traceBytes > FABRIC_EXECUTION_TRACE_MAX_BYTES && index >= 0; index--) {
+    const adjustMutation = (
+      beforeValueBytes: number,
+      afterValueBytes: number,
+      beforeCountsBytes: number,
+    ): void => {
+      traceBytes +=
+        afterValueBytes -
+        beforeValueBytes +
+        serializedBytes(trace.counts) -
+        beforeCountsBytes;
+    };
+    for (
+      let index = trace.operations.length - 1;
+      traceBytes > FABRIC_EXECUTION_TRACE_MAX_BYTES && index >= 0;
+      index--
+    ) {
       const operation = trace.operations[index]!;
-      if (operation.result !== undefined) {
-        delete operation.result;
-        trace.counts.droppedValues++;
-        traceBytes = serializedBytes(trace);
-      }
+      if (operation.result === undefined) continue;
+      const beforeOperationBytes = serializedBytes(operation);
+      const beforeCountsBytes = serializedBytes(trace.counts);
+      delete operation.result;
+      trace.counts.droppedValues++;
+      adjustMutation(
+        beforeOperationBytes,
+        serializedBytes(operation),
+        beforeCountsBytes,
+      );
     }
-    for (let index = trace.operations.length - 1; traceBytes > FABRIC_EXECUTION_TRACE_MAX_BYTES && index >= 0; index--) {
+    for (
+      let index = trace.operations.length - 1;
+      traceBytes > FABRIC_EXECUTION_TRACE_MAX_BYTES && index >= 0;
+      index--
+    ) {
       const operation = trace.operations[index]!;
-      if (Object.keys(operation.args).length > 0) {
-        operation.args = {};
-        trace.counts.droppedValues++;
-        trace.counts.truncatedValues++;
-        traceBytes = serializedBytes(trace);
-      }
+      if (Object.keys(operation.args).length === 0) continue;
+      const beforeOperationBytes = serializedBytes(operation);
+      const beforeCountsBytes = serializedBytes(trace.counts);
+      operation.args = {};
+      trace.counts.droppedValues++;
+      trace.counts.truncatedValues++;
+      adjustMutation(
+        beforeOperationBytes,
+        serializedBytes(operation),
+        beforeCountsBytes,
+      );
     }
     while (traceBytes > FABRIC_EXECUTION_TRACE_MAX_BYTES && trace.operations.length > 0) {
-      trace.operations.pop();
+      const beforeCountsBytes = serializedBytes(trace.counts);
+      const operation = trace.operations.pop()!;
+      traceBytes -= serializedBytes(operation);
+      if (trace.operations.length > 0) traceBytes--;
       trace.counts.droppedOperations++;
-      traceBytes = serializedBytes(trace);
+      traceBytes += serializedBytes(trace.counts) - beforeCountsBytes;
     }
     while (traceBytes > FABRIC_EXECUTION_TRACE_MAX_BYTES && trace.phases.length > 0) {
-      trace.phases.pop();
+      const beforeCountsBytes = serializedBytes(trace.counts);
+      const phase = trace.phases.pop()!;
+      traceBytes -= serializedBytes(phase);
+      if (trace.phases.length > 0) traceBytes--;
       trace.counts.droppedValues++;
-      traceBytes = serializedBytes(trace);
+      traceBytes += serializedBytes(trace.counts) - beforeCountsBytes;
     }
     return trace;
   }
