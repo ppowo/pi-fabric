@@ -59,6 +59,12 @@ const idSchema = {
 };
 
 const AGENT_PROGRESS_INTERVAL_MS = 1_000;
+const AGENT_PREVIEW_TEXT_CODE_POINTS = 2_000;
+
+const tailCodePoints = (value: string, limit: number): string => {
+  if (value.length <= limit) return value;
+  return Array.from(value.slice(-limit * 2)).slice(-limit).join("");
+};
 
 const descriptors: FabricActionDescriptor[] = [
   {
@@ -537,7 +543,7 @@ const attachAgentToolPreview = (
       runner: status.runner,
       owner: status.actorId ? "actor" : "agent",
       ...("text" in status && status.text
-        ? { text: Array.from(status.text).slice(-2_000).join("") }
+        ? { text: tailCodePoints(status.text, AGENT_PREVIEW_TEXT_CODE_POINTS) }
         : {}),
       tools,
     });
