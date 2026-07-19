@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Theme } from "@earendil-works/pi-coding-agent";
+import type { CodePreviewSettings } from "pi-code-previews";
 import { Box, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import { initHighlighting } from "../src/ui/highlight.js";
@@ -226,6 +227,63 @@ return Promise.all([
     );
 
     expect(nestedCallBody(restored[0]!)).toBe("# Cached preview");
+  });
+
+  it("renders child-agent edit activity beneath its parent call", () => {
+    const settings = {
+      tools: ["edit"],
+      editDiffPreview: true,
+      editCollapsedLines: 160,
+      syntaxHighlighting: false,
+      secretWarnings: true,
+      diffIntensity: "subtle",
+      wordEmphasis: "all",
+      toolCallBackground: "off",
+    } as CodePreviewSettings;
+    const lines = renderFabricMulticallPartial(
+      {
+        audits: [
+          {
+            ref: "agents.run",
+            provider: "agents",
+            tool: "run",
+            args: { task: "implement" },
+            preview: {
+              kind: "fabric-agent-tools",
+              id: "agent-child-123",
+              name: "implementor",
+              status: "running",
+              runner: "pi",
+              owner: "agent",
+              tools: [
+                {
+                  id: "child-edit",
+                  kind: "tool",
+                  label: "edit",
+                  toolName: "edit",
+                  status: "running",
+                  args: {
+                    path: "src/child.ts",
+                    edits: [{ oldText: "const before = 1;", newText: "const after = 2;" }],
+                  },
+                },
+              ],
+            },
+          },
+        ],
+        phases: [],
+        expanded: false,
+        showNestedToolCalls: true,
+        core: { cwd: process.cwd(), settings },
+      },
+      plainTheme,
+    ).render(120).join("\n");
+
+    const visible = lines.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+    expect(visible).toContain("src/child.ts");
+    expect(visible).toContain("[agent · implementor · pi · agent-ch]");
+    expect(visible).toContain("const before = 1;");
+    expect(visible).toContain("const after = 2;");
   });
 
   it("renders a write body while a multicall remains partial", () => {

@@ -105,6 +105,53 @@ const createRequest = {
 };
 
 describe("AgentsProvider runner support", () => {
+  it("attaches a structured child-tool preview to blocking agent runs", async () => {
+    const { provider } = setup();
+    const previews: unknown[] = [];
+    const previewContext: FabricInvocationContext = {
+      ...context,
+      attachPreview(preview) {
+        previews.push(preview);
+      },
+    };
+
+    await provider.invoke(
+      "run",
+      { task: "return a short result", name: "preview-agent", transport: "process" },
+      previewContext,
+    );
+
+    expect(previews.at(-1)).toMatchObject({
+      kind: "fabric-agent-tools",
+      name: "preview-agent",
+      status: "completed",
+      runner: "pi",
+      owner: "agent",
+      tools: expect.any(Array),
+    });
+  });
+
+  it("attaches the final preview for actors that settle before the first poll", async () => {
+    const { provider } = setup();
+    const actor = (await provider.invoke("create", createRequest, context)) as { id: string };
+    const previews: Array<Record<string, unknown>> = [];
+    const previewContext: FabricInvocationContext = {
+      ...context,
+      attachPreview(preview) {
+        previews.push(preview as Record<string, unknown>);
+      },
+    };
+
+    await provider.invoke("ask", { id: actor.id, message: "inspect quickly" }, previewContext);
+
+    expect(previews.at(-1)).toMatchObject({
+      kind: "fabric-agent-tools",
+      status: "completed",
+      owner: "actor",
+      tools: expect.any(Array),
+    });
+  });
+
   it("enumerates Claude models and preserves runner on actors", async () => {
     const { provider } = setup();
     const models = (await provider.invoke("models", { runner: "claude" }, context)) as Array<{

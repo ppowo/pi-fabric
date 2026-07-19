@@ -3,6 +3,7 @@ import type { FabricActivityRun } from "../activity/types.js";
 import type { MeshEvent } from "../mesh/store.js";
 import type { FabricMainAgentInfo } from "../main-agent.js";
 import type { SubagentUsage } from "../subagents/types.js";
+import type { FabricTranscriptEntry } from "./transcript.js";
 
 export type FabricUiMain = FabricMainAgentInfo;
 
@@ -35,6 +36,8 @@ export interface FabricUiAgent {
   runId?: string;
   phaseId?: string;
   parentId?: string;
+  /** Ephemeral live child-tool rows projected from the worker event log. */
+  toolActivity?: FabricTranscriptEntry[];
 }
 
 export interface FabricUiActor extends FabricActorInfo {

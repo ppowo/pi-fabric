@@ -147,6 +147,27 @@ describe("Fabric configuration", () => {
     expect(invalid.ui.haltOnEscape).toBe(true);
   });
 
+  it("normalizes nested-tool visibility and the global debounce", () => {
+    expect(DEFAULT_FABRIC_CONFIG.ui.showNestedToolCalls).toBe(true);
+    expect(DEFAULT_FABRIC_CONFIG.ui.nestedToolDebounceMs).toBe(100);
+    expect(
+      normalizeFabricConfig({
+        ui: { showNestedToolCalls: false, nestedToolDebounceMs: 0 },
+      }).ui,
+    ).toMatchObject({ showNestedToolCalls: false, nestedToolDebounceMs: 0 });
+    expect(
+      normalizeFabricConfig({ ui: { nestedToolDebounceMs: -10 } }).ui.nestedToolDebounceMs,
+    ).toBe(0);
+    expect(
+      normalizeFabricConfig({ ui: { nestedToolDebounceMs: 99_999 } }).ui.nestedToolDebounceMs,
+    ).toBe(2_000);
+    expect(
+      normalizeFabricConfig({
+        ui: { showNestedToolCalls: "off", nestedToolDebounceMs: "fast" },
+      }).ui,
+    ).toMatchObject({ showNestedToolCalls: true, nestedToolDebounceMs: 100 });
+  });
+
   it("normalizes strict Schema mode, transaction bounds, and trusted command definitions", () => {
     const config = normalizeFabricConfig({
       schema: {

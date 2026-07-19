@@ -46,24 +46,24 @@ const completeLines = (buffer: Buffer, bufferStart: number, fileEnd: number): Bu
   return lines;
 };
 
-/** Read a bounded JSONL page backwards, touching only enough file chunks to fill it. */
-export const readJsonlPage = (
-  filePath: string,
+/** Read a bounded JSONL page backwards from an already validated descriptor. */
+export const readJsonlPageFromDescriptor = (
+  descriptor: number,
   limit: number,
   before?: number,
+  knownSize?: number,
 ): JsonlPage => {
-  let descriptor: number | undefined;
   try {
-    descriptor = fs.openSync(filePath, "r");
-    const size = fs.fstatSync(descriptor).size;
+    const size = knownSize ?? fs.fstatSync(descriptor).size;
     const fileEnd = typeof before === "number" && Number.isSafeInteger(before)
       ? Math.max(0, Math.min(before, size))
       : size;
+    const boundedLimit = Math.max(1, Math.trunc(limit));
     let buffer = Buffer.alloc(0);
     let bufferStart = fileEnd;
     let records: BufferedLine[] = [];
 
-    while (bufferStart > 0 && records.length <= limit) {
+    while (bufferStart > 0 && records.length <= boundedLimit) {
       const length = Math.min(READ_CHUNK_BYTES, bufferStart);
       const chunkStart = bufferStart - length;
       const chunk = Buffer.allocUnsafe(length);
@@ -74,13 +74,28 @@ export const readJsonlPage = (
       records = completeLines(buffer, bufferStart, fileEnd);
     }
 
-    const selected = records.slice(-limit);
+    const selected = records.slice(-boundedLimit);
     const hasMore = selected.length > 0 && (records.length > selected.length || bufferStart > 0);
     return {
       lines: selected.map((line) => parseLine(line.offset, line.raw)),
       hasMore,
       ...(hasMore ? { before: selected[0]!.offset } : {}),
     };
+  } catch {
+    return { lines: [], hasMore: false };
+  }
+};
+
+/** Read a bounded JSONL page backwards, touching only enough file chunks to fill it. */
+export const readJsonlPage = (
+  filePath: string,
+  limit: number,
+  before?: number,
+): JsonlPage => {
+  let descriptor: number | undefined;
+  try {
+    descriptor = fs.openSync(filePath, "r");
+    return readJsonlPageFromDescriptor(descriptor, limit, before);
   } catch {
     return { lines: [], hasMore: false };
   } finally {

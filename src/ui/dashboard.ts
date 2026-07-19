@@ -47,7 +47,7 @@ import { highlightCode } from "./highlight.js";
 import { INHERIT_VALUE, type ModelSource } from "./model-picker.js";
 import { formatJsonAsYaml } from "./structured.js";
 import { buildProjectMeshTopology } from "./topology.js";
-import type { FabricAgentTranscript } from "./transcript.js";
+import type { FabricAgentTranscript, FabricTranscriptEntry } from "./transcript.js";
 import type { FabricDashboardSnapshot, FabricUiActor, FabricUiAgent } from "./types.js";
 import { isActiveStatus } from "./types.js";
 
@@ -94,6 +94,8 @@ export interface FabricDashboardMessageTarget {
   kind: "main" | "agent" | "actor" | "meshParticipant";
 }
 
+type FabricTranscriptTarget = FabricUiAgent | FabricUiActor;
+
 export class FabricDashboard implements Component, Focusable {
   focused = false;
   private pane: Pane = "phases";
@@ -111,6 +113,8 @@ export class FabricDashboard implements Component, Focusable {
   private detailId: string | undefined;
   private detailScroll = 0;
   private detailMaxScroll = 0;
+  private transcriptRenderedLines = 0;
+  private preserveTranscriptLines: number | undefined;
   private detailSelectionRestore:
     | { runSelectionTouched: boolean; phaseSelectionTouched: boolean }
     | undefined;
@@ -152,6 +156,9 @@ export class FabricDashboard implements Component, Focusable {
       ) => void)
     | undefined;
   private readonly agentTranscript: ((agent: FabricUiAgent) => FabricAgentTranscript) | undefined;
+  private readonly actorTranscript: ((actor: FabricUiActor) => FabricAgentTranscript) | undefined;
+  private readonly loadOlderTranscript: ((target: FabricTranscriptTarget) => boolean) | undefined;
+  private readonly loadFullTranscript: ((target: FabricTranscriptTarget) => boolean) | undefined;
   private readonly onActorModel:
     | ((actorId: string, model: string | undefined) => void)
     | undefined;
@@ -192,6 +199,9 @@ export class FabricDashboard implements Component, Focusable {
         delivery: FabricAgentMessageDelivery,
       ) => void;
       agentTranscript?: (agent: FabricUiAgent) => FabricAgentTranscript;
+      actorTranscript?: (actor: FabricUiActor) => FabricAgentTranscript;
+      loadOlderTranscript?: (target: FabricTranscriptTarget) => boolean;
+      loadFullTranscript?: (target: FabricTranscriptTarget) => boolean;
       onActorModel?: (actorId: string, model: string | undefined) => void;
       onActorThinking?: (actorId: string, thinking: FabricThinking | undefined) => void;
       onActorEvents?: (actorId: string, events: FabricActorHostEvent[]) => void;
@@ -212,6 +222,9 @@ export class FabricDashboard implements Component, Focusable {
     this.onAgentStop = options.onAgentStop;
     this.onTargetMessage = options.onTargetMessage;
     this.agentTranscript = options.agentTranscript;
+    this.actorTranscript = options.actorTranscript;
+    this.loadOlderTranscript = options.loadOlderTranscript;
+    this.loadFullTranscript = options.loadFullTranscript;
     this.onActorModel = options.onActorModel;
     this.onActorThinking = options.onActorThinking;
     this.onActorEvents = options.onActorEvents;
@@ -293,15 +306,23 @@ export class FabricDashboard implements Component, Focusable {
         this.closeDetail();
       } else if (data === "t") {
         const detail = allEntities.find((entity) => entity.id === this.detailId);
-        if (detail?.kind === "agent" && this.agentTranscript) {
+        if (detail && this.hasTranscript(detail)) {
           this.detailView = this.detailView === "summary" ? "transcript" : "summary";
           this.detailScroll = 0;
+          this.preserveTranscriptLines = undefined;
           this.transcriptFollowing = true;
         }
       } else if (matchesKey(data, Key.up) || data === "k") {
         if (this.detailScroll > 0) {
           if (this.detailView === "transcript") this.transcriptFollowing = false;
           this.detailScroll--;
+        } else if (this.detailView === "transcript") {
+          const detail = allEntities.find((entity) => entity.id === this.detailId);
+          const target = detail ? this.transcriptTarget(detail) : undefined;
+          if (target && this.loadOlderTranscript?.(target)) {
+            this.preserveTranscriptLines = this.transcriptRenderedLines;
+            this.transcriptFollowing = false;
+          }
         }
       } else if (matchesKey(data, Key.down) || data === "j") {
         if (this.detailScroll < this.detailMaxScroll) {
@@ -309,12 +330,18 @@ export class FabricDashboard implements Component, Focusable {
           this.detailScroll++;
         }
       } else if (data === "G" && this.detailView === "transcript") {
+        this.preserveTranscriptLines = undefined;
         this.transcriptFollowing = true;
+        this.detailScroll = this.detailMaxScroll;
       } else if (matchesKey(data, Key.home) || data === "g") {
-        if (this.detailScroll > 0) {
-          if (this.detailView === "transcript") this.transcriptFollowing = false;
-          this.detailScroll = 0;
+        if (this.detailView === "transcript") {
+          const detail = allEntities.find((entity) => entity.id === this.detailId);
+          const target = detail ? this.transcriptTarget(detail) : undefined;
+          if (target) this.loadFullTranscript?.(target);
+          this.preserveTranscriptLines = undefined;
+          this.transcriptFollowing = false;
         }
+        this.detailScroll = 0;
       } else if (data === "s" || data === "u") {
         const detail = allEntities.find((entity) => entity.id === this.detailId);
         const delivery = data === "s" ? "steer" : "followUp";
@@ -521,10 +548,11 @@ export class FabricDashboard implements Component, Focusable {
       }
     } else if (data === " " && this.pane === "entities") {
       const selected = entities[this.entityIndex];
-      if (selected?.kind === "agent" && this.agentTranscript) {
+      if (selected && this.hasTranscript(selected)) {
         this.detailId = selected.id;
         this.detailView = "transcript";
         this.detailScroll = 0;
+        this.preserveTranscriptLines = undefined;
         this.transcriptFollowing = true;
       }
     } else if (matchesKey(data, Key.enter)) {
@@ -643,6 +671,24 @@ export class FabricDashboard implements Component, Focusable {
     this.mode = "overview";
   }
 
+  private transcriptTarget(entity: Entity): FabricTranscriptTarget | undefined {
+    if (entity.kind === "agent" || entity.kind === "actor") return entity.value;
+    return undefined;
+  }
+
+  private hasTranscript(entity: Entity): boolean {
+    return (
+      (entity.kind === "agent" && this.agentTranscript !== undefined) ||
+      (entity.kind === "actor" && this.actorTranscript !== undefined)
+    );
+  }
+
+  private transcriptFor(entity: Entity): FabricAgentTranscript | undefined {
+    if (entity.kind === "agent") return this.agentTranscript?.(entity.value);
+    if (entity.kind === "actor") return this.actorTranscript?.(entity.value);
+    return undefined;
+  }
+
   private messageTarget(entity: Entity): FabricDashboardMessageTarget | undefined {
     if (entity.kind === "main") {
       return { id: entity.value.id, name: "Main", kind: "main" };
@@ -757,6 +803,7 @@ export class FabricDashboard implements Component, Focusable {
       "enter details",
     ].filter((value): value is string => Boolean(value));
     const actorActions = [
+      this.actorTranscript ? "space transcript peek" : undefined,
       this.onTargetMessage ? "s queue message" : undefined,
       (this.modelSource || this.claudeModelSource) && this.onActorModel ? "m model" : undefined,
       this.onActorThinking ? "e thinking" : undefined,
@@ -1204,6 +1251,9 @@ export class FabricDashboard implements Component, Focusable {
     }
     if (entity.kind === "actor" && entity.status !== "stopped") {
       const actions = [
+        this.actorTranscript
+          ? `space ${isActiveStatus(entity.status) ? "live " : ""}transcript peek`
+          : undefined,
         this.canMessage(entity, "steer") ? "s queue message" : undefined,
         this.modelSourceForActor(entity.value) && this.onActorModel ? "m model" : undefined,
         this.onActorThinking ? "e thinking" : undefined,
@@ -1372,7 +1422,8 @@ export class FabricDashboard implements Component, Focusable {
   ): string[] {
     if (width < 24) return this.renderNarrowDetail(width, snapshot, entity);
     const innerWidth = width - 2;
-    const transcriptView = entity.kind === "agent" && this.detailView === "transcript";
+    const transcriptView =
+      (entity.kind === "agent" || entity.kind === "actor") && this.detailView === "transcript";
     const actionLines = wrapPlainText(this.detailActionHint(entity), Math.max(1, innerWidth - 2), 3);
     const viewLabel = transcriptView
       ? ` · transcript · ${isActiveStatus(entity.status) ? "live" : entity.status}`
@@ -1389,14 +1440,24 @@ export class FabricDashboard implements Component, Focusable {
             : entity.kind;
     const lines = [this.topBorder(width, `${kindLabel} · ${entity.label}${viewLabel}`)];
     const content = transcriptView
-      ? this.transcriptLines(entity.value, innerWidth)
+      ? this.transcriptLines(entity, innerWidth)
       : this.detailLines(entity, innerWidth, snapshot.now);
     const terminalRows = this.tui.terminal?.rows ?? process.stdout.rows ?? 28;
     const maxBody = Math.max(1, Math.min(24, terminalRows - 8 - actionLines.length));
     const maxScroll = Math.max(0, content.length - maxBody);
     this.detailMaxScroll = maxScroll;
-    if (transcriptView && this.transcriptFollowing) this.detailScroll = maxScroll;
-    else this.detailScroll = Math.max(0, Math.min(this.detailScroll, maxScroll));
+    if (transcriptView && this.transcriptFollowing) {
+      this.detailScroll = maxScroll;
+    } else if (transcriptView && this.preserveTranscriptLines !== undefined) {
+      this.detailScroll = Math.max(
+        0,
+        Math.min(maxScroll, content.length - this.preserveTranscriptLines),
+      );
+      this.preserveTranscriptLines = undefined;
+    } else {
+      this.detailScroll = Math.max(0, Math.min(this.detailScroll, maxScroll));
+    }
+    if (transcriptView) this.transcriptRenderedLines = content.length;
     const visible = content.slice(this.detailScroll, this.detailScroll + maxBody);
     for (const line of visible) lines.push(this.row(width, line));
     while (lines.length < maxBody + 1) lines.push(this.row(width, ""));
@@ -1406,8 +1467,8 @@ export class FabricDashboard implements Component, Focusable {
         ? ` · ${this.detailScroll + 1}-${Math.min(content.length, this.detailScroll + maxBody)}/${content.length}`
         : "";
     const navigation = transcriptView
-      ? `↑↓/jk scroll · G follow:${this.transcriptFollowing ? "on" : "off"} · t summary · esc back${range}`
-      : `↑↓/jk scroll · ${entity.kind === "agent" && this.agentTranscript ? "t transcript · " : ""}esc back${range}`;
+      ? `↑↓/jk scroll · g top · G follow:${this.transcriptFollowing ? "on" : "off"}/bottom · t summary · esc back${range}`
+      : `↑↓/jk scroll · ${this.hasTranscript(entity) ? "t transcript · " : ""}esc back${range}`;
     lines.push(this.row(width, this.theme.fg("dim", navigation)));
     for (const actionLine of actionLines) {
       lines.push(this.row(width, this.theme.fg("muted", `  ${actionLine}`)));
@@ -1416,55 +1477,206 @@ export class FabricDashboard implements Component, Focusable {
     return lines.map((line) => truncateToWidth(line, width, ""));
   }
 
-  private transcriptLines(agent: FabricUiAgent, width: number): string[] {
-    const transcript = this.agentTranscript?.(agent);
+  private transcriptLines(entity: Entity, width: number): string[] {
+    const transcript = this.transcriptFor(entity);
+    const transcriptCwd =
+      entity.kind === "agent"
+        ? entity.value.cwd
+        : entity.kind === "actor"
+          ? entity.value.worker?.cwd
+          : undefined;
     if (!transcript || transcript.entries.length === 0) {
       return [
         this.theme.fg(
           "dim",
-          isActiveStatus(agent.status)
+          isActiveStatus(entity.status)
             ? "Waiting for streamed agent activity…"
-            : "No retained transcript is available for this agent.",
+            : "No retained transcript is available for this agent or actor.",
         ),
       ];
     }
     const lines: string[] = [];
-    if (transcript.truncated) lines.push(this.theme.fg("dim", "… earlier activity omitted"));
+    if (transcript.hasMore ?? transcript.truncated) {
+      lines.push(this.theme.fg("dim", "↑ earlier activity omitted · press g to load the true top"));
+    }
     for (const entry of transcript.entries) {
+      if (entry.kind === "tool") {
+        lines.push(...this.transcriptToolLines(entry, width, transcriptCwd));
+        continue;
+      }
       const glyph =
         entry.kind === "assistant"
           ? this.theme.fg("accent", "◆")
-          : entry.kind === "error"
-            ? this.theme.fg("error", "✗")
-            : colorStatus(this.theme, entry.status ?? "completed", statusGlyph(entry.status ?? "completed"));
-      const status =
-        entry.status === "running" ? " · running" : entry.status === "failed" ? " · failed" : "";
-      if (entry.kind === "tool") {
-        const detail = entry.text ? ` · ${safeText(entry.text)}` : "";
-        lines.push(
-          truncateToWidth(
-            `${glyph} ${this.theme.fg("muted", `${safeText(entry.label)}${status}${detail}`)}`,
-            width,
-            "",
-          ),
-        );
-        continue;
-      }
+          : entry.kind === "user"
+            ? this.theme.fg("muted", "›")
+            : entry.kind === "error"
+              ? this.theme.fg("error", "✗")
+              : colorStatus(
+                  this.theme,
+                  entry.status ?? "completed",
+                  statusGlyph(entry.status ?? "completed"),
+                );
       lines.push(
         truncateToWidth(
-          `${glyph} ${this.theme.fg(entry.kind === "assistant" ? "accent" : "muted", safeText(entry.label))}`,
+          `${glyph} ${this.theme.fg(
+            entry.kind === "assistant" ? "accent" : "muted",
+            safeText(entry.label),
+          )}`,
           width,
           "",
         ),
       );
       if (!entry.text) continue;
-      if (entry.kind === "assistant") {
-        lines.push(...this.markdownTranscriptLines(agent.id, entry.id, entry.text, width));
+      if (entry.kind === "assistant" || entry.kind === "user") {
+        lines.push(
+          ...this.markdownTranscriptLines(
+            this.transcriptTarget(entity)?.id ?? entity.id,
+            entry.id,
+            entry.text,
+            width,
+          ),
+        );
         continue;
       }
       for (const paragraph of entry.text.split("\n")) {
-        const wrapped = wrapPlainText(paragraph, Math.max(1, width - 2), 100);
+        const wrapped = wrapPlainText(paragraph, Math.max(1, width - 2), 10_000);
         for (const line of wrapped) lines.push(truncateToWidth(`  ${line}`, width, ""));
+      }
+    }
+    return lines;
+  }
+
+  private transcriptToolLines(
+    entry: FabricTranscriptEntry,
+    width: number,
+    transcriptCwd?: string,
+  ): string[] {
+    const depth = Math.max(0, entry.depth ?? 0);
+    const padding = "  ".repeat(depth);
+    if (!entry.args && entry.text) {
+      const status = entry.status ?? "completed";
+      return [
+        truncateToWidth(
+          colorStatus(
+            this.theme,
+            status,
+            `${padding}${entry.label} · ${status} · ${safeText(entry.text)}`,
+          ),
+          width,
+          "",
+        ),
+      ];
+    }
+    const bodyPadding = `${padding}  `;
+    const glyph = colorStatus(
+      this.theme,
+      entry.status ?? "completed",
+      statusGlyph(entry.status ?? "completed"),
+    );
+    const status =
+      entry.status === "running" ? " · running" : entry.status === "failed" ? " · failed" : "";
+    const audit = this.transcriptToolAudit(entry);
+    const context = this.codePreviewSettings
+      ? {
+          cwd: transcriptCwd ?? this.snapshot().main.cwd ?? process.cwd(),
+          settings: this.codePreviewSettings,
+          invalidate: this.highlightInvalidate,
+        }
+      : undefined;
+    const title = context ? coreToolTitle(audit, this.theme, context) : null;
+    const headline = title ?? this.theme.fg("toolTitle", this.theme.bold(entry.toolName ?? entry.label));
+    const lines = [
+      truncateToWidth(
+        `${padding}${glyph} ${headline}${this.theme.fg("dim", status)}`,
+        width,
+        "",
+      ),
+    ];
+    const rendered = context
+      ? renderCoreToolBody(audit, this.theme, {
+          ...context,
+          expanded: true,
+          maxLines: 200,
+        })
+      : null;
+    if (rendered) {
+      for (const row of renderBoundedLines(
+        rendered.lines,
+        this.theme,
+        this.codePreviewSettings?.diffIntensity ?? "off",
+      ).render(Math.max(1, width - visibleWidth(bodyPadding)))) {
+        lines.push(truncateToWidth(`${bodyPadding}${row}`, width, ""));
+      }
+      if (rendered.hidden > 0) {
+        lines.push(this.theme.fg("dim", `${bodyPadding}… ${rendered.hidden} more lines`));
+      }
+      return lines;
+    }
+    if (entry.args && Object.keys(entry.args).length > 0) {
+      lines.push(...this.transcriptStructuredLines("input", entry.args, width, bodyPadding));
+    } else if (entry.text) {
+      for (const row of wrapPlainText(entry.text, Math.max(1, width - visibleWidth(bodyPadding)), 10_000)) {
+        lines.push(truncateToWidth(`${bodyPadding}${row}`, width, ""));
+      }
+    }
+    if (entry.result !== undefined) {
+      lines.push(...this.transcriptStructuredLines("result", entry.result, width, bodyPadding));
+    }
+    return lines;
+  }
+
+  private transcriptToolAudit(entry: FabricTranscriptEntry): {
+    ref: string;
+    provider: string;
+    tool: string;
+    args?: Record<string, unknown>;
+    result?: unknown;
+    success?: boolean;
+  } {
+    const rawName = entry.toolName ?? entry.label;
+    const normalizedName = rawName.toLowerCase();
+    const tool =
+      normalizedName === "glob"
+        ? "find"
+        : ["read", "write", "edit", "bash", "grep", "find", "ls"].includes(normalizedName)
+          ? normalizedName
+          : rawName;
+    const rawArgs = entry.args ?? {};
+    const args: Record<string, unknown> = { ...rawArgs };
+    if (typeof rawArgs.file_path === "string" && typeof args.path !== "string") {
+      args.path = rawArgs.file_path;
+    }
+    if (tool === "edit" && !Array.isArray(args.edits)) {
+      const oldText = typeof rawArgs.old_string === "string" ? rawArgs.old_string : undefined;
+      const newText = typeof rawArgs.new_string === "string" ? rawArgs.new_string : undefined;
+      if (oldText !== undefined && newText !== undefined) args.edits = [{ oldText, newText }];
+    }
+    return {
+      ref: typeof tool === "string" ? `pi.${tool}` : `tool.${rawName}`,
+      provider: "pi",
+      tool,
+      ...(Object.keys(args).length > 0 ? { args } : {}),
+      ...(entry.result !== undefined ? { result: entry.result } : {}),
+      ...(entry.status !== "running" ? { success: entry.status !== "failed" } : {}),
+    };
+  }
+
+  private transcriptStructuredLines(
+    label: string,
+    value: unknown,
+    width: number,
+    padding: string,
+  ): string[] {
+    const yaml = formatJsonAsYaml(value) ?? safeText(value);
+    if (!yaml) return [];
+    const highlighted =
+      highlightCode(yaml, "yaml", this.highlightInvalidate) ??
+      yaml.split("\n").map((line) => this.theme.fg("mdCodeBlock", line || " "));
+    const lines = [truncateToWidth(`${padding}${this.theme.fg("dim", `${label}:`)}`, width, "")];
+    const nestedPadding = `${padding}  `;
+    for (const row of highlighted) {
+      for (const wrapped of wrapTextWithAnsi(row, Math.max(1, width - visibleWidth(nestedPadding)))) {
+        lines.push(truncateToWidth(`${nestedPadding}${wrapped}`, width, ""));
       }
     }
     return lines;
@@ -2010,19 +2222,30 @@ export class FabricDashboard implements Component, Focusable {
     snapshot: FabricDashboardSnapshot,
     entity: Entity,
   ): string[] {
-    const transcriptView = entity.kind === "agent" && this.detailView === "transcript";
+    const transcriptView =
+      (entity.kind === "agent" || entity.kind === "actor") && this.detailView === "transcript";
     const content = transcriptView
-      ? this.transcriptLines(entity.value, width)
+      ? this.transcriptLines(entity, width)
       : this.detailLines(entity, width, snapshot.now);
     const terminalRows = this.tui.terminal?.rows ?? process.stdout.rows ?? 28;
     const maxBody = Math.max(1, terminalRows - 2);
     this.detailMaxScroll = Math.max(0, content.length - maxBody);
-    if (transcriptView && this.transcriptFollowing) this.detailScroll = this.detailMaxScroll;
-    else this.detailScroll = Math.max(0, Math.min(this.detailScroll, this.detailMaxScroll));
+    if (transcriptView && this.transcriptFollowing) {
+      this.detailScroll = this.detailMaxScroll;
+    } else if (transcriptView && this.preserveTranscriptLines !== undefined) {
+      this.detailScroll = Math.max(
+        0,
+        Math.min(this.detailMaxScroll, content.length - this.preserveTranscriptLines),
+      );
+      this.preserveTranscriptLines = undefined;
+    } else {
+      this.detailScroll = Math.max(0, Math.min(this.detailScroll, this.detailMaxScroll));
+    }
+    if (transcriptView) this.transcriptRenderedLines = content.length;
     const title = `${entity.label}${transcriptView ? " · transcript" : ""}`;
     const hint = transcriptView
-      ? `G follow:${this.transcriptFollowing ? "on" : "off"} · t summary · esc`
-      : `${entity.kind === "agent" && this.agentTranscript ? "t transcript · " : ""}esc`;
+      ? `g top · G follow:${this.transcriptFollowing ? "on" : "off"}/bottom · t summary · esc`
+      : `${this.hasTranscript(entity) ? "t transcript · " : ""}esc`;
     return [title, ...content.slice(this.detailScroll, this.detailScroll + maxBody), hint]
       .map((line) => truncateToWidth(line, width, ""))
       .filter((line) => visibleWidth(line) > 0);

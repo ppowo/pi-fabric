@@ -275,6 +275,7 @@ export class FabricState {
       this.#actors,
       this.#globalActors,
       mainAgent,
+      () => this.#config?.ui.showNestedToolCalls ?? true,
     );
     this.#registry.register(this.#agentsProvider);
     if (this.#config.memory.enabled) {

@@ -1,6 +1,6 @@
 import { ActorManager } from "../actors/manager.js";
 import { GlobalActorRegistry } from "../actors/global-registry.js";
-import type { FabricActorHostEvent, FabricActorRequest } from "../actors/types.js";
+import type { FabricActorHostEvent, FabricActorMessage, FabricActorRequest } from "../actors/types.js";
 import type {
   FabricAgentMessageResult,
   FabricMainAgentTarget,
@@ -14,6 +14,7 @@ import type {
 import { SubagentManager } from "../subagents/manager.js";
 import type { SubagentRunRequest } from "../subagents/types.js";
 import { isFabricThinking } from "../thinking.js";
+import { projectAgentLogLines, recentTranscriptTools } from "../ui/transcript.js";
 
 const runProperties = {
   task: { type: "string", description: "A self-contained task for the child agent" },
@@ -511,42 +512,123 @@ const actorRequest = (
   };
 };
 
+const attachAgentToolPreview = (
+  manager: SubagentManager,
+  id: string,
+  context: FabricInvocationContext,
+  enabled: () => boolean,
+): void => {
+  if (!enabled() || !context.attachPreview) return;
+  try {
+    const status = manager.status(id);
+    const log = manager.readLog(id, { lines: 240 });
+    const transcript = projectAgentLogLines(log.events, log.hasMore);
+    context.attachPreview({
+      kind: "fabric-agent-tools",
+      id: status.id,
+      name: status.actorName ?? status.name,
+      status: status.status,
+      runner: status.runner,
+      owner: status.actorId ? "actor" : "agent",
+      tools: recentTranscriptTools(transcript, 3),
+    });
+  } catch {
+    // The worker may settle and clean up between status and log reads.
+  }
+};
+
+const pollResult = async <T>(
+  result: Promise<T>,
+): Promise<{ done: true; value: T } | { done: false }> => {
+  let progressTimer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      result.then((value) => ({ done: true as const, value })),
+      new Promise<{ done: false }>((resolve) => {
+        progressTimer = setTimeout(() => resolve({ done: false }), AGENT_PROGRESS_INTERVAL_MS);
+        progressTimer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (progressTimer) clearTimeout(progressTimer);
+  }
+};
+
+const actorWorker = (
+  manager: SubagentManager,
+  actorId: string,
+  includeTerminal: boolean,
+): ReturnType<SubagentManager["list"]>[number] | undefined => {
+  const candidates = manager.list().filter((candidate) => candidate.actorId === actorId);
+  const active = candidates.find((candidate) => candidate.status === "running");
+  if (active || !includeTerminal) return active;
+  // SubagentManager.list() preserves run insertion order; the last actor run
+  // is therefore the terminal snapshot for the ask that just settled.
+  return candidates.at(-1);
+};
+
 const waitWithProgress = async (
   manager: SubagentManager,
   id: string,
   context: FabricInvocationContext,
+  nestedToolsEnabled: () => boolean,
 ): Promise<unknown> => {
   const result = manager.wait(id);
-  while (true) {
-    let progressTimer: NodeJS.Timeout | undefined;
-    const settled = await Promise.race([
-      result.then((value) => ({ done: true as const, value })),
-      new Promise<{ done: false }>((resolve) => {
-        progressTimer = setTimeout(() => resolve({ done: false }), AGENT_PROGRESS_INTERVAL_MS);
-      }),
-    ]);
-    if (progressTimer) clearTimeout(progressTimer);
-    if (settled.done) {
-      context.activity?.({
-        type: "metrics",
-        tokens: settled.value.usage.input + settled.value.usage.output,
-        toolCalls: settled.value.toolCalls,
-        cost: settled.value.usage.cost,
-      });
-      return settled.value;
+  try {
+    while (true) {
+      const settled = await pollResult(result);
+      if (settled.done) {
+        context.activity?.({
+          type: "metrics",
+          tokens: settled.value.usage.input + settled.value.usage.output,
+          toolCalls: settled.value.toolCalls,
+          cost: settled.value.usage.cost,
+        });
+        return settled.value;
+      }
+      const status = manager.status(id);
+      attachAgentToolPreview(manager, id, context, nestedToolsEnabled);
+      const currentTool =
+        "currentTool" in status && status.currentTool ? ` · ${status.currentTool}` : "";
+      context.update(`Agent ${id.slice(0, 8)}: ${status.status}${currentTool}`);
+      if ("usage" in status) {
+        context.activity?.({
+          type: "metrics",
+          tokens: status.usage.input + status.usage.output,
+          toolCalls: status.toolCalls,
+          cost: status.usage.cost,
+        });
+      }
     }
-    const status = manager.status(id);
-    const currentTool =
-      "currentTool" in status && status.currentTool ? ` · ${status.currentTool}` : "";
-    context.update(`Agent ${id.slice(0, 8)}: ${status.status}${currentTool}`);
-    if ("usage" in status) {
-      context.activity?.({
-        type: "metrics",
-        tokens: status.usage.input + status.usage.output,
-        toolCalls: status.toolCalls,
-        cost: status.usage.cost,
-      });
+  } finally {
+    attachAgentToolPreview(manager, id, context, nestedToolsEnabled);
+  }
+};
+
+const waitWithActorProgress = async (
+  manager: SubagentManager,
+  actorId: string,
+  result: Promise<FabricActorMessage>,
+  context: FabricInvocationContext,
+  nestedToolsEnabled: () => boolean,
+): Promise<FabricActorMessage> => {
+  try {
+    while (true) {
+      const settled = await pollResult(result);
+      const worker = actorWorker(manager, actorId, settled.done);
+      if (worker) attachAgentToolPreview(manager, worker.id, context, nestedToolsEnabled);
+      if (settled.done) return settled.value;
+      const currentTool =
+        worker && "currentTool" in worker && worker.currentTool ? ` · ${worker.currentTool}` : "";
+      context.update(
+        worker
+          ? `Actor ${actorId.slice(0, 8)}: ${worker.status}${currentTool}`
+          : `Actor ${actorId.slice(0, 8)}: queued`,
+      );
     }
+  } finally {
+    const worker = actorWorker(manager, actorId, true);
+    if (worker) attachAgentToolPreview(manager, worker.id, context, nestedToolsEnabled);
   }
 };
 
@@ -560,6 +642,7 @@ export class AgentsProvider implements FabricProvider {
     readonly actorManager: ActorManager,
     readonly globalActors: GlobalActorRegistry,
     readonly mainAgent: FabricMainAgentTarget,
+    readonly nestedToolsEnabled: () => boolean = () => true,
   ) {}
 
   async list(
@@ -601,7 +684,7 @@ export class AgentsProvider implements FabricProvider {
         context.update(
           `Agent ${handle.id.slice(0, 8)} started via ${handle.runner}/${handle.transport}${handle.attachCommand ? ` · ${handle.attachCommand}` : ""}`,
         );
-        return waitWithProgress(this.manager, handle.id, context);
+        return waitWithProgress(this.manager, handle.id, context, this.nestedToolsEnabled);
       }
       case "spawn": {
         const handle = await this.manager.spawn(
@@ -624,7 +707,7 @@ export class AgentsProvider implements FabricProvider {
         const id = String(args.id);
         const status = this.manager.status(id);
         context.activity?.({ type: "entity", id, kind: "agent", name: status.name });
-        return waitWithProgress(this.manager, id, context);
+        return waitWithProgress(this.manager, id, context, this.nestedToolsEnabled);
       }
       case "status": {
         const id = String(args.id);
@@ -679,7 +762,13 @@ export class AgentsProvider implements FabricProvider {
       case "ask": {
         const actor = this.actorManager.status(String(args.id));
         context.activity?.({ type: "entity", id: actor.id, kind: "actor", name: actor.name });
-        return this.actorManager.ask(actor.id, String(args.message), args.data, context.signal);
+        return waitWithActorProgress(
+          this.manager,
+          actor.id,
+          this.actorManager.ask(actor.id, String(args.message), args.data, context.signal),
+          context,
+          this.nestedToolsEnabled,
+        );
       }
       case "tell": {
         const actor = this.actorManager.status(String(args.id));

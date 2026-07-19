@@ -92,6 +92,8 @@ interface FabricUiConfig {
   refreshMs: number;
   eventHistory: number;
   haltOnEscape: boolean;
+  showNestedToolCalls: boolean;
+  nestedToolDebounceMs: number;
 }
 
 interface FabricCompactionConfig {
@@ -208,6 +210,8 @@ export const DEFAULT_FABRIC_CONFIG: FabricConfig = {
     refreshMs: 500,
     eventHistory: 80,
     haltOnEscape: true,
+    showNestedToolCalls: true,
+    nestedToolDebounceMs: 100,
   },
   compaction: {
     engine: "fabric",
@@ -545,6 +549,16 @@ export const normalizeFabricConfig = (input: Record<string, unknown>): FabricCon
         500,
       ),
       haltOnEscape: booleanValue(ui.haltOnEscape, DEFAULT_FABRIC_CONFIG.ui.haltOnEscape),
+      showNestedToolCalls: booleanValue(
+        ui.showNestedToolCalls,
+        DEFAULT_FABRIC_CONFIG.ui.showNestedToolCalls,
+      ),
+      nestedToolDebounceMs: boundedInteger(
+        ui.nestedToolDebounceMs,
+        DEFAULT_FABRIC_CONFIG.ui.nestedToolDebounceMs,
+        0,
+        2_000,
+      ),
     },
     compaction: {
       engine: compactionEngineValue(compaction.engine, DEFAULT_FABRIC_CONFIG.compaction.engine),

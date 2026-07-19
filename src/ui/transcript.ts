@@ -1,26 +1,52 @@
 import fs from "node:fs";
-import type { FabricUiAgent } from "./types.js";
+import { readJsonlPageFromDescriptor } from "../log-tail.js";
+import type { FabricLogLine } from "../subagents/types.js";
 
-const MAX_READ_BYTES = 512 * 1024;
-const MAX_ENTRIES = 80;
+const PAGE_LINES = 240;
 const MAX_CACHE_ENTRIES = 32;
-const MAX_ASSISTANT_CHARS = 8_000;
-const MAX_TOOL_CHARS = 500;
+const MAX_TOOL_SUMMARY_CHARS = 500;
+const TRANSCRIPT_ENTRY_LIMIT = 80;
+const MAX_ENCODED_STRING_CHARS = 160;
 const secretKey = /authorization|api[-_]?key|token|password|secret|cookie|credential|private[-_]?key/i;
 
+type FabricTranscriptEntryStatus = "running" | "completed" | "failed";
+
+export interface FabricTranscriptEntry {
+  id: string;
+  kind: "user" | "assistant" | "tool" | "error" | "status";
+  label: string;
+  text?: string;
+  status?: FabricTranscriptEntryStatus;
+  toolName?: string;
+  args?: Record<string, unknown>;
+  result?: unknown;
+  parentId?: string;
+  depth?: number;
+}
+
 export interface FabricAgentTranscript {
-  entries: Array<{
-    id: string;
-    kind: "assistant" | "tool" | "error" | "status";
-    label: string;
-    text?: string;
-    status?: "running" | "completed" | "failed";
-  }>;
+  entries: FabricTranscriptEntry[];
+  /** Kept for compatibility; true means older pages are available. */
   truncated: boolean;
+  hasMore?: boolean;
   updatedAt?: number;
 }
 
-type TranscriptEntry = FabricAgentTranscript["entries"][number];
+export interface FabricTranscriptSource {
+  id: string;
+  status: string;
+  logFile?: string;
+}
+
+export interface FabricNestedToolPreview {
+  kind: "fabric-agent-tools";
+  id: string;
+  name: string;
+  status: string;
+  runner?: "pi" | "claude";
+  owner: "agent" | "actor";
+  tools: FabricTranscriptEntry[];
+}
 
 interface CachedTranscript {
   device: number;
@@ -28,7 +54,10 @@ interface CachedTranscript {
   modifiedAt: number;
   offset: number;
   remainder: Buffer;
-  accumulator: TranscriptAccumulator;
+  remainderOffset: number;
+  lines: FabricLogLine[];
+  before: number | undefined;
+  hasMore: boolean;
   transcript: FabricAgentTranscript;
 }
 
@@ -37,14 +66,15 @@ const recordOf = (value: unknown): Record<string, unknown> | undefined =>
     ? (value as Record<string, unknown>)
     : undefined;
 
-const terminalSafe = (value: string): string =>
-  value
+const terminalSafe = (value: string, trim = true): string => {
+  const safe = value
     .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
     .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/[\u202a-\u202e\u2066-\u2069\u200e\u200f]/gi, "")
     .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, " ")
-    .replace(/\r\n?/g, "\n")
-    .trim();
+    .replace(/\r\n?/g, "\n");
+  return trim ? safe.trim() : safe;
+};
 
 const graphemes = (value: string): string[] => {
   const Segmenter = Intl.Segmenter;
@@ -82,15 +112,8 @@ const contentText = (value: unknown): string => {
   return "";
 };
 
-const messageText = (event: Record<string, unknown>): string => {
-  const message = recordOf(event.message);
-  if (!message || message.role !== "assistant") return "";
-  return clip(contentText(message.content), MAX_ASSISTANT_CHARS);
-};
-
-const messageError = (event: Record<string, unknown>): string => {
-  const message = recordOf(event.message);
-  if (!message || message.role !== "assistant" || message.stopReason !== "error") return "";
+const messageError = (message: Record<string, unknown>): string => {
+  if (message.role !== "assistant" || message.stopReason !== "error") return "";
   const details: string[] = [];
   if (typeof message.errorMessage === "string") details.push(message.errorMessage);
   else if (typeof message.error === "string") details.push(message.error);
@@ -107,63 +130,98 @@ const messageError = (event: Record<string, unknown>): string => {
       if (detail) details.push(detail);
     }
   }
-  return clip([...new Set(details)].join(" · ") || "Agent response failed", MAX_TOOL_CHARS);
+  return clip([...new Set(details)].join(" · ") || "Agent response failed", MAX_TOOL_SUMMARY_CHARS);
 };
+
+const redactInlineSecrets = (value: string): string =>
+  value
+    .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, "Bearer [redacted]")
+    .replace(/\bBasic\s+[A-Za-z0-9+/=]{8,}/gi, "Basic [redacted]")
+    .replace(/\b(?:sk|pk|ghp|github_pat|xox[baprs])[-_][A-Za-z0-9_-]{12,}\b/g, "[redacted]")
+    .replace(
+      /\b(Authorization|Proxy-Authorization|Cookie|Set-Cookie|X-Api-Key)\s*:\s*[^\r\n;]+/gi,
+      "$1: [redacted]",
+    )
+    .replace(
+      /\b([A-Z0-9_]*(?:PASSWORD|PASSWD|TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL|COOKIE)[A-Z0-9_]*)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s;&|]+)/gi,
+      "$1=[redacted]",
+    )
+    .replace(
+      /(--?(?:password|passwd|token|secret|api[-_]?key|access[-_]?key|credential|cookie))(?:=|\s+)(?:"[^"]*"|'[^']*'|[^\s;&|]+)/gi,
+      "$1=[redacted]",
+    )
+    .replace(/(https?:\/\/)[^\s/:@]+:[^\s/@]+@/gi, "$1[redacted]@");
 
 const redact = (value: unknown, key = "", depth = 0): unknown => {
   if (secretKey.test(key)) return "[redacted]";
-  if (depth > 5) return "[nested value]";
+  if (depth > 12) return "[nested value]";
   if (typeof value === "string") {
-    const hidden = value
-      .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, "Bearer [redacted]")
-      .replace(/\b(?:sk|pk|ghp|github_pat|xox[baprs])[-_][A-Za-z0-9_-]{12,}\b/g, "[redacted]");
-    if (/^[A-Za-z0-9+/=_-]{160,}$/.test(hidden)) return `[large encoded value · ${hidden.length} chars]`;
+    const hidden = redactInlineSecrets(terminalSafe(value, false));
+    if (
+      hidden.length >= MAX_ENCODED_STRING_CHARS &&
+      /^[A-Za-z0-9+/=_-]+$/.test(hidden)
+    ) {
+      return `[large encoded value · ${hidden.length} chars]`;
+    }
     return hidden;
   }
-  if (Array.isArray(value)) return value.slice(0, 20).map((entry) => redact(entry, key, depth + 1));
+  if (Array.isArray(value)) return value.map((entry) => redact(entry, key, depth + 1));
   const record = recordOf(value);
   if (!record) return value;
   return Object.fromEntries(
-    Object.entries(record)
-      .slice(0, 30)
-      .map(([name, entry]) => [name, redact(entry, name, depth + 1)]),
+    Object.entries(record).map(([name, entry]) => [name, redact(entry, name, depth + 1)]),
   );
+};
+
+const redactRecord = (value: unknown): Record<string, unknown> | undefined => {
+  const record = recordOf(value);
+  return record ? (redact(record) as Record<string, unknown>) : undefined;
 };
 
 const compactValue = (value: unknown): string => {
   try {
-    return clip(JSON.stringify(redact(value)).replace(/\s+/g, " "), MAX_TOOL_CHARS);
+    return clip(JSON.stringify(redact(value)).replace(/\s+/g, " "), MAX_TOOL_SUMMARY_CHARS);
   } catch {
-    return clip(String(redact(value) ?? "").replace(/\s+/g, " "), MAX_TOOL_CHARS);
+    return clip(String(redact(value) ?? "").replace(/\s+/g, " "), MAX_TOOL_SUMMARY_CHARS);
   }
 };
 
 class TranscriptAccumulator {
-  readonly entries: TranscriptEntry[] = [];
-  readonly #tools = new Map<string, TranscriptEntry>();
-  readonly #anonymousTools = new Map<string, TranscriptEntry[]>();
-  #assistant: TranscriptEntry | undefined;
-  #retry: TranscriptEntry | undefined;
-  #compaction: TranscriptEntry | undefined;
+  readonly entries: FabricTranscriptEntry[] = [];
+  readonly #tools = new Map<string, FabricTranscriptEntry>();
+  readonly #anonymousTools = new Map<string, FabricTranscriptEntry[]>();
+  readonly #activeTools: FabricTranscriptEntry[] = [];
+  #assistant: FabricTranscriptEntry | undefined;
+  #retry: FabricTranscriptEntry | undefined;
+  #compaction: FabricTranscriptEntry | undefined;
   #sequence = 0;
-  truncated = false;
 
   append(events: Array<Record<string, unknown>>): void {
     for (const event of events) this.#append(event);
   }
 
-  snapshot(updatedAt?: number): FabricAgentTranscript {
+  snapshot(
+    olderAvailable = false,
+    updatedAt?: number,
+    maxEntries = TRANSCRIPT_ENTRY_LIMIT,
+  ): FabricAgentTranscript {
+    const entries = maxEntries > 0 && this.entries.length > maxEntries
+      ? this.entries.slice(-maxEntries)
+      : this.entries;
+    const omitted = entries.length < this.entries.length;
     return {
-      entries: this.entries.map((entry) => ({ ...entry })),
-      truncated: this.truncated,
+      entries: entries.map((entry) => ({ ...entry })),
+      truncated: olderAvailable || omitted,
+      hasMore: olderAvailable || omitted,
       ...(updatedAt !== undefined ? { updatedAt } : {}),
     };
   }
 
-  #nextId(event: Record<string, unknown>): string {
+  #nextId(event: Record<string, unknown>, prefix = "event"): string {
     if (typeof event.toolCallId === "string") return event.toolCallId;
     if (typeof event.uuid === "string") return event.uuid;
-    return `event-${this.#sequence++}`;
+    if (typeof event.id === "string") return event.id;
+    return `${prefix}-${this.#sequence++}`;
   }
 
   #finishAssistant(status: "completed" | "failed"): void {
@@ -172,30 +230,193 @@ class TranscriptAccumulator {
     this.#assistant = undefined;
   }
 
+  #pushMessage(
+    kind: "user" | "assistant",
+    id: string,
+    text: string,
+    status: FabricTranscriptEntryStatus = "completed",
+    label = kind === "assistant" ? "Agent" : "User",
+  ): void {
+    const safe = terminalSafe(text);
+    if (!safe) return;
+    this.entries.push({ id, kind, label, text: safe, status });
+  }
+
+  #toolParent(id: string): FabricTranscriptEntry | undefined {
+    if (!id.startsWith("fabric_")) return undefined;
+    for (let index = this.#activeTools.length - 1; index >= 0; index--) {
+      const candidate = this.#activeTools[index];
+      if (candidate?.toolName === "fabric_exec" && candidate.status === "running") return candidate;
+    }
+    return undefined;
+  }
+
+  #startTool(
+    id: string,
+    label: string,
+    args: unknown,
+  ): FabricTranscriptEntry {
+    const existing = this.#tools.get(id);
+    const safeArgs = args === undefined ? undefined : redactRecord(args);
+    if (existing) {
+      if (safeArgs !== undefined) existing.args = safeArgs;
+      if (args !== undefined) existing.text = compactValue(args);
+      return existing;
+    }
+    const parent = this.#toolParent(id);
+    const safeLabel = terminalSafe(label) || "tool";
+    const entry: FabricTranscriptEntry = {
+      id,
+      kind: "tool",
+      label: safeLabel,
+      toolName: safeLabel,
+      status: "running",
+      ...(safeArgs !== undefined ? { args: safeArgs } : {}),
+      ...(args !== undefined ? { text: compactValue(args) } : {}),
+      ...(parent ? { parentId: parent.id, depth: (parent.depth ?? 0) + 1 } : {}),
+    };
+    this.entries.push(entry);
+    this.#tools.set(id, entry);
+    this.#activeTools.push(entry);
+    return entry;
+  }
+
+  #finishTool(id: string | undefined, label: string, result: unknown, failed: boolean): void {
+    const safeLabel = terminalSafe(label) || "tool";
+    const anonymous = this.#anonymousTools.get(safeLabel);
+    const entry = id ? this.#tools.get(id) : anonymous?.shift();
+    if (anonymous?.length === 0) this.#anonymousTools.delete(safeLabel);
+    const safeResult = result === undefined ? undefined : redact(result);
+    if (entry) {
+      entry.status = failed ? "failed" : "completed";
+      if (safeResult !== undefined) entry.result = safeResult;
+      if (failed && result !== undefined) {
+        const failure = compactValue(result);
+        entry.text = clip(
+          `${entry.text ? `${entry.text} · ` : ""}error: ${failure}`,
+          MAX_TOOL_SUMMARY_CHARS,
+        );
+      }
+      this.#tools.delete(entry.id);
+      const activeIndex = this.#activeTools.indexOf(entry);
+      if (activeIndex >= 0) this.#activeTools.splice(activeIndex, 1);
+      return;
+    }
+    this.entries.push({
+      id: id ?? `tool-${this.#sequence++}`,
+      kind: "tool",
+      label: safeLabel,
+      toolName: safeLabel,
+      status: failed ? "failed" : "completed",
+      ...(safeResult !== undefined ? { result: safeResult } : {}),
+      ...(failed && result !== undefined ? { text: compactValue(result) } : {}),
+    });
+  }
+
+  #appendSessionMessage(event: Record<string, unknown>, message: Record<string, unknown>): void {
+    const id = this.#nextId(event, "message");
+    if (message.role === "user") {
+      this.#pushMessage("user", id, contentText(message.content));
+      return;
+    }
+    if (message.role === "assistant") {
+      const error = messageError(message);
+      const text = contentText(message.content);
+      if (text) this.#pushMessage("assistant", id, text, error ? "failed" : "completed");
+      if (error) {
+        this.entries.push({
+          id: `${id}-error`,
+          kind: "error",
+          label: "Agent error",
+          text: error,
+          status: "failed",
+        });
+      }
+      if (Array.isArray(message.content)) {
+        for (const value of message.content) {
+          const part = recordOf(value);
+          if (part?.type !== "toolCall" || typeof part.name !== "string") continue;
+          const toolId = typeof part.id === "string" ? part.id : `session-tool-${this.#sequence++}`;
+          this.#startTool(toolId, part.name, part.arguments);
+        }
+      }
+      return;
+    }
+    if (message.role === "toolResult") {
+      const toolId = typeof message.toolCallId === "string" ? message.toolCallId : undefined;
+      const label = typeof message.toolName === "string" ? message.toolName : "tool";
+      this.#finishTool(
+        toolId,
+        label,
+        { content: message.content, ...(message.details !== undefined ? { details: message.details } : {}) },
+        message.isError === true,
+      );
+    }
+  }
+
   #append(event: Record<string, unknown>): void {
     if (typeof event.type !== "string") return;
     const id = this.#nextId(event);
 
+    if (event.type === "message") {
+      const message = recordOf(event.message);
+      if (message) this.#appendSessionMessage(event, message);
+      return;
+    }
+
+    if (event.type === "model_change") {
+      const provider = typeof event.provider === "string" ? event.provider : "";
+      const model = typeof event.modelId === "string" ? event.modelId : "";
+      this.entries.push({
+        id,
+        kind: "status",
+        label: "Model changed",
+        ...(provider || model ? { text: [provider, model].filter(Boolean).join("/") } : {}),
+        status: "completed",
+      });
+      return;
+    }
+
+    if (event.type === "thinking_level_change") {
+      this.entries.push({
+        id,
+        kind: "status",
+        label: "Thinking changed",
+        ...(typeof event.thinkingLevel === "string" ? { text: event.thinkingLevel } : {}),
+        status: "completed",
+      });
+      return;
+    }
+
+    if (event.type === "compaction") {
+      this.entries.push({
+        id,
+        kind: "status",
+        label: "Compacted context",
+        ...(typeof event.summary === "string" ? { text: terminalSafe(event.summary) } : {}),
+        status: "completed",
+      });
+      return;
+    }
 
     if (event.type === "stream_event") {
       const stream = recordOf(event.event);
       const delta = recordOf(stream?.delta);
       if (stream?.type === "content_block_delta" && delta?.type === "text_delta") {
-        const text = typeof delta.text === "string" ? delta.text : "";
+        const text = typeof delta.text === "string" ? terminalSafe(delta.text, false) : "";
         if (!text) return;
         if (!this.#assistant) {
           this.#assistant = {
             id,
             kind: "assistant",
             label: "Claude",
-            text: clip(text, MAX_ASSISTANT_CHARS),
+            text,
             status: "running",
           };
           this.entries.push(this.#assistant);
         } else {
-          this.#assistant.text = clip(`${this.#assistant.text ?? ""}${text}`, MAX_ASSISTANT_CHARS);
+          this.#assistant.text = `${this.#assistant.text ?? ""}${text}`;
         }
-        this.#bound();
       }
       return;
     }
@@ -208,26 +429,17 @@ class TranscriptAccumulator {
           const part = recordOf(value);
           if (part?.type !== "tool_use") continue;
           const toolId = typeof part.id === "string" ? part.id : `claude-tool-${this.#sequence++}`;
-          const label = typeof part.name === "string" ? terminalSafe(part.name) : "tool";
-          const text = part.input === undefined ? undefined : compactValue(part.input);
-          const entry: TranscriptEntry = {
-            id: toolId,
-            kind: "tool",
-            label,
-            status: "running",
-            ...(text ? { text } : {}),
-          };
-          this.entries.push(entry);
-          this.#tools.set(toolId, entry);
+          const label = typeof part.name === "string" ? part.name : "tool";
+          this.#startTool(toolId, label, part.input);
         }
       }
-      const text = clip(contentText(message.content), MAX_ASSISTANT_CHARS);
+      const text = terminalSafe(contentText(message.content));
       if (text) {
         if (this.#assistant) {
           this.#assistant.text = text;
           this.#finishAssistant("completed");
         } else {
-          this.entries.push({ id, kind: "assistant", label: "Claude", text, status: "completed" });
+          this.#pushMessage("assistant", id, text, "completed", "Claude");
         }
       }
       if (typeof event.error === "string") {
@@ -235,34 +447,24 @@ class TranscriptAccumulator {
           id: `${id}-error`,
           kind: "error",
           label: "Claude error",
-          text: clip(event.error, MAX_TOOL_CHARS),
+          text: clip(event.error, MAX_TOOL_SUMMARY_CHARS),
           status: "failed",
         });
       }
-      this.#bound();
       return;
     }
 
     if (event.type === "user") {
       const message = recordOf(event.message);
       if (!message || !Array.isArray(message.content)) return;
+      let hasToolResult = false;
       for (const value of message.content) {
         const part = recordOf(value);
         if (part?.type !== "tool_result" || typeof part.tool_use_id !== "string") continue;
-        const entry = this.#tools.get(part.tool_use_id);
-        const failed = part.is_error === true;
-        const failure = failed ? compactValue(part.content) : "";
-        if (entry) {
-          entry.status = failed ? "failed" : "completed";
-          if (failure) {
-            entry.text = clip(
-              `${entry.text ? `${entry.text} · ` : ""}error: ${failure}`,
-              MAX_TOOL_CHARS,
-            );
-          }
-          this.#tools.delete(part.tool_use_id);
-        }
+        hasToolResult = true;
+        this.#finishTool(part.tool_use_id, "tool", part.content, part.is_error === true);
       }
+      if (!hasToolResult) this.#pushMessage("user", id, contentText(message.content));
       return;
     }
 
@@ -277,30 +479,36 @@ class TranscriptAccumulator {
           id,
           kind: "error",
           label: "Claude result",
-          text: clip(text, MAX_TOOL_CHARS),
+          text: clip(text, MAX_TOOL_SUMMARY_CHARS),
           status: "failed",
         });
-        this.#bound();
       }
       return;
     }
 
     if (event.type === "system" && event.subtype === "api_retry") {
-      const text = typeof event.error === "string" ? clip(event.error, MAX_TOOL_CHARS) : undefined;
       this.entries.push({
         id,
         kind: "status",
         label: "Claude API retry",
         status: "running",
-        ...(text ? { text } : {}),
+        ...(typeof event.error === "string"
+          ? { text: clip(event.error, MAX_TOOL_SUMMARY_CHARS) }
+          : {}),
       });
-      this.#bound();
       return;
     }
 
     if (event.type === "message_start") this.#finishAssistant("completed");
     if (event.type === "message_start" || event.type === "message_update") {
-      const text = messageText(event);
+      const message = recordOf(event.message);
+      if (!message) return;
+      if (message.role === "user") {
+        if (event.type === "message_start") this.#pushMessage("user", id, contentText(message.content));
+        return;
+      }
+      if (message.role !== "assistant") return;
+      const text = terminalSafe(contentText(message.content));
       if (!text) return;
       if (!this.#assistant) {
         this.#assistant = { id, kind: "assistant", label: "Agent", text, status: "running" };
@@ -309,238 +517,388 @@ class TranscriptAccumulator {
         this.#assistant.text = text;
         if (!this.entries.includes(this.#assistant)) this.entries.push(this.#assistant);
       }
-      this.#bound();
       return;
     }
 
     if (event.type === "message_end") {
-      const error = messageError(event);
+      const message = recordOf(event.message);
+      if (!message) return;
+      if (message.role === "user") {
+        this.#pushMessage("user", id, contentText(message.content));
+        return;
+      }
+      if (message.role !== "assistant") return;
+      const error = messageError(message);
       if (error) {
         this.#finishAssistant("failed");
         this.entries.push({ id, kind: "error", label: "Agent error", text: error, status: "failed" });
-        this.#bound();
         return;
       }
-      const text = messageText(event);
+      const text = terminalSafe(contentText(message.content));
       if (!text) {
         this.#finishAssistant("completed");
         return;
       }
-      if (!this.#assistant) {
-        this.entries.push({ id, kind: "assistant", label: "Agent", text, status: "completed" });
-      } else {
+      if (!this.#assistant) this.#pushMessage("assistant", id, text);
+      else {
         this.#assistant.text = text;
         this.#finishAssistant("completed");
       }
-      this.#bound();
       return;
     }
 
     if (event.type === "response" && event.command === "prompt" && event.success === false) {
       const text = typeof event.error === "string" ? event.error : "Pi rejected the prompt";
-      this.entries.push({ id, kind: "error", label: "Prompt rejected", text: clip(text, MAX_TOOL_CHARS), status: "failed" });
-      this.#bound();
+      this.entries.push({
+        id,
+        kind: "error",
+        label: "Prompt rejected",
+        text: clip(text, MAX_TOOL_SUMMARY_CHARS),
+        status: "failed",
+      });
       return;
     }
 
     if (event.type === "tool_execution_start") {
-      const label = typeof event.toolName === "string" ? terminalSafe(event.toolName) : "tool";
-      const text = event.args === undefined ? undefined : compactValue(event.args);
-      const entry: TranscriptEntry = { id, kind: "tool", label, status: "running", ...(text ? { text } : {}) };
-      this.entries.push(entry);
-      if (typeof event.toolCallId === "string") this.#tools.set(event.toolCallId, entry);
-      else this.#anonymousTools.set(label, [...(this.#anonymousTools.get(label) ?? []), entry]);
-      this.#bound();
+      const label = typeof event.toolName === "string" ? event.toolName : "tool";
+      const entry = this.#startTool(id, label, event.args);
+      if (typeof event.toolCallId !== "string") {
+        const key = terminalSafe(label) || "tool";
+        this.#tools.delete(entry.id);
+        this.#anonymousTools.set(key, [...(this.#anonymousTools.get(key) ?? []), entry]);
+      }
       return;
     }
 
     if (event.type === "tool_execution_end") {
-      const label = typeof event.toolName === "string" ? terminalSafe(event.toolName) : "tool";
-      const anonymous = this.#anonymousTools.get(label);
-      const entry =
-        typeof event.toolCallId === "string"
-          ? this.#tools.get(event.toolCallId)
-          : anonymous?.shift();
-      if (anonymous?.length === 0) this.#anonymousTools.delete(label);
-      const failed = event.isError === true;
-      const failure = failed && event.result !== undefined ? compactValue(event.result) : "";
-      if (entry) {
-        entry.status = failed ? "failed" : "completed";
-        if (failure) entry.text = clip(`${entry.text ? `${entry.text} · ` : ""}error: ${failure}`, MAX_TOOL_CHARS);
-        this.#tools.delete(entry.id);
-      } else {
-        this.entries.push({ id, kind: "tool", label, status: failed ? "failed" : "completed", ...(failure ? { text: failure } : {}) });
-      }
-      this.#bound();
+      const label = typeof event.toolName === "string" ? event.toolName : "tool";
+      this.#finishTool(
+        typeof event.toolCallId === "string" ? event.toolCallId : undefined,
+        label,
+        event.result,
+        event.isError === true,
+      );
       return;
     }
 
     if (event.type === "auto_retry_start") {
       const attempt = typeof event.attempt === "number" ? ` ${event.attempt}` : "";
-      const text =
-        typeof event.errorMessage === "string"
-          ? clip(event.errorMessage, MAX_TOOL_CHARS)
-          : undefined;
-      const retry: TranscriptEntry = {
+      this.#retry = {
         id,
         kind: "status",
         label: `Retry${attempt}`,
         status: "running",
-        ...(text ? { text } : {}),
+        ...(typeof event.errorMessage === "string"
+          ? { text: clip(event.errorMessage, MAX_TOOL_SUMMARY_CHARS) }
+          : {}),
       };
-      this.#retry = retry;
-      this.entries.push(retry);
-      this.#bound();
+      this.entries.push(this.#retry);
       return;
     }
     if (event.type === "auto_retry_end") {
       const failed = event.success === false;
       if (this.#retry) {
         this.#retry.status = failed ? "failed" : "completed";
-        if (failed && typeof event.finalError === "string") this.#retry.text = clip(event.finalError, MAX_TOOL_CHARS);
+        if (failed && typeof event.finalError === "string") {
+          this.#retry.text = clip(event.finalError, MAX_TOOL_SUMMARY_CHARS);
+        }
         this.#retry = undefined;
       }
       return;
     }
 
     if (event.type === "compaction_start") {
-      this.#compaction = { id, kind: "status", label: "Compacting context", status: "running" };
+      this.#compaction = {
+        id,
+        kind: "status",
+        label: "Compacting context",
+        status: "running",
+      };
       this.entries.push(this.#compaction);
-      this.#bound();
       return;
     }
     if (event.type === "compaction_end") {
       if (this.#compaction) {
         const failed = event.aborted === true || typeof event.errorMessage === "string";
         this.#compaction.status = failed ? "failed" : "completed";
-        if (typeof event.errorMessage === "string") this.#compaction.text = clip(event.errorMessage, MAX_TOOL_CHARS);
+        if (typeof event.errorMessage === "string") {
+          this.#compaction.text = clip(event.errorMessage, MAX_TOOL_SUMMARY_CHARS);
+        }
         this.#compaction = undefined;
       }
       return;
     }
 
-    if (event.type === "extension_error") {
-      const text = typeof event.error === "string" ? event.error : "Extension error";
-      this.entries.push({ id, kind: "error", label: "Error", text: clip(text, MAX_TOOL_CHARS), status: "failed" });
-      this.#bound();
-    }
-  }
-
-  #bound(): void {
-    while (this.entries.length > MAX_ENTRIES) {
-      const removable = this.entries.findIndex((entry) => entry !== this.#assistant);
-      if (removable < 0) break;
-      const [removed] = this.entries.splice(removable, 1);
-      if (removed) this.#tools.delete(removed.id);
-      this.truncated = true;
+    if (event.type === "extension_error" || event.type === "worker_stderr") {
+      const text =
+        typeof event.error === "string"
+          ? event.error
+          : typeof event.text === "string"
+            ? event.text
+            : "Extension error";
+      this.entries.push({
+        id,
+        kind: "error",
+        label: event.type === "worker_stderr" ? "Worker stderr" : "Error",
+        text: clip(text, MAX_TOOL_SUMMARY_CHARS),
+        status: "failed",
+      });
     }
   }
 }
 
 export const projectAgentTranscript = (
   events: Array<Record<string, unknown>>,
-  truncated = false,
+  olderAvailable = false,
 ): FabricAgentTranscript => {
   const accumulator = new TranscriptAccumulator();
-  accumulator.truncated = truncated;
   accumulator.append(events);
-  return accumulator.snapshot();
+  return accumulator.snapshot(olderAvailable);
 };
 
-const parseEvents = (content: Buffer): Array<Record<string, unknown>> => {
-  const events: Array<Record<string, unknown>> = [];
-  for (const raw of content.toString("utf8").split("\n")) {
-    if (!raw) continue;
-    try {
-      const event = recordOf(JSON.parse(raw));
-      if (event) events.push(event);
-    } catch {
-      // Ignore malformed protocol output while preserving the surrounding stream.
-    }
+const parseRaw = (raw: string): Record<string, unknown> | undefined => {
+  try {
+    return recordOf(JSON.parse(raw));
+  } catch {
+    return undefined;
   }
-  return events;
 };
 
-const readFrom = (descriptor: number, start: number, end: number): { data: Buffer; bytesRead: number } => {
+const parsedEvents = (lines: FabricLogLine[]): Array<Record<string, unknown>> =>
+  lines
+    .map((line) => recordOf(line.parsed) ?? parseRaw(line.raw))
+    .filter((event): event is Record<string, unknown> => event !== undefined);
+
+const readRange = (descriptor: number, start: number, end: number): Buffer => {
   const length = Math.max(0, end - start);
-  if (length === 0) return { data: Buffer.alloc(0), bytesRead: 0 };
-  const buffer = Buffer.alloc(length);
-  const bytesRead = fs.readSync(descriptor, buffer, 0, length, start);
-  return { data: buffer.subarray(0, bytesRead), bytesRead };
+  if (length === 0) return Buffer.alloc(0);
+  const chunks: Buffer[] = [];
+  let offset = start;
+  while (offset < end) {
+    const size = Math.min(256 * 1024, end - offset);
+    const chunk = Buffer.allocUnsafe(size);
+    const bytesRead = fs.readSync(descriptor, chunk, 0, size, offset);
+    if (bytesRead <= 0) break;
+    chunks.push(chunk.subarray(0, bytesRead));
+    offset += bytesRead;
+  }
+  return Buffer.concat(chunks);
 };
 
-const splitComplete = (data: Buffer): { complete: Buffer; remainder: Buffer } => {
-  const newline = data.lastIndexOf(0x0a);
-  if (newline < 0) return { complete: Buffer.alloc(0), remainder: data };
-  return { complete: data.subarray(0, newline + 1), remainder: data.subarray(newline + 1) };
+const splitAppendedLines = (
+  data: Buffer,
+  startOffset: number,
+): { lines: FabricLogLine[]; remainder: Buffer; remainderOffset: number } => {
+  const lines: FabricLogLine[] = [];
+  let start = 0;
+  for (let index = 0; index < data.length; index++) {
+    if (data[index] !== 0x0a) continue;
+    const raw = data.subarray(start, index).toString("utf8").replace(/\r$/, "");
+    if (raw) {
+      const offset = startOffset + start;
+      const parsed = parseRaw(raw);
+      lines.push({ offset, raw, ...(parsed ? { parsed } : {}) });
+    }
+    start = index + 1;
+  }
+  return {
+    lines,
+    remainder: Buffer.from(data.subarray(start)),
+    remainderOffset: startOffset + start,
+  };
+};
+
+export const projectAgentLogLines = (
+  lines: FabricLogLine[],
+  olderAvailable = false,
+): FabricAgentTranscript => projectAgentTranscript(parsedEvents(lines), olderAvailable);
+
+export const isFabricNestedToolPreview = (value: unknown): value is FabricNestedToolPreview => {
+  const record = recordOf(value);
+  return (
+    record?.kind === "fabric-agent-tools" &&
+    typeof record.id === "string" &&
+    typeof record.name === "string" &&
+    Array.isArray(record.tools)
+  );
+};
+
+export const recentTranscriptTools = (
+  transcript: FabricAgentTranscript,
+  limit = 2,
+): FabricTranscriptEntry[] => {
+  const tools = transcript.entries.filter((entry) => entry.kind === "tool");
+  const boundedLimit = Math.max(1, limit);
+  const running = tools.filter((entry) => entry.status === "running");
+  const completed = tools.filter((entry) => entry.status !== "running");
+  const completedSlots = Math.max(0, boundedLimit - Math.min(running.length, boundedLimit));
+  const retained = new Set([
+    ...running.slice(-boundedLimit),
+    ...completed.slice(-completedSlots),
+  ]);
+  return tools
+    .filter((entry) => retained.has(entry))
+    .slice(-boundedLimit)
+    .map((entry) => ({ ...entry }));
 };
 
 export class AgentTranscriptReader {
   readonly #cache = new Map<string, CachedTranscript>();
 
-  read(agent: FabricUiAgent): FabricAgentTranscript {
-    const filePath = agent.logFile;
-    if (!filePath) return { entries: [], truncated: false };
+  read(source: FabricTranscriptSource): FabricAgentTranscript {
+    const filePath = source.logFile;
+    if (!filePath) return { entries: [], truncated: false, hasMore: false };
     const cached = this.#cache.get(filePath);
     let descriptor: number | undefined;
     try {
       const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
       descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | noFollow);
       const stat = fs.fstatSync(descriptor);
-      if (!stat.isFile()) return cached?.transcript ?? { entries: [], truncated: false };
+      if (!stat.isFile()) return cached?.transcript ?? { entries: [], truncated: false, hasMore: false };
       const sameFile = cached?.device === stat.dev && cached.inode === stat.ino;
       const sameSizeRewrite =
         sameFile && cached.offset === stat.size && cached.modifiedAt !== stat.mtimeMs;
       let state = cached;
       if (!state || !sameFile || stat.size < state.offset || sameSizeRewrite) {
-        const accumulator = new TranscriptAccumulator();
-        const start = Math.max(0, stat.size - MAX_READ_BYTES);
-        const initial = readFrom(descriptor, start, stat.size);
-        let data = initial.data;
-        if (start > 0) {
-          const newline = data.indexOf(0x0a);
-          data = newline >= 0 ? data.subarray(newline + 1) : Buffer.alloc(0);
-          accumulator.truncated = true;
-        }
-        const split = splitComplete(data);
-        accumulator.append(parseEvents(split.complete));
-        state = {
-          device: stat.dev,
-          inode: stat.ino,
-          modifiedAt: stat.mtimeMs,
-          offset: start + initial.bytesRead,
-          remainder: Buffer.from(split.remainder),
-          accumulator,
-          transcript: accumulator.snapshot(stat.mtimeMs),
-        };
+        state = this.#initialState(descriptor, stat);
       } else if (stat.size > state.offset) {
-        const start = Math.max(state.offset, stat.size - MAX_READ_BYTES);
-        const skipped = start > state.offset;
-        const appended = readFrom(descriptor, start, stat.size);
-        let data = skipped ? appended.data : Buffer.concat([state.remainder, appended.data]);
-        if (skipped) {
-          const newline = data.indexOf(0x0a);
-          data = newline >= 0 ? data.subarray(newline + 1) : Buffer.alloc(0);
-          state.accumulator.truncated = true;
-        }
-        const split = splitComplete(data);
-        state.remainder = Buffer.from(split.remainder);
-        state.accumulator.append(parseEvents(split.complete));
-        state.offset = start + appended.bytesRead;
+        const appended = readRange(descriptor, state.offset, stat.size);
+        const startOffset = state.remainder.length > 0 ? state.remainderOffset : state.offset;
+        const split = splitAppendedLines(Buffer.concat([state.remainder, appended]), startOffset);
+        state.lines.push(...split.lines);
+        state.remainder = split.remainder;
+        state.remainderOffset = split.remainderOffset;
+        state.offset = stat.size;
         state.modifiedAt = stat.mtimeMs;
-        state.transcript = state.accumulator.snapshot(stat.mtimeMs);
+        state.transcript = this.#project(state);
       }
       this.#remember(filePath, state);
       return state.transcript;
     } catch {
-      return cached?.transcript ?? { entries: [], truncated: false };
+      return cached?.transcript ?? { entries: [], truncated: false, hasMore: false };
     } finally {
       if (descriptor !== undefined) fs.closeSync(descriptor);
     }
   }
 
+  loadOlder(source: FabricTranscriptSource): boolean {
+    const filePath = source.logFile;
+    if (!filePath) return false;
+    this.read(source);
+    const state = this.#cache.get(filePath);
+    if (!state?.hasMore) return false;
+    const cursor = state.before ?? state.lines[0]?.offset;
+    if (cursor === undefined || cursor <= 0) {
+      state.hasMore = false;
+      state.transcript = this.#project(state);
+      return false;
+    }
+    let descriptor: number | undefined;
+    try {
+      const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+      descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | noFollow);
+      const stat = fs.fstatSync(descriptor);
+      if (!stat.isFile() || stat.dev !== state.device || stat.ino !== state.inode) return false;
+      const page = readJsonlPageFromDescriptor(descriptor, PAGE_LINES, cursor, stat.size);
+      if (page.lines.length === 0) {
+        state.hasMore = false;
+        state.transcript = this.#project(state);
+        return false;
+      }
+      const known = new Set(state.lines.map((line) => line.offset));
+      const older = page.lines.filter((line) => !known.has(line.offset));
+      state.lines.unshift(...older);
+      state.hasMore = page.hasMore;
+      state.before = page.before;
+      state.transcript = this.#project(state);
+      this.#remember(filePath, state);
+      return older.length > 0;
+    } catch {
+      return false;
+    } finally {
+      if (descriptor !== undefined) {
+        try { fs.closeSync(descriptor); } catch {}
+      }
+    }
+  }
+
+  loadAll(source: FabricTranscriptSource): boolean {
+    const filePath = source.logFile;
+    if (!filePath) return false;
+    this.read(source);
+    const state = this.#cache.get(filePath);
+    if (!state?.hasMore) return false;
+    const cursor = state.before ?? state.lines[0]?.offset;
+    if (cursor === undefined || cursor <= 0) {
+      state.hasMore = false;
+      state.transcript = this.#project(state);
+      return false;
+    }
+    let descriptor: number | undefined;
+    try {
+      const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+      descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | noFollow);
+      const stat = fs.fstatSync(descriptor);
+      if (!stat.isFile() || stat.dev !== state.device || stat.ino !== state.inode) return false;
+      const split = splitAppendedLines(readRange(descriptor, 0, cursor), 0);
+      const known = new Set(state.lines.map((line) => line.offset));
+      const older = split.lines.filter((line) => !known.has(line.offset));
+      state.lines.unshift(...older);
+      state.hasMore = false;
+      state.before = undefined;
+      state.transcript = this.#project(state);
+      this.#remember(filePath, state);
+      return older.length > 0;
+    } catch {
+      return false;
+    } finally {
+      if (descriptor !== undefined) {
+        try { fs.closeSync(descriptor); } catch {}
+      }
+    }
+  }
+
   clear(): void {
     this.#cache.clear();
+  }
+
+  #initialState(descriptor: number, stat: fs.Stats): CachedTranscript {
+    const page = readJsonlPageFromDescriptor(descriptor, PAGE_LINES, undefined, stat.size);
+    const lines = [...page.lines];
+    let remainder: Buffer = Buffer.alloc(0);
+    let remainderOffset = stat.size;
+    if (stat.size > 0) {
+      const lastByte = Buffer.allocUnsafe(1);
+      fs.readSync(descriptor, lastByte, 0, 1, stat.size - 1);
+      if (lastByte[0] !== 0x0a) {
+        const partial = lines.at(-1);
+        if (partial) {
+          lines.pop();
+          remainderOffset = partial.offset;
+          remainder = readRange(descriptor, partial.offset, stat.size);
+        }
+      }
+    }
+    const state: CachedTranscript = {
+      device: stat.dev,
+      inode: stat.ino,
+      modifiedAt: stat.mtimeMs,
+      offset: stat.size,
+      remainder,
+      remainderOffset,
+      lines,
+      before: page.before,
+      hasMore: page.hasMore,
+      transcript: { entries: [], truncated: page.hasMore, hasMore: page.hasMore },
+    };
+    state.transcript = this.#project(state);
+    return state;
+  }
+
+  #project(state: CachedTranscript): FabricAgentTranscript {
+    const accumulator = new TranscriptAccumulator();
+    accumulator.append(parsedEvents(state.lines));
+    return accumulator.snapshot(state.hasMore, state.modifiedAt, Number.MAX_SAFE_INTEGER);
   }
 
   #remember(filePath: string, state: CachedTranscript): void {

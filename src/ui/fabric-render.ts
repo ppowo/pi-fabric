@@ -5,6 +5,7 @@ import { getKeybindings, truncateToWidth, visibleWidth, type Component } from "@
 import { highlightCode, languageFromPath } from "./highlight.js";
 import { headlineArg } from "../core/call-preview.js";
 import { coreToolTitle, renderCoreToolBody } from "./core-tool-render.js";
+import { isFabricNestedToolPreview, type FabricTranscriptEntry } from "./transcript.js";
 import ts from "typescript";
 import {
   applyDiffBackground,
@@ -534,6 +535,86 @@ export function nestedCallTitle(
   return detail ? `${title} ${theme.fg("accent", detail)}` : title;
 }
 
+const transcriptToolAudit = (entry: FabricTranscriptEntry): FabricRenderAudit => {
+  const rawName = entry.toolName ?? entry.label;
+  const normalized = rawName.toLowerCase();
+  const tool = normalized === "glob"
+    ? "find"
+    : ["read", "write", "edit", "bash", "grep", "find", "ls"].includes(normalized)
+      ? normalized
+      : rawName;
+  const rawArgs = entry.args ?? {};
+  const args: Record<string, unknown> = { ...rawArgs };
+  if (typeof rawArgs.file_path === "string" && typeof args.path !== "string") {
+    args.path = rawArgs.file_path;
+  }
+  if (tool === "edit" && !Array.isArray(args.edits)) {
+    const oldText = typeof rawArgs.old_string === "string" ? rawArgs.old_string : undefined;
+    const newText = typeof rawArgs.new_string === "string" ? rawArgs.new_string : undefined;
+    if (oldText !== undefined && newText !== undefined) args.edits = [{ oldText, newText }];
+  }
+  return {
+    ref: `pi.${tool}`,
+    provider: "pi",
+    tool,
+    ...(Object.keys(args).length > 0 ? { args } : {}),
+    ...(entry.result !== undefined ? { result: entry.result } : {}),
+    ...(entry.status !== "running" ? { success: entry.status !== "failed" } : {}),
+  };
+};
+
+export const renderNestedAgentToolLines = (
+  audit: FabricRenderAudit,
+  theme: Theme,
+  options: {
+    expanded: boolean;
+    core?: { cwd: string; settings: CodePreviewSettings } | undefined;
+    invalidate?: (() => void) | undefined;
+  },
+): string[] => {
+  if (!isFabricNestedToolPreview(audit.preview) || audit.preview.tools.length === 0) return [];
+  const limit = options.expanded ? 8 : 3;
+  const tools = audit.preview.tools.slice(-limit);
+  const metadata = theme.fg(
+    "dim",
+    `[${audit.preview.owner} · ${safeTerminalText(audit.preview.name)} · ${audit.preview.runner ?? "pi"} · ${audit.preview.id.slice(0, 8)}]`,
+  );
+  const lines: string[] = [];
+  for (const entry of tools) {
+    const nestedAudit = transcriptToolAudit(entry);
+    const depth = Math.max(0, entry.depth ?? 0);
+    const padding = `  ${"  ".repeat(depth)}`;
+    const glyph = entry.status === "running"
+      ? theme.fg("warning", "◐")
+      : entry.status === "failed"
+        ? theme.fg("error", "✗")
+        : theme.fg("dim", "›");
+    lines.push(
+      `${padding}${glyph} ${nestedCallTitle(
+        nestedAudit,
+        theme,
+        options.invalidate,
+        options.core,
+      )} ${metadata}`,
+    );
+    const codeChange = nestedAudit.tool === "edit" || nestedAudit.tool === "write";
+    if (!options.core || (entry.status !== "running" && !options.expanded && !codeChange)) {
+      continue;
+    }
+    const body = renderCoreToolBody(nestedAudit, theme, {
+      cwd: options.core.cwd,
+      settings: options.core.settings,
+      expanded: options.expanded,
+      maxLines: options.expanded ? 24 : 6,
+      ...(options.invalidate ? { invalidate: options.invalidate } : {}),
+    });
+    if (!body) continue;
+    for (const row of body.lines) lines.push(`${padding}  ${row}`);
+    if (body.hidden > 0) lines.push(theme.fg("dim", `${padding}  … ${body.hidden} more lines`));
+  }
+  return lines;
+};
+
 interface FabricMulticallPreview {
   auditIndex: number;
   body: string;
@@ -547,6 +628,7 @@ export interface FabricMulticallPartialInput {
   expanded: boolean;
   preview?: FabricMulticallPreview | undefined;
   core?: { cwd: string; settings: CodePreviewSettings } | undefined;
+  showNestedToolCalls?: boolean | undefined;
 }
 
 export const compactProgressPreview = (progress: string): string => {
@@ -603,6 +685,15 @@ export const renderFabricMulticallPartial = (
           ),
         );
       }
+    }
+    if (input.showNestedToolCalls) {
+      rows.push(
+        ...renderNestedAgentToolLines(audit, theme, {
+          expanded: input.expanded,
+          core: input.core,
+          ...(invalidate ? { invalidate } : {}),
+        }),
+      );
     }
   }
 

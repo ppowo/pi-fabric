@@ -104,6 +104,16 @@ describe("FabricSettingsComponent", () => {
     expect(lines).toContain("fabric");
   });
 
+  it("surfaces nested-tool visibility and the global debounce in UI settings", () => {
+    const items = buildItems();
+    const ui = items.find((item) => item.id === "ui");
+    expect(ui?.submenu).toBeDefined();
+    const lines = ui!.submenu!("", () => {}).render(80).join("\n");
+    expect(lines).toContain("Nested tool calls");
+    expect(lines).toContain("Nested tool debounce");
+    expect(lines).toContain("100ms");
+  });
+
   it("surfaces the recursion budget in the Subagents section", () => {
     const items = buildItems();
     const subagents = items.find((item) => item.id === "subagents");

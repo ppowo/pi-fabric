@@ -229,6 +229,99 @@ describe("Fabric dynamic UI", () => {
     expect(shouldShowFabricWidget(current, "auto")).toBe(true);
   });
 
+  it("nests agent and actor tools with owner metadata and compact code changes", () => {
+    const current = snapshot();
+    current.agents[0]!.toolActivity = [
+      {
+        id: "edit-1",
+        kind: "tool",
+        label: "edit",
+        toolName: "edit",
+        status: "running",
+        args: {
+          path: "src/service.ts",
+          edits: [{ oldText: "const oldValue = 1;", newText: "const newValue = 2;" }],
+        },
+      },
+    ];
+    current.actors[0]!.status = "running";
+    current.actors[0]!.worker = {
+      ...current.agents[0]!,
+      id: "actor-worker-1",
+      name: "actor-worker",
+      toolActivity: [
+        {
+          id: "write-1",
+          kind: "tool",
+          label: "write",
+          toolName: "write",
+          status: "running",
+          args: { path: "src/report.ts", content: "export const report = true;" },
+        },
+      ],
+    };
+
+    const text = new FabricWidget(theme, () => current, 12).render(120).join("\n");
+    expect(text).toContain("edit src/service.ts [agent · pi · agent-1]");
+    expect(text).toContain("- const oldValue = 1;");
+    expect(text).toContain("+ const newValue = 2;");
+    expect(text).toContain("advisor");
+    expect(text).toContain("write src/report.ts [actor · pi · actor-wo]");
+    expect(text).toContain("+ export const report = true;");
+  });
+
+  it("leases actor rows through settle and resets them for the next activation", () => {
+    const current = snapshot();
+    current.runs = [];
+    current.agents = [];
+    const actor = current.actors[0]!;
+    actor.status = "running";
+    actor.lastRunId = "actor-run-1";
+    actor.worker = {
+      id: "actor-run-1",
+      name: "worker",
+      status: "running",
+      runner: "pi",
+      transport: "process",
+      cwd: "/tmp/project",
+      toolActivity: [
+        {
+          id: "actor-edit",
+          kind: "tool",
+          label: "edit",
+          toolName: "edit",
+          status: "running",
+          args: {
+            path: "src/actor.ts",
+            edits: [{ oldText: "before", newText: "after" }],
+          },
+        },
+      ],
+    };
+    const widget = new FabricWidget(theme, () => current, 8);
+    const active = widget.render(100);
+    expect(active[0]).not.toMatch(/^· Fabric/);
+    expect(active.join("\n")).toContain("advisor");
+
+    actor.status = "idle";
+    actor.worker.status = "completed";
+    actor.worker.toolActivity![0]!.status = "completed";
+    const settled = widget.render(100);
+    expect(settled).toHaveLength(active.length);
+
+    actor.status = "running";
+    actor.worker = {
+      id: "actor-run-2",
+      name: "worker",
+      status: "running",
+      runner: "pi",
+      transport: "process",
+      cwd: "/tmp/project",
+    };
+    const next = widget.render(100);
+    expect(next).toHaveLength(2);
+  });
+
   it("shows only agent-provider rows in the widget", () => {
     const current = snapshot();
     const customCall = current.runs[0]!.calls.find((call) => call.kind === "extension")!;
@@ -1536,6 +1629,58 @@ describe("Fabric dynamic UI", () => {
 
       dashboard.handleInput("m");
       expect(dashboard.render(120).join("\n")).toContain('Model for actor "advisor"');
+    } finally {
+      dashboard.dispose();
+    }
+  });
+
+  it("opens actor transcripts and uses g/G for the true top and followed tail", () => {
+    const actorTranscript = vi.fn(() => ({
+      truncated: true,
+      hasMore: true,
+      entries: [
+        {
+          id: "actor-edit",
+          kind: "tool" as const,
+          label: "edit",
+          toolName: "edit",
+          status: "running" as const,
+          args: {
+            path: "src/actor.ts",
+            edits: [{ oldText: "const before = 1;", newText: "const after = 2;" }],
+          },
+          text: "editing actor source",
+        },
+      ],
+    }));
+    const loadFullTranscript = vi.fn(() => true);
+    const dashboard = new FabricDashboard(
+      { requestRender: vi.fn(), terminal: { rows: 24 } } as unknown as TUI,
+      theme,
+      snapshot,
+      vi.fn(),
+      { actorTranscript, loadFullTranscript, codePreviewSettings },
+    );
+    try {
+      dashboard.render(120);
+      dashboard.handleInput("j");
+      dashboard.handleInput("l");
+      dashboard.handleInput(" ");
+      const transcript = dashboard.render(100).join("\n");
+      const visible = transcript.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+      expect(actorTranscript).toHaveBeenCalled();
+      expect(visible).toContain("actor · advisor · transcript");
+      expect(visible).toContain("src/actor.ts");
+      expect(visible).toContain("const before = 1;");
+      expect(visible).toContain("const after = 2;");
+
+      dashboard.handleInput("g");
+      expect(loadFullTranscript).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "actor-1", name: "advisor" }),
+      );
+      expect(dashboard.render(100).join("\n")).toContain("G follow:off");
+      dashboard.handleInput("G");
+      expect(dashboard.render(100).join("\n")).toContain("G follow:on");
     } finally {
       dashboard.dispose();
     }

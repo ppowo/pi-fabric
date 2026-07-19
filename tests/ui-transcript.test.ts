@@ -36,7 +36,14 @@ describe("agent transcript projection", () => {
 
     expect(transcript.entries).toEqual([
       expect.objectContaining({ kind: "assistant", text: "Found the transcript path", status: "completed" }),
-      expect.objectContaining({ kind: "tool", label: "read", text: '{"path":"src/ui/dashboard.ts"}', status: "completed" }),
+      expect.objectContaining({
+        kind: "tool",
+        label: "read",
+        text: '{"path":"src/ui/dashboard.ts"}',
+        args: { path: "src/ui/dashboard.ts" },
+        result: { content: [{ type: "text", text: "Loaded dashboard source" }] },
+        status: "completed",
+      }),
     ]);
   });
 
@@ -165,6 +172,8 @@ describe("agent transcript projection", () => {
         args: {
           authorization: "Bearer top-secret-token",
           apiKey: "sk_test_secret_value",
+          command:
+            "PASSWORD=hunter2 curl https://user:pass@example.test --token abc123 Authorization: Basic dXNlcjpwYXNz",
           payload: "A".repeat(200),
         },
       },
@@ -179,6 +188,10 @@ describe("agent transcript projection", () => {
     expect(tool?.label).toBe("request");
     expect(tool?.text).toContain("[redacted]");
     expect(tool?.text).not.toContain("top-secret-token");
+    expect(tool?.text).not.toContain("hunter2");
+    expect(tool?.text).not.toContain("user:pass");
+    expect(tool?.text).not.toContain("abc123");
+    expect(tool?.text).not.toContain("dXNlcjpwYXNz");
     expect(tool?.text).toContain("large encoded value");
     expect(assistant?.text).not.toContain("evil.test");
     expect(
@@ -203,6 +216,76 @@ describe("agent transcript projection", () => {
     expect(transcript.truncated).toBe(true);
     expect(transcript.entries[0]?.text).toBe("update-10");
     expect(transcript.entries.at(-1)?.text).toBe("update-89");
+  });
+
+  it("retains nested fabric tool structure for rich code-change rendering", () => {
+    const transcript = projectAgentTranscript([
+      {
+        type: "tool_execution_start",
+        toolCallId: "outer",
+        toolName: "fabric_exec",
+        args: { code: "await pi.edit(...)" },
+      },
+      {
+        type: "tool_execution_start",
+        toolCallId: "fabric_edit",
+        toolName: "edit",
+        args: {
+          path: "src/example.ts",
+          edits: [{ oldText: "const oldValue = 1;", newText: "const newValue = 2;" }],
+        },
+      },
+      {
+        type: "tool_execution_end",
+        toolCallId: "fabric_edit",
+        toolName: "edit",
+        result: { output: "Successfully replaced 1 block" },
+        isError: false,
+      },
+    ]);
+
+    expect(transcript.entries[1]).toMatchObject({
+      kind: "tool",
+      toolName: "edit",
+      parentId: "outer",
+      depth: 1,
+      args: { path: "src/example.ts" },
+      result: { output: "Successfully replaced 1 block" },
+      status: "completed",
+    });
+  });
+
+  it("pages older JSONL records and can load the true beginning", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-transcript-"));
+    temporaryDirectories.push(directory);
+    const logFile = path.join(directory, "events.jsonl");
+    const events = Array.from({ length: 520 }, (_, index) => ({
+      type: "message_end",
+      message: { role: "assistant", content: `page-${index}` },
+    }));
+    fs.writeFileSync(logFile, `${events.map((event) => JSON.stringify(event)).join("\n")}\n`);
+    const agent: FabricUiAgent = {
+      id: "agent-pages",
+      name: "paged",
+      status: "completed",
+      transport: "process",
+      cwd: directory,
+      logFile,
+    };
+    const reader = new AgentTranscriptReader();
+
+    const tail = reader.read(agent);
+    expect(tail.entries).toHaveLength(240);
+    expect(tail.entries[0]?.text).toBe("page-280");
+    expect(tail.hasMore).toBe(true);
+    expect(reader.loadOlder(agent)).toBe(true);
+    expect(reader.read(agent).entries[0]?.text).toBe("page-40");
+    expect(reader.loadAll(agent)).toBe(true);
+    const full = reader.read(agent);
+    expect(full.entries).toHaveLength(520);
+    expect(full.entries[0]?.text).toBe("page-0");
+    expect(full.entries.at(-1)?.text).toBe("page-519");
+    expect(full.hasMore).toBe(false);
   });
 
   it("tails a live JSONL file and refreshes when it grows", () => {

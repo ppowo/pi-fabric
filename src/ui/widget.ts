@@ -1,6 +1,7 @@
 import type { Component } from "@earendil-works/pi-tui";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
+import type { FabricTranscriptEntry } from "./transcript.js";
 import type { FabricUiWidgetMode } from "../config.js";
 import type {
   FabricActivityRun,
@@ -58,7 +59,58 @@ const totalTokens = (
       0,
     );
 
-const agentLine = (theme: Theme, agent: FabricUiAgent, now: number): string => {
+const toolHeadline = (entry: FabricTranscriptEntry): string => {
+  const args = entry.args ?? {};
+  const name = entry.toolName ?? entry.label;
+  const path =
+    typeof args.path === "string"
+      ? args.path
+      : typeof args.file_path === "string"
+        ? args.file_path
+        : undefined;
+  const command = typeof args.command === "string" ? args.command.split("\n")[0] : undefined;
+  const pattern = typeof args.pattern === "string" ? args.pattern : undefined;
+  const detail = path ?? command ?? (pattern ? `/${pattern}/` : undefined);
+  return detail ? `${name} ${safeText(detail)}` : name;
+};
+
+const firstChangedLine = (value: unknown): string | undefined => {
+  if (typeof value !== "string") return undefined;
+  return value.split("\n").map((line) => line.trim()).find(Boolean);
+};
+
+const toolChangeLines = (theme: Theme, entry: FabricTranscriptEntry, indent: string): string[] => {
+  const args = entry.args ?? {};
+  const name = (entry.toolName ?? entry.label).toLowerCase();
+  if (name === "edit") {
+    const edits = Array.isArray(args.edits)
+      ? args.edits
+      : typeof args.old_string === "string" && typeof args.new_string === "string"
+        ? [{ oldText: args.old_string, newText: args.new_string }]
+        : [];
+    const first = edits[0];
+    if (!first || typeof first !== "object" || first === null) return [];
+    const record = first as Record<string, unknown>;
+    const removed = firstChangedLine(record.oldText);
+    const added = firstChangedLine(record.newText);
+    return [
+      ...(removed ? [`${indent}${theme.fg("toolDiffRemoved", `- ${safeText(removed)}`)}`] : []),
+      ...(added ? [`${indent}${theme.fg("toolDiffAdded", `+ ${safeText(added)}`)}`] : []),
+    ];
+  }
+  if (name === "write") {
+    const added = firstChangedLine(args.content);
+    return added ? [`${indent}${theme.fg("toolDiffAdded", `+ ${safeText(added)}`)}`] : [];
+  }
+  return [];
+};
+
+const agentLines = (
+  theme: Theme,
+  agent: FabricUiAgent,
+  now: number,
+  owner: "agent" | "actor" = "agent",
+): string[] => {
   const status = colorStatus(theme, agent.status, statusGlyph(agent.status));
   const activity =
     agent.currentTool ??
@@ -77,9 +129,19 @@ const agentLine = (theme: Theme, agent: FabricUiAgent, now: number): string => {
       : undefined,
   ].filter((value): value is string => Boolean(value));
   const indent = agent.parentId ? "    " : "  ";
-  return `${indent}${status} ${safeText(agent.name)}  ${theme.fg("muted", safeText(activity))}${
-    metrics.length > 0 ? theme.fg("dim", ` · ${metrics.join(" · ")}`) : ""
-  }`;
+  const ownerTag = theme.fg("dim", `[${owner} · ${agent.runner ?? "pi"} · ${agent.id.slice(0, 8)}]`);
+  const lines = [
+    `${indent}${status} ${safeText(agent.name)}  ${theme.fg("muted", safeText(activity))}${
+      metrics.length > 0 ? theme.fg("dim", ` · ${metrics.join(" · ")}`) : ""
+    }`,
+  ];
+  for (const tool of agent.toolActivity ?? []) {
+    const toolIndent = `${indent}  `;
+    const glyph = colorStatus(theme, tool.status ?? "completed", statusGlyph(tool.status ?? "completed"));
+    lines.push(`${toolIndent}${glyph} ${theme.fg("toolTitle", toolHeadline(tool))} ${ownerTag}`);
+    lines.push(...toolChangeLines(theme, tool, `${toolIndent}  `));
+  }
+  return lines;
 };
 
 export const shouldShowFabricWidget = (
@@ -152,10 +214,18 @@ export class FabricWidget implements Component {
         )
       : [];
     const visibleActors = snapshot.actors.filter((actor) => actor.status !== "stopped");
+    const activeActorWorkers = visibleActors
+      .filter((actor) => actor.worker && isActiveStatus(actor.worker.status))
+      .map((actor) => ({ ...actor.worker!, name: actor.name }));
+    const terminalActorWorkers = visibleActors
+      .filter((actor) => actor.worker && !isActiveStatus(actor.worker.status))
+      .map((actor) => ({ ...actor.worker!, name: actor.name }));
     const nestedCalls =
       run?.calls.filter((call) => call.kind !== "agent" && call.kind !== "actor") ?? [];
     const title = run?.name ?? "Fabric session";
-    const headerStatus = run?.status ?? (activeAgents.length > 0 ? "running" : "idle");
+    const headerStatus =
+      run?.status ??
+      (activeAgents.length > 0 || activeActorWorkers.length > 0 ? "running" : "idle");
     const parts: string[] = [];
 
     const callTotal = nestedCalls.length;
@@ -191,12 +261,24 @@ export class FabricWidget implements Component {
     const lines = [header];
 
     lines.push(
-      ...activeAgents.map((agent) => agentLine(this.theme, agent, snapshot.now)),
-      ...terminalAgents.map((agent) => agentLine(this.theme, agent, snapshot.now)),
+      ...activeAgents.flatMap((agent) => agentLines(this.theme, agent, snapshot.now)),
+      ...activeActorWorkers.flatMap((agent) =>
+        agentLines(this.theme, agent, snapshot.now, "actor"),
+      ),
+      ...terminalActorWorkers.flatMap((agent) =>
+        agentLines(this.theme, agent, snapshot.now, "actor"),
+      ),
+      ...terminalAgents.flatMap((agent) => agentLines(this.theme, agent, snapshot.now)),
     );
+    const ambientOwners = [
+      ...activeAgents.map((agent) => `agent:${agent.id}`),
+      ...visibleActors.map(
+        (actor) => `actor:${actor.id}:${actor.worker?.id ?? actor.lastRunId ?? "idle"}`,
+      ),
+    ];
     return {
       lines,
-      leaseKey: run?.id ?? "ambient",
+      leaseKey: run?.id ?? (ambientOwners.length > 0 ? `ambient:${ambientOwners.join(",")}` : "ambient"),
     };
   }
 

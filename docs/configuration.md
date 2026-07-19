@@ -71,8 +71,10 @@ Pi Fabric reads configuration from two JSON files. Project values override globa
     "widget": "auto",
     "maxRows": 6,
     "refreshMs": 500,
-    "lingerMs": 10000,
-    "eventHistory": 80
+    "eventHistory": 80,
+    "haltOnEscape": true,
+    "showNestedToolCalls": true,
+    "nestedToolDebounceMs": 100
   },
   "compaction": {
     "engine": "fabric"
@@ -215,7 +217,9 @@ See the [`mcp` reference](../skills/fabric-exec/references/mcp.md) for the call 
 
 ## UI
 
-- `ui.widget` is `auto`, `always`, or `hidden`. `auto` shows active or retained Fabric runs and agent-provider activity; persistent actors can keep the summary header visible but do not occupy widget rows.
+- `ui.widget` is `auto`, `always`, or `hidden`. `auto` shows active or retained Fabric runs and worker activity. Active one-shot agents and actor workers occupy rows; their recent nested tools appear beneath them when enabled.
+- `ui.showNestedToolCalls` defaults to `true` and controls child-agent/actor tool rows in both the parent `fabric_exec` card and widget.
+- `ui.nestedToolDebounceMs` defaults to `100` and applies one coalescing timer across all regular nested calls in a `fabric_exec` execution. Set it to `0` to emit every update; accepted values are clamped to `0..2000`.
 - The widget renders above the chat (like `pi-supervisor`); set `ui.enabled` to `false` to disable both the widget and dashboard controller.
 
 See the [interface reference](interface.md).

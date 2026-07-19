@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import type { CodePreviewSettings } from "pi-code-previews";
@@ -11,9 +12,13 @@ import {
 } from "./dashboard.js";
 import { buildClaudeModelSource, buildModelSource, type ModelSource } from "./model-picker.js";
 import { createDashboardSnapshot } from "./snapshot.js";
-import { type FabricDashboardSnapshot } from "./types.js";
+import { isActiveStatus, type FabricDashboardSnapshot, type FabricUiActor, type FabricUiAgent } from "./types.js";
 import { FabricWidget, shouldShowFabricWidget } from "./widget.js";
-import { AgentTranscriptReader } from "./transcript.js";
+import {
+  AgentTranscriptReader,
+  recentTranscriptTools,
+  type FabricTranscriptSource,
+} from "./transcript.js";
 
 const WIDGET_ID = "pi-fabric";
 
@@ -218,7 +223,12 @@ export class FabricUiController {
           ...(claudeModelSource ? { claudeModelSource } : {}),
           onTargetMessage,
           onAgentStop,
-          agentTranscript: (agent) => this.#transcripts.read(agent),
+          agentTranscript: (agent) => this.#transcripts.read(this.#agentTranscriptSource(agent)),
+          actorTranscript: (actor) => this.#transcripts.read(this.#actorTranscriptSource(actor)),
+          loadOlderTranscript: (target) =>
+            this.#transcripts.loadOlder(this.#transcriptSource(target)),
+          loadFullTranscript: (target) =>
+            this.#transcripts.loadAll(this.#transcriptSource(target)),
           onActorModel,
           onActorThinking,
           onActorEvents,
@@ -255,12 +265,58 @@ export class FabricUiController {
     this.#scheduledRefresh.unref();
   }
 
+  #agentTranscriptSource(agent: FabricUiAgent): FabricTranscriptSource {
+    return { id: agent.id, status: agent.status, ...(agent.logFile ? { logFile: agent.logFile } : {}) };
+  }
+
+  #actorTranscriptSource(actor: FabricUiActor): FabricTranscriptSource {
+    if (actor.worker?.logFile && isActiveStatus(actor.worker.status)) {
+      return {
+        id: `${actor.id}:${actor.worker.id}`,
+        status: actor.worker.status,
+        logFile: actor.worker.logFile,
+      };
+    }
+    const retained = actor.lastRunId && actor.logDir
+      ? path.join(actor.logDir, actor.lastRunId, "events.jsonl")
+      : undefined;
+    if (retained) return { id: actor.id, status: actor.status, logFile: retained };
+    if (actor.sessionFile) {
+      return { id: actor.id, status: actor.status, logFile: actor.sessionFile };
+    }
+    return { id: actor.id, status: actor.status };
+  }
+
+  #transcriptSource(target: FabricUiAgent | FabricUiActor): FabricTranscriptSource {
+    return "recentMessages" in target
+      ? this.#actorTranscriptSource(target)
+      : this.#agentTranscriptSource(target);
+  }
+
+  #enrichToolActivity(snapshot: FabricDashboardSnapshot): void {
+    if (!this.state.config.ui.showNestedToolCalls) return;
+    const currentRunId = snapshot.runs[0]?.id;
+    for (const agent of snapshot.agents) {
+      if (!isActiveStatus(agent.status) && agent.runId !== currentRunId) continue;
+      const transcript = this.#transcripts.read(this.#agentTranscriptSource(agent));
+      const tools = recentTranscriptTools(transcript, 3);
+      if (tools.length > 0) agent.toolActivity = tools;
+    }
+    for (const actor of snapshot.actors) {
+      if (!actor.worker) continue;
+      const transcript = this.#transcripts.read(this.#agentTranscriptSource(actor.worker));
+      const tools = recentTranscriptTools(transcript, 3);
+      if (tools.length > 0) actor.worker.toolActivity = tools;
+    }
+  }
+
   #refresh(): void {
     const context = this.#context;
     if (!context || !this.state.initialized) return;
     try {
       this.#pollMesh();
       this.#snapshot = createDashboardSnapshot(this.state, this.#events, context);
+      this.#enrichToolActivity(this.#snapshot);
       this.#renderWidget(context);
       if (this.#widgetTui && this.#widget?.hasChanged()) this.#widgetTui.requestRender();
     } catch (error) {

@@ -80,6 +80,9 @@ const selectListTheme = (theme: Theme): SelectListTheme => ({
   noMatch: (text) => theme.fg("muted", text),
 });
 
+const formatDebounce = (ms: number): string =>
+  ms === 0 ? "Off" : ms < 1_000 ? `${ms}ms` : `${ms / 1_000}s`;
+
 const formatMs = (ms: number): string =>
   ms < 60_000
     ? `${Math.round(ms / 1_000)}s`
@@ -114,7 +117,7 @@ const numericOptions = (
     value: String(value),
     label: format(value),
   }));
-  if (!options.some((option) => option.value === currentValue)) {
+  if (!options.some((option) => option.value === currentValue || option.label === currentValue)) {
     options.unshift({ value: currentValue, label: currentValue });
   }
   return options;
@@ -143,6 +146,11 @@ const coerceValue = (id: string, value: string, config: FabricConfig): unknown =
     // budgetUsd is the only currency field; its submenu values are formatted
     // as "$0.10" / "Off", so strip the currency formatting before coercing.
     if (id === "subagents.budgetUsd") return parseBudgetValue(value);
+    if (id === "ui.nestedToolDebounceMs") {
+      if (value === "Off") return 0;
+      const parsed = Number.parseFloat(value);
+      return value.endsWith("s") && !value.endsWith("ms") ? parsed * 1_000 : parsed;
+    }
     return Number(value);
   }
   // The model picker stores the canonical "provider/id" string, or "Inherit"
@@ -220,12 +228,15 @@ const numericSubmenu = (
   description: string,
 ): SettingsSubmenu => (currentValue, done) => {
   const options = numericOptions(values, format, currentValue);
+  const selectedValue =
+    options.find((option) => option.value === currentValue || option.label === currentValue)?.value ??
+    currentValue;
   return new SelectSubmenu(
     theme,
     title,
     description,
     options,
-    currentValue,
+    selectedValue,
     (value) => done(value),
     () => done(),
   );
@@ -778,6 +789,30 @@ export const buildFabricSettingsItems = (
             description: "When to show the activity widget above the editor.",
             values: WIDGET_MODES,
           }),
+          setting(
+            "ui.showNestedToolCalls",
+            "Nested tool calls",
+            config.ui.showNestedToolCalls ? "true" : "false",
+            {
+              description: "Show child-agent and actor tool activity in the Fabric card and widget.",
+              values: BOOLEANS,
+            },
+          ),
+          setting(
+            "ui.nestedToolDebounceMs",
+            "Nested tool debounce",
+            formatDebounce(config.ui.nestedToolDebounceMs),
+            {
+              description: "One global coalescing window for regular nested-tool UI updates.",
+              submenu: numericSubmenu(
+                theme,
+                [0, 16, 50, 100, 150, 250, 500, 1000],
+                formatDebounce,
+                "Nested tool debounce",
+                "One global coalescing window for regular nested-tool UI updates. Off emits every update.",
+              ),
+            },
+          ),
           setting("ui.maxRows", "Max rows", String(config.ui.maxRows), {
             description: "Maximum rows rendered by the activity widget.",
             submenu: numericSubmenu(

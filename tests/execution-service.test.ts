@@ -42,6 +42,74 @@ describe("FabricExecutionService", () => {
     }
   });
 
+  it("coalesces all parallel nested calls through one global debounce and flushes on settle", async () => {
+    const registry = new ActionRegistry();
+    const descriptor = {
+      name: "ping",
+      description: "emit rapid progress",
+      inputSchema: {
+        type: "object",
+        properties: { id: { type: "number" } },
+        required: ["id"],
+        additionalProperties: false,
+      },
+      risk: "read" as const,
+    };
+    registry.register({
+      name: "demo",
+      description: "debounce fixture",
+      async list() {
+        return [descriptor];
+      },
+      async describe(name) {
+        return name === "ping" ? descriptor : undefined;
+      },
+      async invoke(_name, args, invocation) {
+        invocation.update(`starting ${String(args.id)}`);
+        invocation.update(`finishing ${String(args.id)}`);
+        return args.id;
+      },
+    });
+    const context = { cwd: process.cwd(), hasUI: false } as ExtensionContext;
+    const code = `return Promise.all([
+      tools.call({ ref: "demo.ping", args: { id: 1 } }),
+      tools.call({ ref: "demo.ping", args: { id: 2 } }),
+      tools.call({ ref: "demo.ping", args: { id: 3 } }),
+    ]);`;
+
+    const debouncedConfig = structuredClone(DEFAULT_FABRIC_CONFIG);
+    debouncedConfig.fullCodeMode = false;
+    debouncedConfig.approvals.read = "allow";
+    debouncedConfig.ui.nestedToolDebounceMs = 10_000;
+    const debouncedPartials: Array<{ audits: unknown[] }> = [];
+    const debounced = await new FabricExecutionService(registry, debouncedConfig).execute({
+      code,
+      signal: undefined,
+      parentToolCallId: "global-debounce",
+      context,
+      onPartial(snapshot) {
+        debouncedPartials.push(snapshot);
+      },
+    });
+    expect(debounced.success).toBe(true);
+    expect(debouncedPartials).toHaveLength(1);
+    expect(debouncedPartials[0]?.audits).toHaveLength(3);
+
+    const immediateConfig = structuredClone(debouncedConfig);
+    immediateConfig.ui.nestedToolDebounceMs = 0;
+    const immediatePartials: unknown[] = [];
+    await new FabricExecutionService(registry, immediateConfig).execute({
+      code,
+      signal: undefined,
+      parentToolCallId: "no-debounce",
+      context,
+      onPartial(snapshot) {
+        immediatePartials.push(snapshot);
+      },
+    });
+    expect(immediatePartials.length).toBeGreaterThan(1);
+  });
+
   it("attaches image blocks to the audit for a single nested image read", async () => {
     const cwd = process.cwd();
     const registry = new ActionRegistry();

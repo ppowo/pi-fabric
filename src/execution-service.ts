@@ -155,16 +155,46 @@ export class FabricExecutionService {
       );
     };
     let currentProgress: string | undefined;
-    const emit = (): void => {
+    let emitPending = false;
+    let emitTimer: NodeJS.Timeout | undefined;
+    const emitNow = (): void => {
+      emitPending = false;
       options.onPartial({
         audits: audits.slice(),
         phases: phases.slice(),
         progress: currentProgress,
       });
     };
+    const flushEmit = (): void => {
+      if (emitTimer) clearTimeout(emitTimer);
+      emitTimer = undefined;
+      if (emitPending) emitNow();
+    };
+    // One execution-wide timer coalesces updates from every parallel nested
+    // call. Keeping this global to the Fabric program prevents each call from
+    // independently churning rows while preserving a trailing final snapshot.
+    const emit = (): void => {
+      emitPending = true;
+      const debounceMs = this.config.ui.nestedToolDebounceMs;
+      if (debounceMs <= 0) {
+        flushEmit();
+        return;
+      }
+      if (emitTimer) clearTimeout(emitTimer);
+      emitTimer = setTimeout(() => {
+        emitTimer = undefined;
+        if (emitPending) emitNow();
+      }, debounceMs);
+      emitTimer.unref?.();
+    };
     const update = (message: string): void => {
       currentProgress = message;
       emit();
+    };
+    const updateImmediate = (message: string): void => {
+      currentProgress = message;
+      emitPending = true;
+      flushEmit();
     };
     const observeInvocation = (event: FabricRegistryActivityEvent): void => {
       if (this.activity) {
@@ -389,7 +419,7 @@ export class FabricExecutionService {
                 "fabric.workflow.progress",
                 args,
                 runtimeSignal,
-                () => update(String(args.message ?? "Working")),
+                () => updateImmediate(String(args.message ?? "Working")),
               );
             case "fabric.$configure":
               return traceAttempt(
@@ -424,7 +454,7 @@ export class FabricExecutionService {
                   };
                   setStage("invoke");
                   const activityPhase = this.activity?.phase(options.parentToolCallId, phaseInput);
-                  update(`Phase: ${name}`);
+                  updateImmediate(`Phase: ${name}`);
                   return {
                     name,
                     index: phaseIndex,
@@ -498,6 +528,7 @@ export class FabricExecutionService {
       throw error;
     } finally {
       await this.registry.endInvocation(options.parentToolCallId);
+      flushEmit();
     }
 
     const runOutcome = executionOutcomeFromTermination(sandboxResult.terminationReason);

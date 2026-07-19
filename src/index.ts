@@ -41,6 +41,7 @@ import {
   renderBoundedLines,
   renderFabricMulticallPartial,
   renderFabricWriteArgumentPreview,
+  renderNestedAgentToolLines,
   restoreFabricCallHeadlinePreviews,
   restoreFabricCoreToolPreviews,
   restoreFabricWritePreviews,
@@ -387,6 +388,17 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
                 text += nl + theme.fg("dim", safeTerminalText(progress));
               }
             }
+            const showNestedToolCalls = state.initialized
+              ? state.config.ui.showNestedToolCalls
+              : DEFAULT_FABRIC_CONFIG.ui.showNestedToolCalls;
+            if (showNestedToolCalls) {
+              const nested = renderNestedAgentToolLines(audit, theme, {
+                expanded,
+                core: corePreviewContext,
+                ...(context?.invalidate ? { invalidate: context.invalidate } : {}),
+              });
+              if (nested.length > 0) text += nl + nested.join(nl);
+            }
             return trackRows(
               renderBoundedLines(text.split(nl), theme, codePreviewSettings.diffIntensity),
             );
@@ -403,7 +415,17 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
           }
           return trackRows(
             renderFabricMulticallPartial(
-              { audits, phases, progress, expanded, preview, core: corePreviewContext },
+              {
+                audits,
+                phases,
+                progress,
+                expanded,
+                preview,
+                core: corePreviewContext,
+                showNestedToolCalls: state.initialized
+                  ? state.config.ui.showNestedToolCalls
+                  : DEFAULT_FABRIC_CONFIG.ui.showNestedToolCalls,
+              },
               theme,
               context?.invalidate,
             ),
