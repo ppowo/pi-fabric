@@ -23,6 +23,7 @@ import {
   FabricToolOwnership,
   ownsFabricToolSource,
 } from "./core/tool-ownership.js";
+import { buildSkillReferenceGuidance } from "./core/skill-references.js";
 import { FabricState } from "./fabric-state.js";
 import { FABRIC_PROVIDER_REGISTER_EVENT, type FabricMediaBlock, type FabricProviderRegistration } from "./protocol.js";
 import { FabricUiController } from "./ui/controller.js";
@@ -812,27 +813,18 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
     }
   });
 
+  // Tool ownership changes only at session or mode transitions; lifecycle hooks
+  // forward host events without churning an explicitly selected active set.
   pi.on("input", async (event, context) => {
-    if (!state.initialized) return;
-    toolOwnership.apply(
-      state.config.fullCodeMode || state.config.schema.mode === "enforce",
-    );
-    state.dispatchHostEvent("input", event, context);
+    if (state.initialized) state.dispatchHostEvent("input", event, context);
   });
 
   pi.on("turn_end", async (event, context) => {
-    if (!state.initialized) return;
-    toolOwnership.apply(
-      state.config.fullCodeMode || state.config.schema.mode === "enforce",
-    );
-    state.dispatchHostEvent("turn_end", event, context);
+    if (state.initialized) state.dispatchHostEvent("turn_end", event, context);
   });
 
   pi.on("agent_settled", async (event, context) => {
     if (!state.initialized) return;
-    toolOwnership.apply(
-      state.config.fullCodeMode || state.config.schema.mode === "enforce",
-    );
     state.dispatchHostEvent("agent_settled", event, context);
     // Keep the completed widget mounted until a newer Fabric run replaces it.
     // Removing rows at settle would pull the editor and latest chat content upward.
@@ -878,8 +870,13 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
       ? state.config.schema.mode
       : DEFAULT_FABRIC_CONFIG.schema.mode;
     const effectiveFullCodeMode = fullCodeMode || schemaMode === "enforce";
-    toolOwnership.apply(effectiveFullCodeMode);
     if (!pi.getActiveTools().includes("fabric_exec")) return;
+    // Pi expands the invoked skill into the user message, but wrappers may
+    // delegate by name. Resolve only explicit invocation lines so full code
+    // mode preserves Pi's progressive skill loading without exposing read.
+    const skillReferenceGuidance = effectiveFullCodeMode
+      ? buildSkillReferenceGuidance(event.prompt, event.systemPromptOptions.skills ?? [])
+      : undefined;
     const guidance = (effectiveFullCodeMode
       ? "Pi Fabric full code mode: `fabric_exec` is the only way to call Pi core tools — use them as `pi.*` inside `code`.\nReturns: `pi.read`/`pi.grep`/`pi.find`/`pi.ls` → string; `pi.bash`/`pi.edit`/`pi.write` → `{ok, output, details}` (read `.output`).\nExamples: `pi.read('/x')` · `pi.bash({cmd:'ls'})` · `pi.grep('TODO','src')` · `pi.grep({regex:'TODO', ic:true, ctx:2})` · `pi.find('*.ts','src')` · `pi.edit({path:'/x', old:'a', new:'b'})` · `pi.write({path:'/y', text:'z'})` · `pi.ls('src')`.\nShorthands (all accepted): `cmd`/`shell`→command · `query`/`regex`/`search`→pattern · `file`/`dir`→path · `ic`→ignoreCase · `ctx`→context · `max`→limit · `start`→offset · `old`→oldText · `new`/`replacement`→newText · `text`/`contents`→content · `timeoutMs`→timeout.\n`tools` is discovery + generic calls only (`providers`/`list`/`search`/`describe`/`call`/`models`). Call known MCP tools as `mcp.<sanitized_server>.<sanitized_tool>(args)` (for example `mcp.fal_ai.get_model_schema(...)`), captured tools as `extensions.<tool>(args)`, and stable providers as `memory.*`, `state.*`, `schema.*`, or `compact.*`. Use `tools.call({ref,args})` for computed refs. `pi` is the core tools; `π.<key>` is named strings (not a tool)."
       : "Pi Fabric is in orchestration-only mode. Pi core and registered extension tools stay on their native direct execution path; inside fabric_exec, `pi.*` and `extensions.*` are unavailable. Call known actions through `mcp.<sanitized_server>.<sanitized_tool>(args)`, `memory.*`, `state.*`, `schema.*`, `compact.*`, `agents.*`, or `mesh.*`; use `tools.search`/`describe`/`list` for discovery and `tools.call({ref,args})` for computed refs. Other surfaces are opt-in via user-loaded skills.")
@@ -888,7 +885,8 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
         : schemaMode === "audit"
           ? "\n\nSchema audit mode reports actions that enforce mode would block, but preserves their current behavior."
           : "")
-      + "\n\n" + FABRIC_TEMPLATE_LITERAL_CAVEAT;
+      + "\n\n" + FABRIC_TEMPLATE_LITERAL_CAVEAT
+      + (skillReferenceGuidance ? `\n\n${skillReferenceGuidance}` : "");
     return {
       systemPrompt: `${event.systemPrompt}\n\n${guidance}`,
     };

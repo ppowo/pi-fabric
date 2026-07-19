@@ -122,7 +122,9 @@ return {
 
 `fullCodeMode: true` is the default. Fabric removes active Pi core tools from the parent model and exposes their implementations only inside `fabric_exec` through `pi.*`. Registered overrides such as security gates and code previews are captured too, so `pi.read()` continues to route through the override rather than bypassing it.
 
-Fabric remembers which native core tools were active before taking ownership. Switching to orchestration-only mode or unloading Fabric restores that selection. Full-mode ownership is reasserted before user input and agent startup, so tools manually re-enabled during the session do not leak back into the parent schema.
+Fabric remembers which native core tools were active before taking ownership. Switching to orchestration-only mode or unloading Fabric restores that selection. Full-mode ownership is applied only when the session initializes or the mode changes. Fabric does not reset an explicitly selected active tool set from input, agent-start, turn-end, or settled lifecycle hooks; the system prompt carries the full-mode execution rule.
+
+Pi skill commands remain progressively disclosed in full code mode. When an expanded skill invokes another installed skill, Fabric adds an exact name-to-path resolution hint for that turn so the delegated `SKILL.md` is loaded through `pi.read` before task work. Native core tools remain hidden.
 
 ### Orchestration-only mode
 
