@@ -101,9 +101,12 @@ Set `worktree: true` to create a dedicated Git worktree and `pi-fabric/<name>-<i
 
 ## Steering running agents
 
-Any Fabric-equipped agent can steer a running one-shot subagent **between its turns** instead of stopping and respawning it, preserving the child's accumulated context — mirroring Pi core's RPC `steer`/`follow_up` queue:
+Fabric messaging is target-oriented rather than tied to fixed planner/worker roles. The user-facing Pi session is a first-class target named **Main**: `agents.main()` returns its exact identity, and the stable alias `"main"` works with `agents.steer` and `agents.followUp`. Main, recursive Pi children, and persistent Pi actors can initiate Fabric calls; ordinary non-recursive Pi children and Claude children/actors can receive host-routed messages but cannot initiate `agents.*` themselves.
 
 ```ts
+const main = await agents.main();
+await agents.followUp({ id: main.id, message: "After the audit, reconcile the findings." });
+
 const handle = await agents.spawn({ task: "Audit auth flows.", tools: ["read", "grep", "find", "ls"] });
 const s = await agents.status({ id: handle.id });
 if (s.text.includes("rotating refresh tokens")) {
@@ -113,7 +116,9 @@ if (s.text.includes("rotating refresh tokens")) {
 return await agents.wait({ id: handle.id });
 ```
 
-`agents.steer({ id, message })` is delivered after the current turn's tool calls, before the next LLM call; `agents.followUp({ id, message })` is delivered after the agent finishes; `agents.setSteeringMode`/`setFollowUpMode` set `"all"` vs `"one-at-a-time"` delivery. Pi uses its RPC queue; Claude uses additional user records on the same `claude -p` stream so the session and context are preserved. `agents.status({ id }).pendingMessages` shows the live queue. For an id not local to this process, `agents.steer` publishes a `fabric.steer` mesh event the owning process relays — so an agent in one Pi process can steer an agent in another. See [`references/agents.md`](../skills/fabric-exec/references/agents.md).
+For Main and one-shot agents, `agents.steer({ id, message })` is delivered after the current turn's tool calls and before the next model call; `agents.followUp({ id, message })` waits for the current run to settle. For a persistent actor, both operations enqueue its serial mailbox. Pi children use the Pi RPC queue; Claude children receive additional user records on the same `claude -p` stream. `agents.status({ id }).pendingMessages` shows a local one-shot queue; Main status exposes only a boolean because Pi does not expose host queue contents to extensions. `agents.setSteeringMode`/`setFollowUpMode` configure `"all"` vs `"one-at-a-time"` for local one-shot agents only.
+
+Routing returns `"main"`, `"local"`, or `"mesh"`. Cross-process delivery publishes an exact target id to `fabric.steer`; the owning process can relay it to Main, a recursive descendant, or an actor. Mesh routing is best-effort and requires `mesh.enabled`. The dashboard exposes the same path: `s` messages/steers Main, active one-shot agents, actors, and observed remote mesh agents; `u` queues a follow-up where that target has a distinct follow-up queue. See [`references/agents.md`](../skills/fabric-exec/references/agents.md).
 
 ## Persistent actors
 

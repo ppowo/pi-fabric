@@ -12,6 +12,13 @@ import { ActionRegistry } from "./core/action-registry.js";
 import { CompactController, type CompactLastCommit, type CompactPendingIntent } from "./core/compact-controller.js";
 import { FabricExecutionService } from "./execution-service.js";
 import { MeshStore, type MeshIdentity } from "./mesh/store.js";
+import {
+  MainAgentController,
+  resolveFabricIdentity,
+  type FabricAgentMessageDelivery,
+  type FabricAgentMessageResult,
+  type FabricMainAgentInfo,
+} from "./main-agent.js";
 import { AgentsProvider } from "./providers/agents-provider.js";
 import { CapturedToolsProvider } from "./providers/captured-tools-provider.js";
 import { CompactProvider } from "./providers/compact-provider.js";
@@ -45,6 +52,8 @@ export class FabricState {
   #globalActors: GlobalActorRegistry | undefined;
   #mesh: MeshStore | undefined;
   #identity: MeshIdentity | undefined;
+  #mainAgent: MainAgentController | undefined;
+  #agentsProvider: AgentsProvider | undefined;
   #compact: CompactController | undefined;
   #schema: SchemaController | undefined;
   #cwd: string | undefined;
@@ -108,6 +117,25 @@ export class FabricState {
     return this.#mesh;
   }
 
+  mainAgentInfo(context?: ExtensionContext): FabricMainAgentInfo {
+    if (!this.#mainAgent) throw new Error("Pi Fabric has not initialized");
+    return this.#mainAgent.info(context);
+  }
+
+  async queueUserMessage(
+    targetId: string,
+    message: string,
+    delivery: FabricAgentMessageDelivery,
+  ): Promise<FabricAgentMessageResult> {
+    if (!this.#mainAgent || !this.#agentsProvider) {
+      throw new Error("Pi Fabric has not initialized");
+    }
+    if (this.#mainAgent.matches(targetId)) {
+      return this.#mainAgent.deliverUser(message, delivery);
+    }
+    return this.#agentsProvider.routeMessage(targetId, message, undefined, delivery);
+  }
+
   get compact(): CompactController {
     if (!this.#compact) throw new Error("Pi Fabric has not initialized");
     return this.#compact;
@@ -141,15 +169,15 @@ export class FabricState {
     this.#registry.register(new McpProvider(context.cwd, this.#config.mcp));
     if (capturedToolsProvider) this.#registry.register(capturedToolsProvider);
     const sessionId = context.sessionManager.getSessionId();
-    const actorId = process.env.PI_FABRIC_ACTOR_ID;
-    const identity: MeshIdentity = actorId
-      ? {
-          id: actorId,
-          name: process.env.PI_FABRIC_ACTOR_NAME || actorId.slice(0, 8),
-          kind: "actor",
-          sessionId,
-        }
-      : { id: `session:${sessionId}`, name: "main", kind: "main", sessionId };
+    const { identity, mainAgentId } = resolveFabricIdentity(sessionId);
+    const mainAgent = new MainAgentController(
+      this.pi,
+      mainAgentId,
+      identity.kind === "main" && identity.id === mainAgentId,
+      context.cwd,
+      identity.kind === "main" ? sessionId : undefined,
+    );
+    this.#mainAgent = mainAgent;
     const configuredMeshRoot = this.#config.mesh.root;
     const meshRoot =
       process.env.PI_FABRIC_MESH_ROOT ??
@@ -184,6 +212,7 @@ export class FabricState {
       : this.#config.subagents;
     this.#subagents = new SubagentManager(context.cwd, subagentConfig, {
       fullCodeMode: this.#config.fullCodeMode,
+      mainAgentId,
       onBackgroundComplete: (result) => {
         const durationMs = Math.max(0, (result.finishedAt ?? Date.now()) - result.startedAt);
         const duration =
@@ -236,11 +265,18 @@ export class FabricState {
                 ? path.join(meshRoot, "actors", sessionId)
                 : path.join(meshRoot, "actors"),
             persistent: true,
+            mainAgent,
           }
-        : { persistent: false },
+        : { persistent: false, mainAgent },
     );
     this.#globalActors = new GlobalActorRegistry(getAgentDir(), this.#config.mesh.maxEventBytes);
-    this.#registry.register(new AgentsProvider(this.#subagents, this.#actors, this.#globalActors));
+    this.#agentsProvider = new AgentsProvider(
+      this.#subagents,
+      this.#actors,
+      this.#globalActors,
+      mainAgent,
+    );
+    this.#registry.register(this.#agentsProvider);
     if (this.#config.memory.enabled) {
       const sessionFile = context.sessionManager.getSessionFile();
       const memoryContext: MemoryProviderContext = {
@@ -375,6 +411,8 @@ export class FabricState {
     this.#globalActors = undefined;
     this.#mesh = undefined;
     this.#identity = undefined;
+    this.#mainAgent = undefined;
+    this.#agentsProvider = undefined;
     this.#compact = undefined;
     this.#schema = undefined;
     this.#cwd = undefined;
@@ -411,6 +449,8 @@ export class FabricState {
     this.#actors = undefined;
     this.#mesh = undefined;
     this.#identity = undefined;
+    this.#mainAgent = undefined;
+    this.#agentsProvider = undefined;
     this.#compact = undefined;
     this.#schema = undefined;
   }

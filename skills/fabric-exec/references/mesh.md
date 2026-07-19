@@ -6,7 +6,7 @@ Every method takes a single options object. Mesh data defaults to `<project>/.pi
 
 ## Identity and presence
 
-- `mesh.self()` returns `{ id, name, kind, sessionId? }` where `kind` is `main`, `actor`, or `agent`.
+- `mesh.self()` returns `{ id, name, kind, sessionId? }` where `kind` is `main`, `actor`, or `agent`. A recursive child uses its parent run id with kind `agent`; a persistent Pi actor uses its actor id; only the user-facing root session uses kind `main`.
 - `mesh.members({ limit? })` returns actor presence across live Fabric sessions as entries with `{ key, value, version, updatedAt, updatedBy }` (the `value` is a `FabricActorInfo`).
 
 ## Topics (durable channels)
@@ -38,7 +38,7 @@ return claimed;
 
 ## Steering across processes
 
-`fabric.steer` is a reserved topic the ActorManager relays to a local subagent or actor, so any agent in one Pi process can steer an agent in another. `agents.steer({ id, message })` publishes to it automatically when the id is not local to this process; you can also publish directly:
+`fabric.steer` is a reserved topic the ActorManager relays to an exact Main identity, local subagent, or local actor. Fabric-equipped Pi participants use `agents.steer({ id, message })` or `agents.followUp(...)`; those methods resolve the local `"main"` alias to the root session's exact id before publishing across processes. You can also publish directly when you already know that exact id:
 
 ```ts
 await mesh.publish({
@@ -49,7 +49,7 @@ await mesh.publish({
 });
 ```
 
-Use `kind: "followUp"` for a follow-up. The owning process's poll reads the event and forwards it as a steer (between turns) to a one-shot subagent, or as a mailbox message to a persistent actor. An event addressed to a target no process owns is dropped best-effort.
+Use `kind: "followUp"` for a follow-up. The owning process's poll forwards the event to Main through Pi's host queue, to a one-shot child between/after turns, or to a persistent actor mailbox. Do not publish `to: "main"` directly: aliases are intentionally not resolved on the shared mesh because multiple root sessions may coexist. An event addressed to a target no process owns is dropped best-effort.
 
 ## Notes
 

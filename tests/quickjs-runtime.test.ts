@@ -466,6 +466,34 @@ await Promise.all([
     expect(calls).toEqual(["a", "b"]);
   });
 
+  it("routes agents.main and Main steering through the agents provider", async () => {
+    const calls: string[] = [];
+    const result = await new QuickJsRuntime().execute(
+      `
+const main = await agents.main();
+const queued = await agents.steer({ id: main.id, message: "focus" });
+return { main, queued };
+`,
+      async (ref) => {
+        calls.push(ref);
+        if (ref === "agents.main") {
+          return { id: "session:root", name: "Main", kind: "main", status: "idle" };
+        }
+        if (ref === "agents.steer") {
+          return { queued: true, messageId: "m1", routed: "main" };
+        }
+        throw new Error(`Unexpected call: ${ref}`);
+      },
+      options,
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.value).toMatchObject({
+      main: { id: "session:root", name: "Main" },
+      queued: { queued: true, routed: "main" },
+    });
+    expect(calls).toEqual(["agents.main", "agents.steer"]);
+  });
+
   it("routes agents.setEvents and agents.setInstructions to the actors provider", async () => {
     const calls: string[] = [];
     const result = await new QuickJsRuntime().execute(

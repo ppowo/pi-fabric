@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ActorManager } from "../src/actors/manager.js";
 import { DEFAULT_FABRIC_CONFIG } from "../src/config.js";
+import type { FabricMainAgentDeliveryRequest } from "../src/main-agent.js";
 import { MeshStore, type MeshIdentity } from "../src/mesh/store.js";
 import { SubagentManager } from "../src/subagents/manager.js";
 
@@ -855,6 +856,84 @@ describe("ActorManager steering relay", () => {
     expect(forwarded).toHaveLength(1);
     expect(forwarded[0]).toMatchObject({ type: "steer", message: "redirect from B" });
     await subagentsA.stop(handle.id);
+  });
+
+  it("relays a cross-process follow-up to the owning Main session", async () => {
+    const shared = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-main-relay-"));
+    roots.push(shared);
+    const meshPath = path.join(shared, "mesh");
+    const rootMesh = new MeshStore(meshPath, 64 * 1024, 100);
+    const peerMesh = new MeshStore(meshPath, 64 * 1024, 100);
+    const rootSubagents = new SubagentManager(
+      process.cwd(),
+      DEFAULT_FABRIC_CONFIG.subagents,
+      { workerPath: fakeWorker, runRoot: path.join(shared, "root-runs") },
+    );
+    const peerSubagents = new SubagentManager(
+      process.cwd(),
+      DEFAULT_FABRIC_CONFIG.subagents,
+      { workerPath: fakeWorker, runRoot: path.join(shared, "peer-runs") },
+    );
+    subagentManagers.push(rootSubagents, peerSubagents);
+    const deliveries: FabricMainAgentDeliveryRequest[] = [];
+    const mainAgent = {
+      id: "session:root",
+      local: true,
+      matches: (id: string) => id === "main" || id === "session:root",
+      info: () => ({
+        id: "session:root",
+        name: "Main" as const,
+        kind: "main" as const,
+        status: "idle" as const,
+        runner: "pi" as const,
+        transport: "host" as const,
+        cwd: process.cwd(),
+        startedAt: 1,
+        updatedAt: 1,
+        pendingMessages: false,
+        local: true,
+      }),
+      deliverAgent: (request: FabricMainAgentDeliveryRequest) => {
+        deliveries.push(request);
+        return { queued: true as const, messageId: "main-1", routed: "main" as const };
+      },
+    };
+    const cfg = { ...DEFAULT_FABRIC_CONFIG.mesh, actorPollMs: 20 };
+    const rootActors = new ActorManager(
+      "root",
+      { id: "session:root", name: "Main", kind: "main", sessionId: "root" },
+      rootMesh,
+      cfg,
+      rootSubagents,
+      () => {},
+      { actorRoot: path.join(shared, "root-actors"), mainAgent },
+    );
+    const peerActors = new ActorManager(
+      "peer",
+      { id: "agent:peer", name: "peer", kind: "agent", sessionId: "peer" },
+      peerMesh,
+      cfg,
+      peerSubagents,
+      () => {},
+      { actorRoot: path.join(shared, "peer-actors") },
+    );
+    actorManagers.push(rootActors, peerActors);
+
+    await peerActors.steerRemote(
+      "session:root",
+      "summarize after implementation",
+      "followUp",
+      { requestedBy: "peer" },
+    );
+    await waitFor(() => deliveries.length === 1, 3_000);
+    expect(deliveries).toMatchObject([
+      {
+        from: { id: "agent:peer", kind: "agent" },
+        message: "summarize after implementation",
+        delivery: "followUp",
+        data: { requestedBy: "peer" },
+      },
+    ]);
   });
 
   it("relays a fabric.steer event to a local actor as a mailbox message", async () => {

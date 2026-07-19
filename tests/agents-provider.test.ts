@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ActorManager } from "../src/actors/manager.js";
 import { GlobalActorRegistry } from "../src/actors/global-registry.js";
 import { DEFAULT_FABRIC_CONFIG } from "../src/config.js";
+import type { FabricMainAgentDeliveryRequest } from "../src/main-agent.js";
 import { MeshStore, type MeshIdentity } from "../src/mesh/store.js";
 import type { FabricInvocationContext } from "../src/protocol.js";
 import { AgentsProvider } from "../src/providers/agents-provider.js";
@@ -42,14 +43,43 @@ const setup = () => {
     sessionId: "test",
   };
   const meshConfig = { ...DEFAULT_FABRIC_CONFIG.mesh, actorPollMs: 20 };
+  const mainDeliveries: FabricMainAgentDeliveryRequest[] = [];
+  const mainAgent = {
+    id: identity.id,
+    local: true,
+    matches: (id: string) => id === "main" || id === identity.id,
+    info: () => ({
+      id: identity.id,
+      name: "Main" as const,
+      kind: "main" as const,
+      status: "idle" as const,
+      runner: "pi" as const,
+      transport: "host" as const,
+      cwd: process.cwd(),
+      sessionId: "test",
+      startedAt: 1,
+      updatedAt: 1,
+      pendingMessages: false,
+      local: true,
+    }),
+    deliverAgent: (request: FabricMainAgentDeliveryRequest) => {
+      mainDeliveries.push(request);
+      return {
+        queued: true as const,
+        messageId: `main-message-${mainDeliveries.length}`,
+        routed: "main" as const,
+      };
+    },
+  };
   const actors = new ActorManager("test", identity, mesh, meshConfig, subagents, () => {}, {
     actorRoot: path.join(root, "actors"),
     persistent: true,
+    mainAgent,
   });
   actorManagers.push(actors);
   const globalActors = new GlobalActorRegistry(root, 64 * 1024);
-  const provider = new AgentsProvider(subagents, actors, globalActors);
-  return { root, actors, globalActors, provider };
+  const provider = new AgentsProvider(subagents, actors, globalActors, mainAgent);
+  return { root, actors, globalActors, provider, mainDeliveries };
 };
 
 afterEach(async () => {
@@ -204,6 +234,54 @@ describe("AgentsProvider steering", () => {
       .filter((line) => line.trim())
       .map((line) => JSON.parse(line) as Record<string, unknown>);
   };
+
+  it("discovers and addresses the root Main agent through its stable alias", async () => {
+    const { provider, mainDeliveries } = setup();
+
+    await expect(provider.invoke("main", {}, context)).resolves.toMatchObject({
+      id: "session:test",
+      name: "Main",
+      kind: "main",
+      local: true,
+    });
+    await expect(
+      provider.invoke("status", { id: "main" }, context),
+    ).resolves.toMatchObject({ id: "session:test", name: "Main" });
+
+    const steer = await provider.invoke(
+      "steer",
+      { id: "main", message: "prioritize the failing test", data: { source: "supervisor" } },
+      context,
+    );
+    const followUp = await provider.invoke(
+      "followUp",
+      { id: "session:test", message: "then summarize the fix" },
+      context,
+    );
+
+    expect(steer).toEqual({
+      queued: true,
+      messageId: "main-message-1",
+      routed: "main",
+    });
+    expect(followUp).toEqual({
+      queued: true,
+      messageId: "main-message-2",
+      routed: "main",
+    });
+    expect(mainDeliveries).toMatchObject([
+      {
+        from: { id: "session:test", kind: "main" },
+        message: "prioritize the failing test",
+        delivery: "steer",
+        data: { source: "supervisor" },
+      },
+      {
+        message: "then summarize the fix",
+        delivery: "followUp",
+      },
+    ]);
+  });
 
   it("steer routes to a local running subagent and queues a steer command", async () => {
     const { provider, root } = setup();

@@ -40,16 +40,19 @@ Use `/fabric agents` to list children and `/fabric attach <id>` for the attach c
 
 ## Steering running agents
 
-Any Fabric-equipped agent (the main agent, a recursive child, or a persistent actor) can steer any other running agent instead of stopping and respawning it, preserving the child's accumulated context. This mirrors Pi core's RPC `steer` / `follow_up` queue, delivered between the child's turns.
+Any Fabric-equipped Pi participant (the user-facing Main session, a recursive child, or a persistent Pi actor) can message another known target without discarding its context. Ordinary non-recursive Pi children and Claude children/actors can receive host-routed messages, but cannot initiate `agents.*` calls because they do not run Fabric themselves.
 
-- `agents.steer({ id, message, data? })` queues a message delivered to a running one-shot subagent **between its turns** — after the current turn's tool calls finish, before the next LLM call. For a persistent actor it enqueues a mailbox message (equivalent to `tell`). Returns `{ queued, messageId, routed }`.
-- `agents.followUp({ id, message, data? })` queues a message delivered only **after the agent finishes** (one-shot), or enqueues a mailbox message (actor).
+- `agents.main()` returns the root user-facing Pi target as `{ id, name: "Main", kind: "main", status, ... }`. The stable alias `"main"` is also accepted anywhere a steerable target id is expected. Recursive children and Pi actors inherit the exact root Main id, so the alias does not accidentally target their private child session.
+- `agents.steer({ id, message, data? })` targets Main, a running one-shot child, or a persistent actor. Main receives a host custom message after the current turn's tools and before the next model call; a one-shot child receives the same between-turn queue semantics; an actor receives a serial mailbox item (equivalent to `tell`). Returns `{ queued, messageId, routed }`.
+- `agents.followUp({ id, message, data? })` targets Main or a running one-shot child after its current run settles, or enqueues the same serial actor mailbox. When Main is idle, Pi may start the requested turn immediately.
 - `agents.setSteeringMode({ id, mode })` / `agents.setFollowUpMode({ id, mode })` set how queued steer/follow-up messages are delivered to a running one-shot subagent: `"all"` (deliver every queued message after the current turn / when the agent finishes) or `"one-at-a-time"` (one per turn / per completion — the default). Local subagent only.
-- `agents.status({ id })` surfaces the live queue on the result as `pendingMessages: { steering: string[]; followUp: string[] }`, so you can observe how many steers are pending before steering again or stopping.
+- `agents.status({ id })` surfaces a local one-shot queue as `pendingMessages: { steering: string[]; followUp: string[] }`. For Main (id or alias), it returns `FabricMainAgentInfo` with boolean `pendingMessages`, because Pi's extension API exposes whether host messages are pending but not their contents.
 
-`routed` is `"local"` when the target is a subagent or actor in this process, or `"mesh"` when the id is not local: the call publishes a `fabric.steer` mesh event the owning process relays to its local target (see `mesh.md`). This is how an agent in one Pi process steers an agent in another — the fabric that lets any agent steer any other.
+`routed` is `"main"` for direct delivery to the locally owned user-facing session, `"local"` for a subagent or actor owned by this process, or `"mesh"` for an exact target owned by another Fabric process. Mesh routing is best-effort and requires `mesh.enabled`; the owning process relays to Main, a nested child, or an actor (see `mesh.md`).
 
 ```ts
+const main = await agents.main();
+await agents.followUp({ id: main.id, message: "After the audit, reconcile the worker findings." });
 const handle = await agents.spawn({ task: "Audit auth flows.", tools: ["read", "grep", "find", "ls"] });
 // Watch progress, then redirect between turns without losing the child's context.
 const s = await agents.status({ id: handle.id });
@@ -60,7 +63,7 @@ if (s.text.includes("rotating refresh tokens")) {
 return await agents.wait({ id: handle.id });
 ```
 
-Prefer `agents.steer` over `agents.stop` + `agents.spawn` when the child has useful context you would otherwise discard. Use `agents.stop` only when the child is genuinely off-track and a fresh task is cheaper than a redirect. Steering a finished subagent throws `already finished` — check `agents.status` first.
+Prefer `agents.steer` over `agents.stop` + `agents.spawn` when the child has useful context you would otherwise discard. Use `agents.stop` only when the child is genuinely off-track and a fresh task is cheaper than a redirect. Steering a finished subagent throws `already finished` — check `agents.status` first. In the dashboard, `s` messages/steers Main, active one-shot agents, actors, and observed mesh agents; `u` queues follow-ups where the target supports a distinct follow-up queue.
 
 ## Persistent actors
 

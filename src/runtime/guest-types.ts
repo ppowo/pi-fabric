@@ -28,6 +28,22 @@ interface FabricAgentRequest {
   worktree?: boolean;
   schema?: Record<string, unknown>;
 }
+interface FabricMainAgentInfo {
+  id: string;
+  name: "Main";
+  kind: "main";
+  status: "idle" | "running" | "remote";
+  runner: "pi";
+  transport: "host";
+  cwd?: string;
+  sessionId?: string;
+  model?: string;
+  thinking?: string;
+  startedAt?: number;
+  updatedAt: number;
+  pendingMessages: boolean;
+  local: boolean;
+}
 interface FabricAgentHandle {
   id: string;
   name: string;
@@ -211,8 +227,9 @@ interface FabricAgentsApi {
   run(args: FabricAgentRequest): Promise<FabricAgentResult>;
   spawn(args: FabricAgentRequest): Promise<FabricAgentHandle>;
   wait(args: { id: string }): Promise<FabricAgentResult>;
-  status(args: { id: string }): Promise<FabricAgentResult | FabricAgentHandle>;
+  status(args: { id: string }): Promise<FabricAgentResult | FabricAgentHandle | FabricMainAgentInfo>;
   list(): Promise<Array<FabricAgentResult | FabricAgentHandle>>;
+  main(): Promise<FabricMainAgentInfo>;
   models(args?: { runner?: FabricAgentRunner; refresh?: boolean }): Promise<FabricModelInfo[]>;
   stop(args: { id: string }): Promise<FabricAgentResult>;
   cleanup(args: { id: string; deleteBranch?: boolean }): Promise<{ cleaned: boolean }>;
@@ -225,8 +242,8 @@ interface FabricAgentsApi {
   }): Promise<FabricActorInfo>;
   ask(args: { id: string; message: string; data?: unknown }): Promise<FabricActorMessage>;
   tell(args: { id: string; message: string; data?: unknown }): Promise<{ queued: true; messageId: string }>;
-  steer(args: { id: string; message: string; data?: unknown }): Promise<{ queued: true; messageId: string; routed?: "local" | "mesh" }>;
-  followUp(args: { id: string; message: string; data?: unknown }): Promise<{ queued: true; messageId: string; routed?: "local" | "mesh" }>;
+  steer(args: { id: string; message: string; data?: unknown }): Promise<{ queued: true; messageId: string; routed?: "local" | "main" | "mesh" }>;
+  followUp(args: { id: string; message: string; data?: unknown }): Promise<{ queued: true; messageId: string; routed?: "local" | "main" | "mesh" }>;
   setSteeringMode(args: { id: string; mode: "all" | "one-at-a-time" }): Promise<{ queued: true; messageId: string }>;
   setFollowUpMode(args: { id: string; mode: "all" | "one-at-a-time" }): Promise<{ queued: true; messageId: string }>;
   actorStatus(args: { id: string }): Promise<FabricActorInfo>;

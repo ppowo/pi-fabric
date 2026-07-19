@@ -33,6 +33,7 @@ export const renderProjectMeshPanel = ({
   height: number;
 }): string[] => {
   const model = buildProjectMeshTopology({
+    main: snapshot.main,
     actors: snapshot.actors,
     agents: snapshot.agents,
     state: snapshot.state,
@@ -99,6 +100,7 @@ export const renderProjectMeshPanel = ({
         row.direction === "before" ? "↑" : row.direction === "after" ? "↓" : "↕";
       const compact = width < 62;
       const kinds = [
+        row.main > 0 ? (compact ? `m:${row.main}` : "Main") : undefined,
         row.actors > 0 ? (compact ? `a:${row.actors}` : `${row.actors} actors`) : undefined,
         row.agents > 0 ? (compact ? `g:${row.agents}` : `${row.agents} agents`) : undefined,
         row.topics > 0 ? (compact ? `t:${row.topics}` : `${row.topics} topics`) : undefined,
@@ -127,20 +129,27 @@ export const renderProjectMeshPanel = ({
       continue;
     }
     if (row.kind === "meshRoot") {
+      const selected = row.entityId === selectedEntityId;
+      const prefix = selected ? "› " : "  ";
       const summary = [
+        entityById.get(row.entityId)
+          ? entityTail(entityById.get(row.entityId)!, snapshot.now)
+          : undefined,
         `${row.actors} actors`,
         `${row.agents} agents`,
         `${row.topics} topics`,
         `${row.state} state`,
         `${row.routes} recent routes`,
-      ].join(" · ");
-      lines.push(
-        truncateToWidth(
-          `  ${theme.fg("accent", "◆")} ${theme.bold("main session")}  ${theme.fg("dim", summary)}`,
-          width,
-          "",
-        ),
-      );
+      ]
+        .filter((value): value is string => Boolean(value))
+        .join(" · ");
+      let line = `${prefix}${colorStatus(
+        theme,
+        row.main.status,
+        statusGlyph(row.main.status),
+      )} ${theme.bold("Main")}  ${theme.fg("dim", summary)}`;
+      if (selected) line = theme.bg("selectedBg", padToWidth(line, width));
+      lines.push(truncateToWidth(line, width, ""));
       continue;
     }
     if (row.kind === "meshSection") {
@@ -261,6 +270,7 @@ export const renderRunTopologyPanel = ({
   now: number;
 }): string[] => {
   const selectableEntityIds = new Set(entities.map((entity) => entity.id));
+  const mainEntity = allEntities.find((entity) => entity.kind === "main");
   const allAgents = allEntities.flatMap((entity) =>
     entity.kind === "agent" ? [entity.value] : [],
   );
@@ -316,7 +326,21 @@ export const renderRunTopologyPanel = ({
       "",
     ),
   ];
-  const available = Math.max(0, height - 1);
+  let available = Math.max(0, height - 1);
+  if (available === 0) return lines.slice(0, height);
+  if (mainEntity?.kind === "main") {
+    const selectedMain = mainEntity.id === selectedEntityId;
+    const prefix = selectedMain ? "› " : "  ";
+    const tail = entityTail(mainEntity, now);
+    let line = `${prefix}${colorStatus(
+      theme,
+      mainEntity.status,
+      statusGlyph(mainEntity.status),
+    )} ${theme.bold("Main")}${tail ? `  ${theme.fg("dim", safeText(tail))}` : ""}`;
+    if (selectedMain) line = theme.bg("selectedBg", padToWidth(line, width));
+    lines.push(truncateToWidth(line, width, ""));
+    available--;
+  }
   if (available === 0) return lines.slice(0, height);
   if (!run) {
     lines.push(theme.fg("dim", "  (no Fabric run selected)"));

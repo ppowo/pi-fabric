@@ -2,6 +2,10 @@ import { ActorManager } from "../actors/manager.js";
 import { GlobalActorRegistry } from "../actors/global-registry.js";
 import type { FabricActorHostEvent, FabricActorRequest } from "../actors/types.js";
 import type {
+  FabricAgentMessageResult,
+  FabricMainAgentTarget,
+} from "../main-agent.js";
+import type {
   FabricActionDescriptor,
   FabricInvocationContext,
   FabricProvider,
@@ -83,6 +87,13 @@ const descriptors: FabricActionDescriptor[] = [
   {
     name: "list",
     description: "List child agents created by this Fabric session",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    risk: "read",
+  },
+  {
+    name: "main",
+    description:
+      "Return the root user-facing Main Pi agent target. The stable alias main is also accepted by agents.steer and agents.followUp.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     risk: "read",
   },
@@ -182,7 +193,7 @@ const descriptors: FabricActionDescriptor[] = [
   {
     name: "steer",
     description:
-      "Steer a running one-shot subagent between its turns (preserving its context), or enqueue a message for a persistent actor. Routes to a local subagent/actor directly; for an id not local to this process, publishes a fabric.steer mesh event the owning process relays. Any Fabric-equipped agent can steer any other.",
+      "Steer Main, a running one-shot subagent between turns, or a persistent actor through its mailbox. The stable id alias main targets the root user-facing Pi session. Non-local targets route over the project mesh.",
     inputSchema: {
       type: "object",
       properties: { id: { type: "string" }, message: { type: "string" }, data: {} },
@@ -194,7 +205,7 @@ const descriptors: FabricActionDescriptor[] = [
   {
     name: "followUp",
     description:
-      "Queue a message for a one-shot subagent that is delivered only after the agent finishes, or enqueue a message for a persistent actor. Routes locally first, then over the fabric.steer mesh for a non-local id.",
+      "Queue a follow-up for Main or a running one-shot subagent, or enqueue a persistent actor mailbox message. The stable id alias main targets the root user-facing Pi session. Non-local targets route over the project mesh.",
     inputSchema: {
       type: "object",
       properties: { id: { type: "string" }, message: { type: "string" }, data: {} },
@@ -542,12 +553,13 @@ const waitWithProgress = async (
 export class AgentsProvider implements FabricProvider {
   readonly name = "agents";
   readonly description =
-    "One-shot Pi or Claude Code agents and persistent mailbox actors over process, tmux, screen, or LocalTerm";
+    "The user-facing Main target, one-shot Pi or Claude Code agents, and persistent mailbox actors over process, tmux, screen, or LocalTerm";
 
   constructor(
     readonly manager: SubagentManager,
     readonly actorManager: ActorManager,
     readonly globalActors: GlobalActorRegistry,
+    readonly mainAgent: FabricMainAgentTarget,
   ) {}
 
   async list(
@@ -614,10 +626,15 @@ export class AgentsProvider implements FabricProvider {
         context.activity?.({ type: "entity", id, kind: "agent", name: status.name });
         return waitWithProgress(this.manager, id, context);
       }
-      case "status":
-        return this.manager.status(String(args.id));
+      case "status": {
+        const id = String(args.id);
+        if (this.mainAgent.matches(id)) return this.mainAgent.info(context.extensionContext);
+        return this.manager.status(id);
+      }
       case "list":
         return this.manager.list();
+      case "main":
+        return this.mainAgent.info(context.extensionContext);
       case "models": {
         const runner =
           args.runner === "pi" || args.runner === "claude"
@@ -670,9 +687,21 @@ export class AgentsProvider implements FabricProvider {
         return this.actorManager.tell(actor.id, String(args.message), args.data);
       }
       case "steer":
-        return this.#steer(String(args.id), String(args.message), args.data, "steer", context);
+        return this.routeMessage(
+          String(args.id),
+          String(args.message),
+          args.data,
+          "steer",
+          context,
+        );
       case "followUp":
-        return this.#steer(String(args.id), String(args.message), args.data, "followUp", context);
+        return this.routeMessage(
+          String(args.id),
+          String(args.message),
+          args.data,
+          "followUp",
+          context,
+        );
       case "setSteeringMode":
         return this.manager.setSteeringMode(String(args.id), this.#steeringMode(args.mode));
       case "setFollowUpMode":
@@ -771,18 +800,41 @@ export class AgentsProvider implements FabricProvider {
     }
   }
 
-  async #steer(
+  async routeMessage(
     id: string,
     message: string,
     data: unknown,
     kind: "steer" | "followUp",
-    context: FabricInvocationContext,
-  ): Promise<{ queued: true; messageId: string; routed: "local" | "mesh" }> {
+    context?: FabricInvocationContext,
+  ): Promise<FabricAgentMessageResult> {
+    if (this.mainAgent.matches(id)) {
+      if (this.mainAgent.local) {
+        context?.activity?.({
+          type: "entity",
+          id: this.mainAgent.id,
+          kind: "agent",
+          name: "Main",
+        });
+        return this.mainAgent.deliverAgent({
+          from: this.actorManager.identity,
+          message,
+          delivery: kind,
+          ...(data === undefined ? {} : { data }),
+        });
+      }
+      return this.actorManager.steerRemote(
+        this.mainAgent.id,
+        message,
+        kind,
+        data,
+      );
+    }
+
     // Local one-shot subagent: forward between its turns via the worker's
     // steer.jsonl channel, preserving the child's accumulated context.
     try {
       const status = this.manager.status(id);
-      context.activity?.({ type: "entity", id, kind: "agent", name: status.name });
+      context?.activity?.({ type: "entity", id, kind: "agent", name: status.name });
       const result =
         kind === "steer"
           ? this.manager.steer(id, message, data)
@@ -791,20 +843,19 @@ export class AgentsProvider implements FabricProvider {
     } catch (error) {
       if (!(error instanceof Error && /Unknown Fabric subagent/.test(error.message))) throw error;
     }
-    // Local persistent actor: enqueue a mailbox message (steer == followUp for
-    // an actor's serial queue).
+
+    // Persistent actors consume both delivery modes through their serial mailbox.
     try {
       const actor = this.actorManager.status(id);
-      context.activity?.({ type: "entity", id: actor.id, kind: "actor", name: actor.name });
+      context?.activity?.({ type: "entity", id: actor.id, kind: "actor", name: actor.name });
       const result = this.actorManager.tell(actor.id, message, data);
       return { queued: true, messageId: result.messageId, routed: "local" };
     } catch (error) {
       if (!(error instanceof Error && /Unknown Fabric actor/.test(error.message))) throw error;
     }
-    // Cross-process: publish a fabric.steer mesh event the owning process
-    // relays to its local target. Best-effort; a target no process owns is dropped.
-    const remote = await this.actorManager.steerRemote(id, message, kind, data);
-    return { queued: true, messageId: remote.messageId, routed: "mesh" };
+
+    // Recursive descendants and peers are owned by another Fabric process.
+    return this.actorManager.steerRemote(id, message, kind, data);
   }
 
   #steeringMode(mode: unknown): "all" | "one-at-a-time" {

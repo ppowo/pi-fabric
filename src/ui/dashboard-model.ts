@@ -10,6 +10,7 @@ import type {
   FabricDashboardSnapshot,
   FabricUiActor,
   FabricUiAgent,
+  FabricUiMain,
   FabricUiStateEntry,
 } from "./types.js";
 import { isActiveStatus, orderAgentsByCreation } from "./types.js";
@@ -22,6 +23,7 @@ import {
 } from "./topology.js";
 
 export type Entity =
+  | { id: string; kind: "main"; label: string; status: string; value: FabricUiMain }
   | { id: string; kind: "agent"; label: string; status: string; value: FabricUiAgent }
   | { id: string; kind: "actor"; label: string; status: string; value: FabricUiActor }
   | {
@@ -122,7 +124,7 @@ const entityGroupLabels: Record<EntityGroupKind, string> = {
 };
 
 const entityGroupKind = (entity: Entity): EntityGroupKind => {
-  if (entity.kind === "agent") return "agent";
+  if (entity.kind === "main" || entity.kind === "agent") return "agent";
   if (entity.kind === "actor") return "actor";
   if (entity.kind === "globalActor") return "globalActor";
   if (entity.kind === "state") return "state";
@@ -167,6 +169,14 @@ const linkedAgent = (call: FabricActivityCall, agent: FabricUiAgent): boolean =>
   linkedEntityId(call.entityId, agent.id);
 
 const agentLaunchRefs = new Set(["agents.run", "agents.spawn"]);
+
+const mainEntity = (snapshot: FabricDashboardSnapshot): Entity => ({
+  id: `main:${snapshot.main.id}`,
+  kind: "main",
+  label: "Main",
+  status: snapshot.main.status,
+  value: snapshot.main,
+});
 
 const UNPHASED_PANEL_ID = "__fabric_unphased";
 const SESSION_PANEL_ID = "__fabric_session";
@@ -227,7 +237,13 @@ const entitiesFor = (
       status: entry.status,
       value: entry,
     }));
-    return orderEntitiesByGroup([...unlinkedAgents, ...actors, ...globalActors, ...state]);
+    return orderEntitiesByGroup([
+      mainEntity(snapshot),
+      ...unlinkedAgents,
+      ...actors,
+      ...globalActors,
+      ...state,
+    ]);
   }
 
   const calls = callsForPanel(run, panel);
@@ -270,16 +286,21 @@ const entitiesFor = (
     status: item.status,
     value: item,
   }));
-  return orderEntitiesByGroup([...linkedAgents, ...visibleCalls, ...items]);
+  return orderEntitiesByGroup([
+    mainEntity(snapshot),
+    ...linkedAgents,
+    ...visibleCalls,
+    ...items,
+  ]);
 };
 
 const runTopologyEntitiesFor = (
   snapshot: FabricDashboardSnapshot,
   run: FabricActivityRun | undefined,
 ): Entity[] => {
-  if (!run) return [];
+  if (!run) return [mainEntity(snapshot)];
   const agents = orderAgentsByCreation(snapshot.agents).filter((agent) => agent.runId === run.id);
-  return buildRunTopologyRows(run, agents)
+  const agentEntities: Entity[] = buildRunTopologyRows(run, agents)
     .filter((row) => row.kind === "agent")
     .map((row) => ({
       id: row.entityId,
@@ -288,10 +309,12 @@ const runTopologyEntitiesFor = (
       status: row.agent.status,
       value: row.agent,
     }));
+  return [mainEntity(snapshot), ...agentEntities];
 };
 
 const projectMeshEntitiesFor = (snapshot: FabricDashboardSnapshot): Entity[] => {
   const model = buildProjectMeshTopology({
+    main: snapshot.main,
     actors: snapshot.actors,
     agents: snapshot.agents,
     state: snapshot.state,
@@ -299,6 +322,7 @@ const projectMeshEntitiesFor = (snapshot: FabricDashboardSnapshot): Entity[] => 
     now: snapshot.now,
   });
   return model.rows.flatMap((row): Entity[] => {
+    if (row.kind === "meshRoot") return [mainEntity(snapshot)];
     if (row.kind === "meshActor") {
       return [
         {
@@ -410,15 +434,19 @@ const withPanelProgress = (
   panel: PhasePanel,
 ): PhasePanel => {
   const entities = entitiesFor(snapshot, run, panel);
+  const progressEntities =
+    panel.kind === "session" ? entities : entities.filter((entity) => entity.kind !== "main");
   const status =
     panel.kind === "session"
-      ? entities.some((entity) => ["failed", "timed_out", "error"].includes(entity.status))
+      ? progressEntities.some((entity) =>
+          ["failed", "timed_out", "error"].includes(entity.status),
+        )
         ? "failed"
-        : entities.some((entity) => isActiveStatus(entity.status))
+        : progressEntities.some((entity) => isActiveStatus(entity.status))
           ? "running"
           : "idle"
-      : panelStatus(entities, panel.status);
-  const agents = entities.filter((entity) => entity.kind === "agent");
+      : panelStatus(progressEntities, panel.status);
+  const agents = progressEntities.filter((entity) => entity.kind === "agent");
   const tokens = agents.reduce(
     (sum, entity) =>
       sum +
@@ -427,7 +455,7 @@ const withPanelProgress = (
         : 0),
     0,
   );
-  const starts = entities
+  const starts = progressEntities
     .flatMap((entity) => {
       if (entity.kind === "agent" || entity.kind === "call") return [entity.value.startedAt ?? 0];
       if (entity.kind === "item") return [entity.value.createdAt];
@@ -435,8 +463,8 @@ const withPanelProgress = (
     })
     .filter((value) => value > 0);
   const startedAt = starts.length > 0 ? Math.min(...starts) : undefined;
-  const hasActive = entities.some((entity) => isActiveStatus(entity.status));
-  const finishes = entities
+  const hasActive = progressEntities.some((entity) => isActiveStatus(entity.status));
+  const finishes = progressEntities
     .flatMap((entity) => {
       if (entity.kind === "agent" || entity.kind === "call") return [entity.value.finishedAt ?? 0];
       if (entity.kind === "item") return [entity.value.finishedAt ?? 0];
@@ -451,10 +479,10 @@ const withPanelProgress = (
   return {
     ...panel,
     status,
-    completed: entities.filter(
+    completed: progressEntities.filter(
       (entity) => entity.status === "completed" || entity.status === "done",
     ).length,
-    total: Math.max(panel.total, entities.length),
+    total: Math.max(panel.total, progressEntities.length),
     ...(agents.length > 0 ? { agents: agents.length } : {}),
     ...(tokens > 0 ? { tokens } : {}),
     ...(startedAt && finishedAt ? { elapsedMs: Math.max(0, finishedAt - startedAt) } : {}),
@@ -476,7 +504,9 @@ export const phasePanels = (
       total: 0,
       kind: "unphased",
     };
-    if (entitiesFor(snapshot, run, runActivity).length > 0) panels.push(runActivity);
+    if (entitiesFor(snapshot, run, runActivity).some((entity) => entity.kind !== "main")) {
+      panels.push(runActivity);
+    }
   }
 
   panels.push(

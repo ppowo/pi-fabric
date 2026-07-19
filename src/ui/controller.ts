@@ -4,7 +4,10 @@ import type { FabricActorHostEvent } from "../actors/types.js";
 import type { FabricState } from "../fabric-state.js";
 import type { FabricThinking } from "../thinking.js";
 import type { MeshEvent } from "../mesh/store.js";
-import { FabricDashboard } from "./dashboard.js";
+import {
+  FabricDashboard,
+  type FabricDashboardMessageTarget,
+} from "./dashboard.js";
 import { buildClaudeModelSource, buildModelSource, type ModelSource } from "./model-picker.js";
 import { createDashboardSnapshot } from "./snapshot.js";
 import { type FabricDashboardSnapshot } from "./types.js";
@@ -13,15 +16,31 @@ import { AgentTranscriptReader } from "./transcript.js";
 
 const WIDGET_ID = "pi-fabric";
 
-const emptySnapshot = (): FabricDashboardSnapshot => ({
-  now: Date.now(),
-  runs: [],
-  agents: [],
-  actors: [],
-  globalActors: [],
-  state: [],
-  events: [],
-});
+const emptySnapshot = (): FabricDashboardSnapshot => {
+  const now = Date.now();
+  return {
+    now,
+    runs: [],
+    main: {
+      id: "main",
+      name: "Main",
+      kind: "main",
+      status: "idle",
+      runner: "pi",
+      transport: "host",
+      cwd: process.cwd(),
+      startedAt: now,
+      updatedAt: now,
+      pendingMessages: false,
+      local: true,
+    },
+    agents: [],
+    actors: [],
+    globalActors: [],
+    state: [],
+    events: [],
+  };
+};
 
 export class FabricUiController {
   #context: ExtensionContext | undefined;
@@ -107,13 +126,20 @@ export class FabricUiController {
           context.ui.notify(error instanceof Error ? error.message : String(error), "error"),
         );
     };
-    const onAgentSteer = (agentId: string, message: string): void => {
-      reportUpdate("Steer queued for agent", Promise.resolve(this.state.subagents.steer(agentId, message)));
-    };
-    const onAgentFollowUp = (agentId: string, message: string): void => {
+    const onTargetMessage = (
+      target: FabricDashboardMessageTarget,
+      message: string,
+      delivery: "steer" | "followUp",
+    ): void => {
+      const action =
+        target.kind === "actor"
+          ? "Message queued for actor"
+          : delivery === "steer"
+            ? `Steer queued for ${target.name}`
+            : `Follow-up queued for ${target.name}`;
       reportUpdate(
-        "Follow-up queued for agent",
-        Promise.resolve(this.state.subagents.followUp(agentId, message)),
+        action,
+        this.state.queueUserMessage(target.id, message, delivery),
       );
     };
     const onAgentStop = (agentId: string): void => {
@@ -183,8 +209,7 @@ export class FabricUiController {
         new FabricDashboard(tui, theme, () => this.#snapshot, () => done(undefined), {
           modelSource,
           ...(claudeModelSource ? { claudeModelSource } : {}),
-          onAgentSteer,
-          onAgentFollowUp,
+          onTargetMessage,
           onAgentStop,
           agentTranscript: (agent) => this.#transcripts.read(agent),
           onActorModel,
@@ -228,7 +253,7 @@ export class FabricUiController {
     if (!context || !this.state.initialized) return;
     try {
       this.#pollMesh();
-      this.#snapshot = createDashboardSnapshot(this.state, this.#events);
+      this.#snapshot = createDashboardSnapshot(this.state, this.#events, context);
       this.#renderWidget(context);
       if (this.#widgetTui && this.#widget?.hasChanged()) this.#widgetTui.requestRender();
     } catch (error) {

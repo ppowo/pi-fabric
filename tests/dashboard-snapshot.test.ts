@@ -63,6 +63,20 @@ const fakeState = (
 ): FabricState =>
   ({
     activity: { runs: () => runs },
+    mainAgentInfo: () => ({
+      id: "session:test",
+      name: "Main",
+      kind: "main",
+      status: "idle",
+      runner: "pi",
+      transport: "host",
+      cwd: "/tmp/project",
+      sessionId: "test",
+      startedAt: 1,
+      updatedAt: 1,
+      pendingMessages: false,
+      local: true,
+    }),
     subagents: { list: () => records },
     actors: { list: () => actors, instructions: () => "", messages: () => [] },
     globalActors: { list: () => [] },
@@ -71,6 +85,20 @@ const fakeState = (
   }) as unknown as FabricState;
 
 describe("dashboard snapshot agent ownership", () => {
+  it("always includes the user-facing Main Pi agent", () => {
+    const snapshot = createDashboardSnapshot(fakeState([], []), []);
+
+    expect(snapshot.main).toMatchObject({
+      id: "session:test",
+      name: "Main",
+      kind: "main",
+      status: "idle",
+      transport: "host",
+      local: true,
+    });
+    expect(snapshot.agents).toEqual([]);
+  });
+
   it("orders agents by creation regardless of status or recent activity", () => {
     const first = {
       ...record("first"),

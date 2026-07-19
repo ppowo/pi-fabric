@@ -1,7 +1,10 @@
 import type { FabricActorInfo, FabricActorMessage, GlobalActorDefinition } from "../actors/types.js";
 import type { FabricActivityRun } from "../activity/types.js";
 import type { MeshEvent } from "../mesh/store.js";
+import type { FabricMainAgentInfo } from "../main-agent.js";
 import type { SubagentUsage } from "../subagents/types.js";
+
+export type FabricUiMain = FabricMainAgentInfo;
 
 export interface FabricUiAgent {
   id: string;
@@ -56,6 +59,7 @@ export interface FabricDashboardSnapshot {
   now: number;
   widgetDismissedAt?: number;
   runs: FabricActivityRun[];
+  main: FabricUiMain;
   agents: FabricUiAgent[];
   actors: FabricUiActor[];
   /** Project-independent actor templates from the global registry. */

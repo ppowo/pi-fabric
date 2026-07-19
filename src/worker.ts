@@ -70,6 +70,7 @@ const parseOptions = (): SubagentWorkerOptions => {
   const worktree = optional(args, "worktree");
   const maxTokens = optional(args, "max-tokens");
   const runnerSessionId = optional(args, "runner-session-id");
+  const mainAgentId = optional(args, "main-agent-id");
   const runner = required(args, "runner");
   if (runner !== "pi" && runner !== "claude") {
     throw new Error(`Unsupported Fabric agent runner: ${runner}`);
@@ -88,6 +89,7 @@ const parseOptions = (): SubagentWorkerOptions => {
     timeoutMs: Number(required(args, "timeout-ms")),
     depth: Number(required(args, "depth")),
     fullCodeMode: required(args, "full-code-mode") === "true",
+    ...(mainAgentId ? { mainAgentId } : {}),
     extensions: required(args, "extensions") === "true",
     tools: JSON.parse(required(args, "tools")) as string[],
     grantedRisks: JSON.parse(required(args, "granted-risks")) as string[],
@@ -363,6 +365,8 @@ const main = async (): Promise<void> => {
       ...process.env,
       PI_FABRIC_DEPTH: String(options.depth),
       PI_FABRIC_PARENT_RUN: options.id,
+      PI_FABRIC_AGENT_NAME: options.name,
+      ...(options.mainAgentId ? { PI_FABRIC_MAIN_AGENT_ID: options.mainAgentId } : {}),
       PI_FABRIC_GRANTED_RISKS: options.grantedRisks.join(","),
       PI_FABRIC_FULL_CODE_MODE: String(options.fullCodeMode),
       ...(options.actorId ? { PI_FABRIC_ACTOR_ID: options.actorId } : {}),

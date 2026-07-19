@@ -146,12 +146,14 @@ describe("SubagentManager", () => {
       workerPath: path.resolve("tests/fixtures/fake-worker.mjs"),
       runRoot: root,
       fullCodeMode: true,
+      mainAgentId: "session:root-main",
     });
     managers.push(manager);
     type ObservedResult = SubagentRunResult & {
       fullCodeMode?: string;
       tools?: string[];
       extensions?: string;
+      mainAgentId?: string;
     };
 
     const direct = (await manager.run({
@@ -162,6 +164,7 @@ describe("SubagentManager", () => {
     expect(direct.fullCodeMode).toBe("false");
     expect(direct.tools).toEqual(["read", "grep"]);
     expect(direct.extensions).toBe("true");
+    expect(direct.mainAgentId).toBe("session:root-main");
 
     const recursive = (await manager.run({
       task: "Delegate recursively",
@@ -171,6 +174,7 @@ describe("SubagentManager", () => {
     })) as ObservedResult;
     expect(recursive.fullCodeMode).toBe("true");
     expect(recursive.tools).toEqual(["read", "fabric_exec"]);
+    expect(recursive.mainAgentId).toBe("session:root-main");
   });
 
   it("validates structured output through the real Fabric worker", async () => {
@@ -209,6 +213,36 @@ describe("SubagentManager", () => {
       message: "validated actor response:false",
     });
     expect(result.usage).toMatchObject({ input: 3, output: 4 });
+  });
+
+  it("propagates the exact root Main identity into recursive child Pi", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-manager-"));
+    roots.push(root);
+    const fakePi = path.resolve("tests/fixtures/fake-pi-rpc.mjs");
+    fs.chmodSync(fakePi, 0o755);
+    const manager = new SubagentManager(process.cwd(), DEFAULT_FABRIC_CONFIG.subagents, {
+      workerPath: path.resolve("src/worker.ts"),
+      piBinary: fakePi,
+      runRoot: root,
+      fullCodeMode: true,
+      mainAgentId: "session:root-main",
+    });
+    managers.push(manager);
+
+    const result = await manager.run({
+      task: "REPORT_FABRIC_IDENTITY",
+      name: "recursive implementor",
+      transport: "process",
+      recursive: true,
+      timeoutMs: 5_000,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(JSON.parse(result.text)).toEqual({
+      mainAgentId: "session:root-main",
+      parentRun: result.id,
+      agentName: "recursive implementor",
+    });
   });
 
   it("keeps the RPC worker alive when Pi announces a retry", async () => {

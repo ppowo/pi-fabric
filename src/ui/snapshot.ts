@@ -1,3 +1,4 @@
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { FabricState } from "../fabric-state.js";
 import type { MeshEvent, MeshStateEntry } from "../mesh/store.js";
 import type { SubagentHandleInfo, SubagentRunRecord } from "../subagents/types.js";
@@ -47,6 +48,7 @@ const stateEntry = (entry: MeshStateEntry): FabricUiStateEntry => {
 export const createDashboardSnapshot = (
   state: FabricState,
   events: MeshEvent[],
+  context?: ExtensionContext,
 ): FabricDashboardSnapshot => {
   const runs = state.activity.runs();
   const agentRecords = state.subagents.list();
@@ -169,6 +171,7 @@ export const createDashboardSnapshot = (
   return {
     now: Date.now(),
     runs: orderedRuns,
+    main: state.mainAgentInfo(context),
     widgetDismissedAt: state.widgetDismissedAt,
     globalActors: state.globalActors.list(),
     agents: orderAgentsByCreation(agents).slice(-MAX_UI_AGENTS),

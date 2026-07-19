@@ -29,10 +29,28 @@ const ansiTheme = {
   bold: (text: string) => `\x1b[1m${text}\x1b[22m`,
 } as unknown as Theme;
 
+const mainAgent = (now: number, status: "idle" | "running" = "running") => ({
+  id: "session:main",
+  name: "Main" as const,
+  kind: "main" as const,
+  status,
+  runner: "pi" as const,
+  transport: "host" as const,
+  cwd: "/tmp/project",
+  sessionId: "main",
+  model: "anthropic/claude-opus-4-8",
+  thinking: "high",
+  startedAt: now - 120_000,
+  updatedAt: now,
+  pendingMessages: false,
+  local: true,
+});
+
 const snapshot = (): FabricDashboardSnapshot => {
   const now = Date.now();
   return {
     now,
+    main: mainAgent(now),
     runs: [
       {
         id: "run-1",
@@ -475,13 +493,13 @@ describe("Fabric dynamic UI", () => {
       expect(rendered).toContain("Activity");
       expect(rendered).toContain("Discover");
       expect(rendered).toContain("Audit");
-      expect(rendered).toContain("Agents (1)");
+      expect(rendered).toContain("Agents (2)");
       expect(rendered).toContain("Extensions (1)");
       expect(rendered).toContain("Tasks (1)");
       expect(rendered).toContain("Custom items (2)");
       expect(rendered).not.toContain("Actors (1)");
       expect(rendered).not.toContain("Shared state (1)");
-      expect(rendered.indexOf("Agents (1)")).toBeLessThan(rendered.indexOf("Extensions (1)"));
+      expect(rendered.indexOf("Agents (2)")).toBeLessThan(rendered.indexOf("Extensions (1)"));
       expect(rendered.indexOf("Extensions (1)")).toBeLessThan(rendered.indexOf("Tasks (1)"));
       expect(rendered.indexOf("Tasks (1)")).toBeLessThan(rendered.indexOf("Custom items (2)"));
       for (const heading of ["Extensions (1)", "Tasks (1)", "Custom items (2)"]) {
@@ -569,7 +587,7 @@ describe("Fabric dynamic UI", () => {
       const overviewText = overview.join("\n");
       expect(overviewText).toContain("Activity");
       expect(overviewText).toContain("Audit");
-      expect(overviewText).toContain("Agents (1)");
+      expect(overviewText).toContain("Agents (2)");
       expect(overviewText).not.toContain("Actors (1)");
       expect(overviewText).toContain("security-reviewer");
       expect(overviewText).toContain("claude-opus-4-8");
@@ -1138,7 +1156,7 @@ describe("Fabric dynamic UI", () => {
     );
     try {
       const all = dashboard.render(120).join("\n");
-      expect(all).toContain("Agents (2)");
+      expect(all).toContain("Agents (3)");
       expect(all).toContain("background-active");
       expect(all).toContain("background-done");
       expect(all).toContain("Run activity");
@@ -1224,7 +1242,7 @@ describe("Fabric dynamic UI", () => {
     try {
       const implementLines = dashboard.render(120);
       const implement = implementLines.join("\n");
-      expect(implement).toContain("Agents (1)");
+      expect(implement).toContain("Agents (2)");
       expect(implement).toContain("wait for worker");
       expect(implement).toContain("Spawn agents");
       expect(implement).toContain("Implement");
@@ -1232,7 +1250,7 @@ describe("Fabric dynamic UI", () => {
 
       dashboard.handleInput("k");
       const spawn = dashboard.render(120).join("\n");
-      expect(spawn).toContain("Agents (1)");
+      expect(spawn).toContain("Agents (2)");
       expect(spawn).toContain("worker");
       expect(spawn).not.toContain("wait for worker");
     } finally {
@@ -1295,6 +1313,90 @@ describe("Fabric dynamic UI", () => {
     }
   });
 
+  it("queues user messages for Main, actors, and remote mesh agents", () => {
+    const current = snapshot();
+    current.events.push({
+      id: "external-agent",
+      sequence: 2,
+      topic: "team.review",
+      kind: "handoff",
+      from: { id: "remote-agent", name: "remote implementor", kind: "agent" },
+      text: "available",
+      createdAt: current.now,
+    });
+    const onTargetMessage = vi.fn();
+    const dashboard = new FabricDashboard(
+      { requestRender: vi.fn(), terminal: { rows: 40 } } as unknown as TUI,
+      theme,
+      () => current,
+      vi.fn(),
+      { onTargetMessage },
+    );
+    try {
+      dashboard.render(120);
+      dashboard.handleInput("l");
+      dashboard.handleInput("g");
+      expect(dashboard.render(120).join("\n")).toContain("Main actions: s message/steer");
+      dashboard.handleInput("s");
+      dashboard.handleInput("prioritize the regression");
+      dashboard.handleInput("\r");
+      expect(onTargetMessage).toHaveBeenCalledWith(
+        { id: "session:main", name: "Main", kind: "main" },
+        "prioritize the regression",
+        "steer",
+      );
+
+      dashboard.handleInput("u");
+      dashboard.handleInput("then summarize");
+      dashboard.handleInput("\r");
+      expect(onTargetMessage).toHaveBeenCalledWith(
+        { id: "session:main", name: "Main", kind: "main" },
+        "then summarize",
+        "followUp",
+      );
+
+      dashboard.handleInput("\x1b");
+      dashboard.handleInput("j");
+      dashboard.handleInput("s");
+      dashboard.handleInput("stay within auth scope");
+      dashboard.handleInput("\r");
+      expect(onTargetMessage).toHaveBeenCalledWith(
+        { id: "agent-1", name: "security-reviewer", kind: "agent" },
+        "stay within auth scope",
+        "steer",
+      );
+
+      dashboard.handleInput("\x1b");
+      dashboard.handleInput("h");
+      dashboard.handleInput("G");
+      dashboard.handleInput("l");
+      dashboard.handleInput("s");
+      dashboard.handleInput("review this queue item");
+      dashboard.handleInput("\r");
+      expect(onTargetMessage).toHaveBeenCalledWith(
+        { id: "actor-1", name: "advisor", kind: "actor" },
+        "review this queue item",
+        "steer",
+      );
+
+      dashboard.handleInput("\x1b");
+      dashboard.handleInput("3");
+      dashboard.handleInput("g");
+      dashboard.handleInput("j");
+      dashboard.handleInput("j");
+      dashboard.handleInput("s");
+      dashboard.handleInput("continue remotely");
+      dashboard.handleInput("\r");
+      expect(onTargetMessage).toHaveBeenCalledWith(
+        { id: "remote-agent", name: "remote implementor", kind: "meshParticipant" },
+        "continue remotely",
+        "steer",
+      );
+    } finally {
+      dashboard.dispose();
+    }
+  });
+
   it("steers, follows up, and safely stops an agent from the overview", () => {
     const current = snapshot();
     const onAgentSteer = vi.fn();
@@ -1320,7 +1422,7 @@ describe("Fabric dynamic UI", () => {
 
       dashboard.handleInput("\x1b");
       dashboard.handleInput("u");
-      expect(dashboard.render(120).join("\n")).toContain("follow up after completion");
+      expect(dashboard.render(120).join("\n")).toContain("queue follow-up");
       dashboard.handleInput("summarize remaining risks");
       dashboard.handleInput("\r");
       expect(onAgentFollowUp).toHaveBeenCalledWith("agent-1", "summarize remaining risks");
@@ -1371,7 +1473,7 @@ describe("Fabric dynamic UI", () => {
       dashboard.render(120);
       const overview = dashboard.render(120).join("\n");
       expect(overview).toContain("result: Found two concrete authentication gaps.");
-      expect(overview).toContain("Agents (1)");
+      expect(overview).toContain("Agents (2)");
       expect(overview).toContain("5.2k tok");
     } finally {
       dashboard.dispose();
@@ -1596,6 +1698,45 @@ describe("Fabric dynamic UI", () => {
     expect(lines.join("").replaceAll(" ", "")).toBe(value.replaceAll(" ", ""));
     expect(wrapPlainText("界", 1)).toEqual(["…"]);
     expect(wrapPlainText("👩‍💻x", 2)).toEqual(["👩‍💻", "x"]);
+  });
+
+  it("keeps Main available in Activity and both topologies without child agents", () => {
+    const current = snapshot();
+    current.runs = [];
+    current.agents = [];
+    current.actors = [];
+    current.globalActors = [];
+    current.state = [];
+    current.events = [];
+    current.main.status = "idle";
+    const dashboard = new FabricDashboard(
+      { requestRender: vi.fn(), terminal: { rows: 24 } } as unknown as TUI,
+      theme,
+      () => current,
+      vi.fn(),
+      { onTargetMessage: vi.fn() },
+    );
+    try {
+      dashboard.render(100);
+      dashboard.handleInput("l");
+      const activity = dashboard.render(100).join("\n");
+      expect(activity).toContain("Agents (1)");
+      expect(activity).toContain("Main");
+      expect(activity).toContain("s message/steer");
+
+      dashboard.handleInput("2");
+      const runTopology = dashboard.render(100).join("\n");
+      expect(runTopology).toContain("Run topology");
+      expect(runTopology).toContain("Main");
+      expect(runTopology).toContain("no Fabric run selected");
+
+      dashboard.handleInput("3");
+      const meshTopology = dashboard.render(100).join("\n");
+      expect(meshTopology).toContain("Project mesh");
+      expect(meshTopology).toContain("Main");
+    } finally {
+      dashboard.dispose();
+    }
   });
 
   it("renders recursive agents in a phase-grouped Run topology", () => {
@@ -1826,7 +1967,7 @@ describe("Fabric dynamic UI", () => {
       const mesh = lines.join("\n");
       expect(mesh).toContain("Fabric · Topology");
       expect(mesh).toContain("▸ Project mesh");
-      expect(mesh).toContain("main session");
+      expect(mesh).toContain("Main");
       expect(mesh).toContain("Persistent actors");
       expect(mesh).toContain("advisor");
       expect(mesh).toContain("Transient mesh agents");
@@ -1898,6 +2039,7 @@ describe("Fabric dashboard global actors and instructions editor", () => {
     const now = Date.now();
     return {
       now,
+      main: mainAgent(now, "idle"),
       runs: [],
       agents: [],
       actors: [

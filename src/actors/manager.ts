@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import type { FabricAgentRunner, FabricMeshConfig, FabricSubagentTransport } from "../config.js";
 import { MeshStore, type MeshEvent, type MeshIdentity } from "../mesh/store.js";
+import type { FabricMainAgentTarget } from "../main-agent.js";
 import { SubagentManager } from "../subagents/manager.js";
 import type { SubagentRunRecord, SubagentRunRequest, SubagentRunResult } from "../subagents/types.js";
 import { readJsonlPage } from "../log-tail.js";
@@ -134,6 +135,7 @@ export class ActorManager {
   readonly #actorRoot: string;
   readonly #registryPath: string;
   readonly #persistent: boolean;
+  readonly #mainAgent: FabricMainAgentTarget | undefined;
   readonly #pollTimer: NodeJS.Timeout;
   #meshOffset: number;
   #polling = false;
@@ -151,11 +153,16 @@ export class ActorManager {
     readonly meshConfig: FabricMeshConfig,
     readonly subagents: SubagentManager,
     readonly onDeliver: (request: FabricActorDeliveryRequest) => void,
-    options: { actorRoot?: string; persistent?: boolean } = {},
+    options: {
+      actorRoot?: string;
+      persistent?: boolean;
+      mainAgent?: FabricMainAgentTarget;
+    } = {},
   ) {
     this.#actorRoot =
       options.actorRoot ?? fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-actors-"));
     this.#persistent = options.persistent ?? false;
+    this.#mainAgent = options.mainAgent;
     this.#registryPath = path.join(this.#actorRoot, "actors.json");
     if (this.#persistent && meshConfig.enabled) this.#loadActors();
     this.#meshOffset = mesh.latestOffset();
@@ -887,7 +894,7 @@ export class ActorManager {
         : "Respond with the useful result for this message. Keep durable state in your session context.";
     const coordinationInstruction =
       actor.runner === "pi"
-        ? "You may use Fabric for tools and durable coordination. In fabric_exec, mesh.self(), mesh.members(), mesh.publish(), mesh.read(), mesh.get(), and mesh.put() are available. Use addressed mesh events or shared versioned state to coordinate with peers when useful."
+        ? "You may use Fabric for tools and durable coordination. In fabric_exec, agents.main() discovers the user-facing Main target; agents.steer() and agents.followUp() message Main or other known agents, while mesh.self(), mesh.members(), mesh.publish(), mesh.read(), mesh.get(), and mesh.put() support durable coordination. Use addressed messages or shared versioned state when useful."
         : "The Fabric host manages your mailbox, subscriptions, delivery, and lifecycle. This Claude runner has Claude Code tools but not fabric_exec or direct mesh APIs; coordinate through the messages the host delivers.";
     return [
       `You are ${actor.name}, a persistent Fabric actor with identity ${actor.id}, running through ${actor.runner}.`,
@@ -967,6 +974,19 @@ export class ActorManager {
     const kind = event.kind === "followUp" ? "followUp" : "steer";
     const message = typeof event.text === "string" ? event.text : "";
     if (!message) return;
+    if (this.#mainAgent?.local && target === this.#mainAgent.id) {
+      try {
+        this.#mainAgent.deliverAgent({
+          from: event.from,
+          message,
+          delivery: kind,
+          ...(event.data === undefined ? {} : { data: event.data }),
+        });
+      } catch {
+        // The owning main session may be shutting down; mesh delivery is best-effort.
+      }
+      return;
+    }
     try {
       this.subagents.status(target);
       if (kind === "steer") this.subagents.steer(target, message);

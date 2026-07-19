@@ -129,6 +129,7 @@ export interface SubagentWorkerOptions {
   timeoutMs: number;
   depth: number;
   fullCodeMode: boolean;
+  mainAgentId?: string;
   extensions: boolean;
   tools: string[];
   grantedRisks: string[];

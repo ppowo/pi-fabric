@@ -70,6 +70,8 @@ return { recalled, current, mode: status.mode, hypothesis: hypothesis.hypothesis
       `
 const captured = await extensions.project_status({ verbose: true });
 console.log(captured.text);
+const main = await agents.main();
+await agents.followUp({ id: main.id, message: "review the result" });
 const watcher = await agents.create({
   name: "advisor",
   instructions: "Review each turn",

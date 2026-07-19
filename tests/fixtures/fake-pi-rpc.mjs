@@ -64,6 +64,20 @@ process.stdin.on("data", (chunk) => {
     return;
   }
 
+  if (task.includes("REPORT_FABRIC_IDENTITY")) {
+    finishAttempt(
+      successMessage(
+        JSON.stringify({
+          mainAgentId: process.env.PI_FABRIC_MAIN_AGENT_ID,
+          parentRun: process.env.PI_FABRIC_PARENT_RUN,
+          agentName: process.env.PI_FABRIC_AGENT_NAME,
+        }),
+      ),
+      false,
+    );
+    return;
+  }
+
   const value = {
     action: "message",
     message: `validated actor response:${process.env.PI_FABRIC_FULL_CODE_MODE ?? "missing"}`,

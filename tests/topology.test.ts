@@ -7,7 +7,27 @@ import {
   windowProjectMeshTopology,
   windowRunTopologyRows,
 } from "../src/ui/topology.js";
-import type { FabricUiActor, FabricUiAgent, FabricUiStateEntry } from "../src/ui/types.js";
+import type {
+  FabricUiActor,
+  FabricUiAgent,
+  FabricUiMain,
+  FabricUiStateEntry,
+} from "../src/ui/types.js";
+
+const main = (): FabricUiMain => ({
+  id: "session:main",
+  name: "Main",
+  kind: "main",
+  status: "running",
+  runner: "pi",
+  transport: "host",
+  cwd: "/tmp/project",
+  sessionId: "main",
+  startedAt: 1,
+  updatedAt: 1,
+  pendingMessages: false,
+  local: true,
+});
 
 const run = (): FabricActivityRun => ({
   id: "run-topology",
@@ -248,6 +268,7 @@ describe("Project mesh topology layout", () => {
     ];
 
     const model = buildProjectMeshTopology({
+      main: main(),
       actors,
       agents: [],
       state: [stateEntry(0)],
@@ -255,6 +276,11 @@ describe("Project mesh topology layout", () => {
       now: 1_000,
     });
 
+    expect(model.rows[0]).toMatchObject({
+      kind: "meshRoot",
+      entityId: "main:session:main",
+      main: { id: "session:main", name: "Main", status: "running" },
+    });
     expect(model.topics).toMatchObject([
       {
         id: "topic:team.review",
@@ -270,6 +296,7 @@ describe("Project mesh topology layout", () => {
       "topic",
     ]);
     expect(model.entityOrder).toEqual([
+      "main:session:main",
       "actor:actor-1",
       "topic:team.review",
       "state:tasks/task-0",
@@ -282,6 +309,7 @@ describe("Project mesh topology layout", () => {
 
   it("aggregates identical traffic routes and keeps the latest payload", () => {
     const model = buildProjectMeshTopology({
+      main: main(),
       actors: [actor()],
       agents: [],
       state: [],
@@ -299,6 +327,7 @@ describe("Project mesh topology layout", () => {
 
   it("keeps a selected node visible while summarizing a large project mesh", () => {
     const model = buildProjectMeshTopology({
+      main: main(),
       actors: [actor()],
       agents: [],
       state: Array.from({ length: 40 }, (_, index) => stateEntry(index)),
@@ -323,6 +352,7 @@ describe("Project mesh topology layout", () => {
 
   it("never exceeds the project topology viewport for selectable nodes", () => {
     const model = buildProjectMeshTopology({
+      main: main(),
       actors: [actor()],
       agents: [],
       state: Array.from({ length: 12 }, (_, index) => stateEntry(index)),
@@ -346,6 +376,7 @@ describe("Project mesh topology layout", () => {
   it("maps known and external transient agents observed in mesh traffic", () => {
     const known = agent("worker-1", 1, { name: "researcher", status: "running" });
     const model = buildProjectMeshTopology({
+      main: main(),
       actors: [actor()],
       agents: [known],
       state: [],
@@ -382,6 +413,7 @@ describe("Project mesh topology layout", () => {
 
   it("keeps structured routes distinct when free-form fields contain separators", () => {
     const model = buildProjectMeshTopology({
+      main: main(),
       actors: [],
       agents: [],
       state: [],
@@ -408,6 +440,7 @@ describe("Project mesh topology layout", () => {
 
   it("recognizes a main-session identity when traffic addresses it", () => {
     const model = buildProjectMeshTopology({
+      main: main(),
       actors: [actor()],
       agents: [],
       state: [],
@@ -427,6 +460,7 @@ describe("Project mesh topology layout", () => {
 
   it("marks explicit failure event kinds without misclassifying benign substrings", () => {
     const model = buildProjectMeshTopology({
+      main: main(),
       actors: [],
       agents: [],
       state: [],

@@ -55,6 +55,7 @@ if (task.includes("HANG")) {
     runner: args.get("runner") ?? "pi",
     transport: args.get("transport"),
     fullCodeMode: args.get("full-code-mode"),
+    mainAgentId: args.get("main-agent-id"),
     tools: JSON.parse(args.get("tools") ?? "[]"),
     extensions: args.get("extensions"),
     cwd: args.get("cwd"),

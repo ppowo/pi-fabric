@@ -203,6 +203,7 @@ export class SubagentManager {
   readonly #claudeBinary: string;
   readonly #currentDepth: number;
   readonly #fullCodeMode: boolean;
+  readonly #mainAgentId: string | undefined;
   readonly #transports: Map<FabricSubagentTransport, SubagentTransportAdapter>;
   readonly #onBackgroundComplete: ((result: SubagentRunResult) => void) | undefined;
   readonly #budget: BudgetLedgerState | undefined;
@@ -221,6 +222,7 @@ export class SubagentManager {
       claudeBinary?: string;
       runRoot?: string;
       fullCodeMode?: boolean;
+      mainAgentId?: string;
       onBackgroundComplete?: (result: SubagentRunResult) => void;
     } = {},
   ) {
@@ -237,6 +239,8 @@ export class SubagentManager {
     this.#onBackgroundComplete = options.onBackgroundComplete;
     this.#currentDepth = Math.max(0, Number(process.env.PI_FABRIC_DEPTH ?? "0") || 0);
     this.#fullCodeMode = options.fullCodeMode ?? true;
+    this.#mainAgentId =
+      options.mainAgentId ?? process.env.PI_FABRIC_MAIN_AGENT_ID;
     const inheritedBudget = activeBudgetState();
     this.#budget =
       inheritedBudget ??
@@ -349,6 +353,7 @@ export class SubagentManager {
         String(this.#currentDepth + 1),
         "--full-code-mode",
         String(recursive && this.#fullCodeMode),
+        ...(this.#mainAgentId ? ["--main-agent-id", this.#mainAgentId] : []),
         "--extensions",
         String(extensions),
         "--tools",

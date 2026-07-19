@@ -27,6 +27,18 @@ export const colorStatus = (theme: Theme, status: string, value: string): string
 };
 
 export const entityTail = (entity: Entity, now: number): string => {
+  if (entity.kind === "main") {
+    const main = entity.value;
+    return [
+      "host Pi",
+      main.model,
+      main.thinking,
+      main.pendingMessages ? "messages queued" : undefined,
+      main.local ? undefined : "remote",
+    ]
+      .filter((value): value is string => Boolean(value))
+      .join(" · ");
+  }
   if (entity.kind === "agent") {
     const agent = entity.value;
     const narrative = safeText(agent.error ?? agent.text).slice(0, 140);

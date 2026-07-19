@@ -35,6 +35,25 @@ const stubState = () =>
       mesh: { enabled: false },
     },
     activity: { subscribe: vi.fn(() => () => {}), runs: vi.fn(() => []), reset: vi.fn() },
+    mainAgentInfo: vi.fn(() => ({
+      id: "session:test",
+      name: "Main",
+      kind: "main",
+      status: "idle",
+      runner: "pi",
+      transport: "host",
+      cwd: "/tmp/project",
+      sessionId: "test",
+      startedAt: 1,
+      updatedAt: 1,
+      pendingMessages: false,
+      local: true,
+    })),
+    queueUserMessage: vi.fn().mockResolvedValue({
+      queued: true,
+      messageId: "message-1",
+      routed: "main",
+    }),
     subagents: { list: vi.fn(() => []) },
     actors: {
       list: vi.fn(() => [stubActor]),
@@ -91,6 +110,46 @@ describe("FabricUiController dashboard wiring", () => {
       expect(detail).toContain("e thinking");
       expect(detail).toContain("v events");
       expect(detail).toContain("c clear");
+    } finally {
+      dashboard?.dispose();
+      controller.stop();
+    }
+  });
+
+  it("routes Main dashboard messages through FabricState", async () => {
+    const state = stubState();
+    const controller = new FabricUiController(state);
+    const tui = { requestRender: vi.fn() } as unknown as TUI;
+    let dashboard: FabricDashboard | undefined;
+    const context = {
+      mode: "tui",
+      modelRegistry: { getAvailable: () => [] },
+      ui: {
+        custom: vi.fn(async (factory: (
+          tui: TUI,
+          theme: Theme,
+          keybindings: unknown,
+          done: () => void,
+        ) => FabricDashboard) => {
+          dashboard = factory(tui, theme, {}, () => {});
+        }),
+        notify: vi.fn(),
+        setWidget: vi.fn(),
+      },
+    } as unknown as ExtensionContext;
+
+    try {
+      await controller.openDashboard(context);
+      dashboard!.handleInput("l");
+      dashboard!.handleInput("g");
+      dashboard!.handleInput("s");
+      dashboard!.handleInput("focus on the failing test");
+      dashboard!.handleInput("\r");
+      expect(state.queueUserMessage).toHaveBeenCalledWith(
+        "session:test",
+        "focus on the failing test",
+        "steer",
+      );
     } finally {
       dashboard?.dispose();
       controller.stop();

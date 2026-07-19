@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
 import type { FabricActivityRun } from "../activity/types.js";
 import type { MeshEvent } from "../mesh/store.js";
-import type { FabricUiActor, FabricUiAgent, FabricUiStateEntry } from "./types.js";
+import type {
+  FabricUiActor,
+  FabricUiAgent,
+  FabricUiMain,
+  FabricUiStateEntry,
+} from "./types.js";
 import { isActiveStatus, orderAgentsByCreation } from "./types.js";
 
 const UNPHASED = Symbol("fabric-run-topology-unphased");
@@ -376,6 +381,8 @@ export interface FabricProjectMeshRoute {
 
 interface FabricProjectMeshRootRow {
   kind: "meshRoot";
+  entityId: string;
+  main: FabricUiMain;
   actors: number;
   agents: number;
   topics: number;
@@ -435,6 +442,7 @@ interface FabricProjectMeshOmissionRow {
   direction: "before" | "after" | "both";
   rows: number;
   nodes: number;
+  main: number;
   actors: number;
   agents: number;
   topics: number;
@@ -498,6 +506,7 @@ const routeStatus = (kind: string): string =>
     : "completed";
 
 const projectMeshRoutes = (
+  main: FabricUiMain,
   actors: FabricUiActor[],
   agents: FabricUiAgent[],
   events: MeshEvent[],
@@ -512,14 +521,16 @@ const projectMeshRoutes = (
     agentByKey.set(agent.id, agent);
     agentByKey.set(agent.name, agent);
   }
-  const mainByKey = new Map(
-    events
-      .filter((event) => event.from.kind === "main")
-      .flatMap((event) => [
-        [event.from.id, event.from.name] as const,
-        [event.from.name, event.from.name] as const,
-      ]),
-  );
+  const mainByKey = new Map<string, string>([
+    [main.id, main.name],
+    [main.name, main.name],
+    ["main", main.name],
+  ]);
+  for (const event of events) {
+    if (event.from.kind !== "main") continue;
+    mainByKey.set(event.from.id, event.from.name);
+    mainByKey.set(event.from.name, event.from.name);
+  }
   const routes = new Map<string, FabricProjectMeshRoute>();
   for (const event of events) {
     if (IGNORED_ROUTE_TOPICS.has(event.topic)) continue;
@@ -552,8 +563,8 @@ const projectMeshRoutes = (
       targetName = addressed;
       targetKind = "agent";
     } else if (event.topic === "fabric.actor.output") {
-      targetId = "main";
-      targetName = "main session";
+      targetId = main.id;
+      targetName = main.name;
       targetKind = "main";
     } else {
       targetId = event.topic;
@@ -688,6 +699,7 @@ const projectMeshTopics = (
 };
 
 export const buildProjectMeshTopology = (input: {
+  main: FabricUiMain;
   actors: FabricUiActor[];
   agents: FabricUiAgent[];
   state: FabricUiStateEntry[];
@@ -695,11 +707,13 @@ export const buildProjectMeshTopology = (input: {
   now: number;
 }): FabricProjectMeshModel => {
   const topics = projectMeshTopics(input.actors, input.events, input.now);
-  const routes = projectMeshRoutes(input.actors, input.agents, input.events);
+  const routes = projectMeshRoutes(input.main, input.actors, input.agents, input.events);
   const participants = projectMeshParticipants(input.agents, routes);
   const rows: FabricProjectMeshRow[] = [
     {
       kind: "meshRoot",
+      entityId: `main:${input.main.id}`,
+      main: input.main,
       actors: input.actors.length,
       agents: participants.length,
       topics: topics.length,
@@ -769,12 +783,14 @@ const projectMeshOmission = (
   direction: FabricProjectMeshOmissionRow["direction"],
   rows: FabricProjectMeshRow[],
 ): FabricProjectMeshOmissionRow => {
+  const rootRows = rows.filter((row) => row.kind === "meshRoot");
   const actorRows = rows.filter((row) => row.kind === "meshActor");
   const agentRows = rows.filter((row) => row.kind === "meshAgent");
   const topicRows = rows.filter((row) => row.kind === "meshTopic");
   const stateRows = rows.filter((row) => row.kind === "meshState");
   const routeRows = rows.filter((row) => row.kind === "meshRoute");
   const statuses = [
+    ...rootRows.map((row) => row.main.status),
     ...actorRows.map((row) => (row.actor.lastError ? "failed" : row.actor.status)),
     ...agentRows.map((row) => row.participant.status),
     ...topicRows.map((row) => row.topic.status),
@@ -786,11 +802,13 @@ const projectMeshOmission = (
     direction,
     rows: rows.length,
     nodes:
+      rootRows.length +
       actorRows.length +
       agentRows.length +
       topicRows.length +
       stateRows.length +
       routeRows.length,
+    main: rootRows.length,
     actors: actorRows.length,
     agents: agentRows.length,
     topics: topicRows.length,

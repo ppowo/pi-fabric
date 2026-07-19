@@ -91,4 +91,4 @@ After creation, report the focus, actor short ID, and inspect/stop commands. Do 
 
 ## Steering running subagents
 
-The same primitive that delivers the advisor's own output (`steer`) lets any agent redirect a running worker without losing its context: `agents.steer({ id, message })` is delivered between the child's turns, and `agents.status({ id }).pendingMessages` shows the queued steers. See the `agents` reference. Prefer it over stopping and respawning a worker that has accumulated useful context but is drifting.
+The same primitive that delivers the advisor's own output (`steer`) lets any Fabric-equipped Pi participant redirect a running worker (or discover Main with `agents.main()`) without losing its context: `agents.steer({ id, message })` is delivered between the child's turns, and `agents.status({ id }).pendingMessages` shows the queued steers. See the `agents` reference. Prefer it over stopping and respawning a worker that has accumulated useful context but is drifting.
