@@ -251,6 +251,7 @@ interface FabricAgentsApi {
   stop(args: { id: string }): Promise<FabricAgentResult>;
   cleanup(args: { id: string; deleteBranch?: boolean }): Promise<{ cleaned: boolean }>;
   create(args: FabricActorRequest): Promise<FabricActorInfo>;
+  setTools(args: { id: string; tools: string[]; scope?: "project" | "global" }): Promise<FabricActorInfo>;
   setEvents(args: { id: string; events: FabricActorHostEvent[] }): Promise<FabricActorInfo>;
   setInstructions(args: {
     id: string;

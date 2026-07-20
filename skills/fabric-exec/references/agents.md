@@ -82,6 +82,7 @@ Prefer `agents.steer` over `agents.stop` + `agents.spawn` when the child has use
 - `responseMode` is `text` (every non-empty response becomes an outbox message) or `directive` (validated `{ action, message?, data? }` where `action` is `silent`, `message`, or `stop`; the actor decides whether to intervene).
 - `delivery` is `mailbox`, `steer`, `followUp`, or `nextTurn`; fixed at creation, an actor cannot escalate it.
 - `triggerTurn` fires on the first event of a coalesced burst; `coalesce` is on by default.
+- `tools` is the actor's persisted allowlist and defaults to `subagents.defaultTools`. Replace it for future activations with `agents.setTools({ id, tools })`; an empty list disables optional tools. Pi actors always retain the host-required `fabric_exec` tool. Use `scope: "global"` to update a reusable template instead.
 
 ```ts
 return agents.create({
@@ -100,6 +101,7 @@ Mailbox:
 - `agents.ask({ id, message, data? })` returns a `FabricActorMessage` (blocking exchange).
 - `agents.tell({ id, message, data? })` returns `{ queued, messageId }` (fire and forget).
 - `agents.actorStatus({ id })` and `agents.actors()` return actor info.
+- `agents.setTools({ id, tools, scope? })` replaces the persisted tool allowlist for a project actor (default) or global template.
 - `agents.messages({ id, limit? })` returns message history.
 - `agents.remove({ id })` returns `{ removed }`.
 - `agents.log({ id, type?, lines?, runId? })` reads the LLM/agent log for an actor or one-shot run. `type` is `session` (the actor's `session.jsonl` transcript — every user/assistant turn and tool call), `run` (the last retained run's `events.jsonl` event stream), or `all` (both; default `session` for actors). Actors retain their last `MAX_RETAINED_RUNS` runs so logs survive after success. Returns `{ actorId, actorName, sessionFile, logDir, session, run?, retainedRuns }` (actors) or `{ id, runDirectory, logFile, status?, events }` (one-shot runs). Use this to inspect what an "offending" actor actually sent to its model. From the TUI: `/fabric log <id>` previews, `/fabric export-log <id> [path]` writes the raw `session.jsonl` + retained `runs/` to disk.

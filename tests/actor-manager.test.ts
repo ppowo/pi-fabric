@@ -466,6 +466,35 @@ describe("ActorManager", () => {
     expect(restored.status(actor.id).model).toBe("anthropic/claude-sonnet-4-5");
   });
 
+  it("setTools normalizes and persists an actor tool allowlist", async () => {
+    const setupState = setup(true);
+    const actor = await setupState.actors.create({
+      name: "reviewer",
+      instructions: "Review messages and reply concisely.",
+    });
+
+    await setupState.actors.setTools(actor.id, [" read ", "grep", "read", ""]);
+    expect(setupState.actors.status(actor.id).tools).toEqual(["read", "grep"]);
+    expect(setupState.actors.definition(actor.id).tools).toEqual(["read", "grep"]);
+
+    await setupState.actors.close();
+    actorManagers.splice(actorManagers.indexOf(setupState.actors), 1);
+    const restored = new ActorManager(
+      "test",
+      setupState.identity,
+      setupState.mesh,
+      setupState.meshConfig,
+      setupState.subagents,
+      () => {},
+      { actorRoot: path.join(setupState.root, "actors"), persistent: true },
+    );
+    actorManagers.push(restored);
+    expect(restored.status(actor.id).tools).toEqual(["read", "grep"]);
+
+    await restored.setTools(actor.id, []);
+    expect(restored.status(actor.id).tools).toEqual([]);
+  });
+
   it("setThinking updates and clears an actor's thinking and it takes effect on the next run", async () => {
     const { actors } = setup();
     const actor = await actors.create({

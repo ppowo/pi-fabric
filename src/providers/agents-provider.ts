@@ -306,6 +306,22 @@ const descriptors: FabricActionDescriptor[] = [
     risk: "read",
   },
   {
+    name: "setTools",
+    description:
+      "Replace a persistent actor's tool allowlist. Takes effect on its next queued message; an empty list disables optional tools.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string" },
+        tools: runProperties.tools,
+        scope: { type: "string", enum: ["project", "global"] },
+      },
+      required: ["id", "tools"],
+      additionalProperties: false,
+    },
+    risk: "agent",
+  },
+  {
     name: "setEvents",
     description: "Replace a persistent actor's host-event subscriptions",
     inputSchema: {
@@ -888,6 +904,13 @@ export class AgentsProvider implements FabricProvider {
           String(args.id),
           typeof args.limit === "number" ? args.limit : 50,
         );
+      case "setTools": {
+        const tools = stringArray(args.tools) ?? [];
+        if (args.scope === "global") {
+          return this.globalActors.update(String(args.id), { tools });
+        }
+        return this.actorManager.setTools(String(args.id), tools);
+      }
       case "setEvents": {
         const events = Array.isArray(args.events)
           ? args.events.filter(

@@ -178,6 +178,9 @@ export class FabricUiController {
     const onActorEvents = (actorId: string, events: FabricActorHostEvent[]): void => {
       reportUpdate("Actor event subscriptions updated", this.state.actors.setEvents(actorId, events));
     };
+    const onActorTools = (actorId: string, tools: string[]): void => {
+      reportUpdate("Actor tools updated", this.state.actors.setTools(actorId, tools));
+    };
     const onClearMessages = (actorId: string): void => {
       reportUpdate("Actor mailbox cleared", this.state.actors.clearMessages(actorId));
     };
@@ -256,6 +259,8 @@ export class FabricUiController {
             onActorModel,
             onActorThinking,
             onActorEvents,
+            onActorTools,
+            actorDefaultTools: this.state.config.subagents?.defaultTools ?? [],
             onClearMessages,
             onActorInstructions,
             onGlobalInstructions,
