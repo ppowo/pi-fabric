@@ -338,6 +338,7 @@ const main = async (): Promise<void> => {
   if (!options.extensions) piArguments.push("--no-extensions");
   if (options.fabricExtensionPath) piArguments.push("-e", options.fabricExtensionPath);
   if (options.tools.length > 0) piArguments.push("--tools", options.tools.join(","));
+  else piArguments.push("--no-tools"); // explicit empty allowlist => no tools, not Pi defaults
   if (options.model) piArguments.push("--model", options.model);
   if (thinking) piArguments.push("--thinking", thinking);
   if (options.systemPrompt) piArguments.push("--append-system-prompt", options.systemPrompt);
