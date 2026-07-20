@@ -12,7 +12,10 @@ import type {
   FabricProvider,
   FabricProviderListRequest,
 } from "../protocol.js";
-import { SubagentManager } from "../subagents/manager.js";
+import {
+  effectiveSubagentTimeoutMs,
+  SubagentManager,
+} from "../subagents/manager.js";
 import type { SubagentRunRequest } from "../subagents/types.js";
 import { isFabricThinking } from "../thinking.js";
 import { AgentTranscriptReader, recentTranscriptTools } from "../ui/transcript.js";
@@ -38,7 +41,11 @@ const runProperties = {
     enum: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
   },
   tools: { type: "array", items: { type: "string" } },
-  timeoutMs: { type: "number" },
+  timeoutMs: {
+    type: "number",
+    description:
+      "Optional longer wall-clock limit in milliseconds. Omit to use subagents.timeoutMs (60 minutes by default); values below the configured default are ignored.",
+  },
   extensions: { type: "boolean" },
   recursive: { type: "boolean" },
   worktree: { type: "boolean" },
@@ -175,7 +182,7 @@ const descriptors: FabricActionDescriptor[] = [
         thinking: runProperties.thinking,
         tools: runProperties.tools,
         transport: runProperties.transport,
-        timeoutMs: { type: "number" },
+        timeoutMs: runProperties.timeoutMs,
         scope: { type: "string", enum: ["project", "global"] },
       },
       required: ["name", "instructions"],
@@ -442,6 +449,15 @@ const stringArray = (value: unknown): string[] | undefined =>
     ? value.filter((entry): entry is string => typeof entry === "string")
     : undefined;
 
+const longerTimeoutOverride = (
+  value: unknown,
+  manager: SubagentManager,
+): number | undefined => {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  const effective = effectiveSubagentTimeoutMs(manager.config.timeoutMs, value);
+  return effective > manager.config.timeoutMs ? effective : undefined;
+};
+
 const runRequest = (
   args: Record<string, unknown>,
   context: FabricInvocationContext,
@@ -458,6 +474,7 @@ const runRequest = (
       : undefined;
   const thinking = isFabricThinking(args.thinking) ? args.thinking : undefined;
   const tools = stringArray(args.tools);
+  const timeoutMs = longerTimeoutOverride(args.timeoutMs, manager);
   const runner = args.runner === "pi" || args.runner === "claude" ? args.runner : manager.config.runner;
   const inheritedModel =
     runner === "pi" && !manager.config.model && context.extensionContext.model
@@ -475,7 +492,7 @@ const runRequest = (
         : {}),
     ...(thinking ? { thinking } : {}),
     ...(tools ? { tools } : {}),
-    ...(typeof args.timeoutMs === "number" ? { timeoutMs: args.timeoutMs } : {}),
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     ...(typeof args.extensions === "boolean" ? { extensions: args.extensions } : {}),
     ...(typeof args.recursive === "boolean" ? { recursive: args.recursive } : {}),
     ...(typeof args.worktree === "boolean" ? { worktree: args.worktree } : {}),
@@ -503,6 +520,7 @@ const actorRequest = (
     : undefined;
   const topics = stringArray(args.topics);
   const tools = stringArray(args.tools);
+  const timeoutMs = longerTimeoutOverride(args.timeoutMs, manager);
   const runner = args.runner === "pi" || args.runner === "claude" ? args.runner : manager.config.runner;
   const inheritedModel =
     inheritModel && runner === "pi" && !manager.config.model && context.extensionContext.model
@@ -540,7 +558,7 @@ const actorRequest = (
     args.transport === "herdr"
       ? { transport: args.transport }
       : {}),
-    ...(typeof args.timeoutMs === "number" ? { timeoutMs: args.timeoutMs } : {}),
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
   };
 };
 

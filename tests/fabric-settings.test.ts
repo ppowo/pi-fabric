@@ -7,6 +7,7 @@ import {
   FabricSettingsComponent,
   parseBudgetValue,
   parseFormattedNumericValue,
+  populateClaudeModelSource,
 } from "../src/ui/settings.js";
 import type { ModelSource } from "../src/ui/model-picker.js";
 
@@ -33,6 +34,26 @@ const buildItems = (keepVisibleCandidates: string[] = ["fabric_exec"]) =>
   });
 
 describe("FabricSettingsComponent", () => {
+  it("populates Claude models asynchronously without requiring startup discovery", async () => {
+    const source: ModelSource = {
+      models: [{ provider: "claude", id: "configured" }],
+      lastUsed: {},
+    };
+    let resolveModels!: (models: Array<{ value: string; displayName: string }>) => void;
+    const models = new Promise<Array<{ value: string; displayName: string }>>((resolve) => {
+      resolveModels = resolve;
+    });
+
+    const loading = populateClaudeModelSource(source, () => models);
+    expect(source.models.map((model) => model.id)).toEqual(["configured"]);
+
+    resolveModels([{ value: "haiku", displayName: "Haiku" }]);
+    await loading;
+    expect(source.models).toEqual([
+      { provider: "claude", id: "haiku", name: "Haiku" },
+    ]);
+  });
+
   it("offers executor memory limits through the machine capacity", () => {
     const machineCapacity = 24 * 1024 * 1024 * 1024;
     const values = executorMemoryLimitOptions(machineCapacity);

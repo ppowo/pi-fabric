@@ -423,12 +423,12 @@ describe("Fabric configuration", () => {
     expect(config.subagents.transport).toBe("tmux");
   });
 
-  it("defaults the subagent timeout to 60 minutes and clamps to the bound", () => {
+  it("defaults the subagent timeout to 60 minutes and clamps to the 24-hour bound", () => {
     expect(DEFAULT_FABRIC_CONFIG.subagents.timeoutMs).toBe(3_600_000);
     expect(normalizeFabricConfig({}).subagents.timeoutMs).toBe(3_600_000);
     expect(
       normalizeFabricConfig({ subagents: { timeoutMs: 99_999_999 } }).subagents.timeoutMs,
-    ).toBe(3_600_000);
+    ).toBe(86_400_000);
     expect(
       normalizeFabricConfig({ subagents: { timeoutMs: 1_200_000 } }).subagents.timeoutMs,
     ).toBe(1_200_000);

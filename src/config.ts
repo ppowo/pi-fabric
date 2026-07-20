@@ -156,7 +156,8 @@ export interface FabricConfig {
 }
 
 export const MIN_SUBAGENT_TIMEOUT_MS = 1_000;
-export const MAX_SUBAGENT_TIMEOUT_MS = 3_600_000;
+const DEFAULT_SUBAGENT_TIMEOUT_MS = 3_600_000;
+export const MAX_SUBAGENT_TIMEOUT_MS = 24 * 3_600_000;
 export const QUICKJS_MAX_MEMORY_LIMIT_BYTES = 0xffff_ffff;
 export const MAX_EXECUTOR_MEMORY_LIMIT_BYTES = Math.max(
   8 * 1024 * 1024,
@@ -200,7 +201,7 @@ export const DEFAULT_FABRIC_CONFIG: FabricConfig = {
     maxConcurrent: 4,
     maxPerExecution: 100,
     maxDepth: 2,
-    timeoutMs: MAX_SUBAGENT_TIMEOUT_MS,
+    timeoutMs: DEFAULT_SUBAGENT_TIMEOUT_MS,
     extensions: true,
     defaultTools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
     retainRuns: false,

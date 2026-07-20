@@ -214,6 +214,23 @@ describe("AgentsProvider runner support", () => {
     });
   });
 
+  it("ignores actor timeout overrides below the configured default", async () => {
+    const { provider, actors } = setup();
+    const inherited = (await provider.invoke(
+      "create",
+      { ...createRequest, name: "inherited-timeout", timeoutMs: 240_000 },
+      context,
+    )) as { id: string };
+    const longer = (await provider.invoke(
+      "create",
+      { ...createRequest, name: "longer-timeout", timeoutMs: 7_200_000 },
+      context,
+    )) as { id: string };
+
+    expect(actors.definition(inherited.id)).not.toHaveProperty("timeoutMs");
+    expect(actors.definition(longer.id).timeoutMs).toBe(7_200_000);
+  });
+
   it("enumerates Claude models and preserves runner on actors", async () => {
     const { provider } = setup();
     const models = (await provider.invoke("models", { runner: "claude" }, context)) as Array<{

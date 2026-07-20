@@ -56,6 +56,23 @@ const MAX_UI_VALUE_CHARS = 64_000;
 const MAX_RETAINED_UI_RUNS = 240;
 const MAX_RETAINED_RUN_HANDLES = 1_000;
 
+export const effectiveSubagentTimeoutMs = (
+  configuredTimeoutMs: number,
+  requestedTimeoutMs?: number,
+): number => {
+  const configured = Math.max(
+    MIN_SUBAGENT_TIMEOUT_MS,
+    Math.min(Math.floor(configuredTimeoutMs), MAX_SUBAGENT_TIMEOUT_MS),
+  );
+  if (requestedTimeoutMs === undefined || !Number.isFinite(requestedTimeoutMs)) {
+    return configured;
+  }
+  return Math.max(
+    configured,
+    Math.min(Math.floor(requestedTimeoutMs), MAX_SUBAGENT_TIMEOUT_MS),
+  );
+};
+
 interface ManagedSubagent {
   id: string;
   name: string;
@@ -381,9 +398,9 @@ export class SubagentManager {
 
     try {
       const adapter = await this.#resolveTransport(request.transport ?? this.config.transport);
-      const timeoutMs = Math.max(
-        MIN_SUBAGENT_TIMEOUT_MS,
-        Math.min(request.timeoutMs ?? this.config.timeoutMs, MAX_SUBAGENT_TIMEOUT_MS),
+      const timeoutMs = effectiveSubagentTimeoutMs(
+        this.config.timeoutMs,
+        request.timeoutMs,
       );
       const thinking = request.thinking ?? this.config.thinking;
       const recursive = runner === "pi" && request.recursive === true;

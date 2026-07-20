@@ -462,6 +462,15 @@ export class FabricSettingsComponent extends Container {
   }
 }
 
+export const populateClaudeModelSource = async (
+  source: ModelSource,
+  load: () => Promise<Parameters<typeof buildClaudeModelSource>[0]>,
+): Promise<void> => {
+  const loaded = buildClaudeModelSource(await load());
+  source.models.splice(0, source.models.length, ...loaded.models);
+  source.lastUsed = loaded.lastUsed;
+};
+
 export const buildFabricSettingsItems = (
   theme: Theme,
   config: FabricConfig,
@@ -769,13 +778,24 @@ export const buildFabricSettingsItems = (
             ),
           }),
           setting("subagents.timeoutMs", "Timeout", formatMs(config.subagents.timeoutMs), {
-            description: "Wall-clock timeout for a single subagent run.",
+            description: "Default wall-clock timeout and minimum for per-call agent timeouts.",
             submenu: numericSubmenu(
               theme,
-              [60_000, 120_000, 300_000, 600_000, 1_800_000, 3_600_000],
+              [
+                60_000,
+                120_000,
+                300_000,
+                600_000,
+                1_800_000,
+                3_600_000,
+                7_200_000,
+                14_400_000,
+                28_800_000,
+                86_400_000,
+              ],
               formatMs,
               "Subagent timeout",
-              "Wall-clock timeout for a single subagent run.",
+              "Default wall-clock timeout and minimum for per-call agent timeouts.",
             ),
           }),
           setting("subagents.extensions", "Extensions", config.subagents.extensions ? "true" : "false", {
@@ -1042,17 +1062,24 @@ export async function openFabricSettings(
     ...deps.capturedTools.list().map((tool) => tool.name),
   ]);
   const modelSource = buildModelSource(context.modelRegistry);
-  let claudeModelSource: ModelSource = { models: [], lastUsed: {} };
-  try {
-    claudeModelSource = buildClaudeModelSource(await deps.state.subagents.claudeModels());
-  } catch (error) {
+  const configuredClaudeModel = deps.state.config.subagents.claude.model;
+  const claudeModelSource: ModelSource = {
+    models: configuredClaudeModel
+      ? [{ provider: "claude", id: configuredClaudeModel.replace(/^claude\//, "") }]
+      : [],
+    lastUsed: {},
+  };
+  void populateClaudeModelSource(
+    claudeModelSource,
+    () => deps.state.subagents.claudeModels(),
+  ).catch((error: unknown) => {
     if (deps.state.config.subagents.runner === "claude") {
       context.ui.notify(
         `Claude model discovery failed: ${error instanceof Error ? error.message : String(error)}`,
         "warning",
       );
     }
-  }
+  });
 
   await context.ui.custom<void>(
     (_tui, theme, _keybindings, done) => {

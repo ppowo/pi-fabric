@@ -3,11 +3,29 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_FABRIC_CONFIG } from "../src/config.js";
-import { SubagentManager } from "../src/subagents/manager.js";
+import {
+  effectiveSubagentTimeoutMs,
+  SubagentManager,
+} from "../src/subagents/manager.js";
 import type { SubagentRunRecord, SubagentRunResult } from "../src/subagents/types.js";
 
 const managers: SubagentManager[] = [];
 const roots: string[] = [];
+
+describe("effectiveSubagentTimeoutMs", () => {
+  it("ignores per-call timeouts below the configured default", () => {
+    expect(effectiveSubagentTimeoutMs(3_600_000, 240_000)).toBe(3_600_000);
+  });
+
+  it("accepts per-call timeouts above the configured default", () => {
+    expect(effectiveSubagentTimeoutMs(3_600_000, 7_200_000)).toBe(7_200_000);
+  });
+
+  it("respects a configured default below 60 minutes", () => {
+    expect(effectiveSubagentTimeoutMs(1_800_000, 900_000)).toBe(1_800_000);
+    expect(effectiveSubagentTimeoutMs(1_800_000, 2_400_000)).toBe(2_400_000);
+  });
+});
 
 afterEach(async () => {
   await Promise.all(managers.splice(0).map((manager) => manager.close()));

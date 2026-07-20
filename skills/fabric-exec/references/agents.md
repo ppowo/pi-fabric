@@ -20,6 +20,7 @@ Every method takes a single options object.
 - `tools` defaults to `subagents.defaultTools`. Claude maps `read→Read`, `grep→Grep`, `find/ls→Glob`, `bash→Bash`, `edit→Edit`, and `write→Write`; other tool names fail before launch.
 - `schema` is a JSON Schema; the worker returns validated structured data in `result.value`.
 - `worktree: true` creates a dedicated Git worktree on branch `pi-fabric/<name>-<id>`, retained until `agents.cleanup()`.
+- Omit `timeoutMs` normally. It defaults to `subagents.timeoutMs` (60 minutes by default), and per-call values below that configured default are ignored. Set it only to request a longer run.
 
 ```ts
 const result = await agents.run({
@@ -82,6 +83,7 @@ Prefer `agents.steer` over `agents.stop` + `agents.spawn` when the child has use
 - `responseMode` is `text` (every non-empty response becomes an outbox message) or `directive` (validated `{ action, message?, data? }` where `action` is `silent`, `message`, or `stop`; the actor decides whether to intervene).
 - `delivery` is `mailbox`, `steer`, `followUp`, or `nextTurn`; fixed at creation, an actor cannot escalate it.
 - `triggerTurn` fires on the first event of a coalesced burst; `coalesce` is on by default.
+- `timeoutMs` follows the same floor as one-shot agents: omit it normally and set it only above `subagents.timeoutMs` when an activation needs longer.
 - `tools` is the actor's persisted allowlist and defaults to `subagents.defaultTools`. Replace it for future activations with `agents.setTools({ id, tools })`; an empty list disables optional tools. Pi actors always retain the host-required `fabric_exec` tool. Use `scope: "global"` to update a reusable template instead.
 
 ```ts

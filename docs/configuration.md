@@ -194,7 +194,7 @@ Fabric risk classes are `read`, `write`, `execute`, `network`, and `agent`; appr
 
 ## Subagents
 
-`subagents.runner` selects the default harness (`"pi"` or `"claude"`). `subagents.model` is the optional Pi `provider/id` override; `subagents.claude.model` is the optional canonical Claude runtime key. `subagents.claude.binary` defaults to `claude` and can be an absolute path or wrapper; `PI_FABRIC_CLAUDE_BINARY` overrides it for the current process. `/fabric settings` enumerates Claude models from that binary and stores the two runner defaults independently.
+`subagents.runner` selects the default harness (`"pi"` or `"claude"`). `subagents.model` is the optional Pi `provider/id` override; `subagents.claude.model` is the optional canonical Claude runtime key. `subagents.claude.binary` defaults to `claude` and can be an absolute path or wrapper; `PI_FABRIC_CLAUDE_BINARY` overrides it for the current process. `/fabric settings` enumerates Claude models from that binary in the background and stores the two runner defaults independently.
 
 Other subagent settings:
 
@@ -202,7 +202,7 @@ Other subagent settings:
 - `maxConcurrent` — global child concurrency semaphore.
 - `maxPerExecution` — hard cap on children per `fabric_exec` invocation.
 - `maxDepth` — recursion depth bound for `rlm.query()`.
-- `timeoutMs` — per-child wall-clock budget.
+- `timeoutMs` — default per-child wall-clock budget and floor for per-call overrides (60 minutes by default). Lower per-call values are ignored; callers should only set `timeoutMs` to request a longer run.
 - `extensions` — whether Claude children keep their normal Claude Code customizations.
 - `defaultTools` — the default tool allowlist for children.
 - `budgetUsd` — shared append-only cost ledger across a recursion tree (0 disables).
