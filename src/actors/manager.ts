@@ -293,6 +293,21 @@ export class ActorManager {
   }
 
   /**
+   * Replace an existing actor's tool allowlist. The new list takes effect on
+   * the next queued message; an in-flight run keeps its launch-time tools. An
+   * empty list leaves a Pi actor with only its host-required fabric_exec tool
+   * and a Claude actor with no tools.
+   */
+  async setTools(id: string, tools: string[]): Promise<FabricActorInfo> {
+    const actor = this.#requireActor(id);
+    actor.tools = [...new Set(tools.map((tool) => tool.trim()).filter(Boolean))];
+    actor.updatedAt = Date.now();
+    this.#saveActors();
+    await this.#publishPresence(actor);
+    return this.#publicInfo(actor);
+  }
+
+  /**
    * Replace an existing actor's host-event subscriptions. Already-queued work
    * for a removed event still runs, but future dispatches respect the new set.
    * Pass an empty array to pause host-event reactivity while keeping the actor

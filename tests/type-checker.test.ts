@@ -80,6 +80,7 @@ const watcher = await agents.create({
   events: ["turn_end"],
   responseMode: "directive",
 });
+await agents.setTools({ id: watcher.id, tools: ["read", "grep", "find", "ls"] });
 await mesh.publish({ topic: "team.review", to: watcher.id, text: "start" });
 await phase("Review");
 const findings = await parallel([

@@ -277,6 +277,22 @@ describe("AgentsProvider global actors", () => {
     expect(replaced.name).toBe("reviewer");
   });
 
+  it("updates tool allowlists for project actors and global templates", async () => {
+    const { provider, actors, globalActors } = setup();
+    const actor = (await provider.invoke("create", createRequest, context)) as { id: string };
+    await provider.invoke("setTools", { id: actor.id, tools: ["read", "grep"] }, context);
+    expect(actors.status(actor.id).tools).toEqual(["read", "grep"]);
+
+    await provider.invoke("create", { ...createRequest, name: "templar", scope: "global" }, context);
+    const templateId = globalActors.resolve("templar")!.id;
+    await provider.invoke(
+      "setTools",
+      { id: templateId, tools: [], scope: "global" },
+      context,
+    );
+    expect(globalActors.resolve("templar")!.tools).toEqual([]);
+  });
+
   it("edits instructions for project and global scopes", async () => {
     const { provider, actors, globalActors } = setup();
     const actor = (await provider.invoke("create", createRequest, context)) as { id: string };

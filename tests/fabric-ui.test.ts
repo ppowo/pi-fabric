@@ -1593,6 +1593,33 @@ describe("Fabric dynamic UI", () => {
     }
   });
 
+  it("selects persistent actor tools from the actor overview", () => {
+    const current = snapshot();
+    current.actors[0]!.tools = ["read", "grep"];
+    const onActorTools = vi.fn();
+    const dashboard = new FabricDashboard(
+      { requestRender: vi.fn() } as unknown as TUI,
+      theme,
+      () => current,
+      vi.fn(),
+      { onActorTools, actorDefaultTools: ["read", "grep", "find", "ls"] },
+    );
+    try {
+      dashboard.render(120);
+      dashboard.handleInput("j");
+      dashboard.handleInput("l");
+      expect(dashboard.render(120).join("\n")).toContain("actor actions: o tools");
+
+      dashboard.handleInput("o");
+      expect(dashboard.render(120).join("\n")).toContain('Tools for actor "advisor"');
+      dashboard.handleInput(" ");
+      dashboard.handleInput("\r");
+      expect(onActorTools).toHaveBeenCalledWith("actor-1", ["grep"]);
+    } finally {
+      dashboard.dispose();
+    }
+  });
+
   it("lazy-loads actor transcript pages and toggles tool details with the native binding", () => {
     const actorTranscript = vi.fn(() => ({
       truncated: true,

@@ -38,6 +38,7 @@ import {
   renderRunTopologyPanel,
 } from "./dashboard-topology-view.js";
 import { FabricHostEventSelector } from "./fabric-host-event-selector.js";
+import { FabricActorToolSelector } from "./fabric-actor-tool-selector.js";
 import { FabricModelSelector } from "./fabric-model-selector.js";
 import { coreToolTitle, renderCoreToolBody } from "./core-tool-render.js";
 import { nestedEditDiff, renderBoundedLines } from "./fabric-render.js";
@@ -139,6 +140,7 @@ export class FabricDashboard implements Component, Focusable {
     | "modelPicker"
     | "thinkingPicker"
     | "eventsPicker"
+    | "toolsPicker"
     | "instructionsEditor"
     | "agentMessageEditor"
     | "help" = "overview";
@@ -146,6 +148,7 @@ export class FabricDashboard implements Component, Focusable {
     | FabricModelSelector
     | FabricThinkingSelector
     | FabricHostEventSelector
+    | FabricActorToolSelector
     | undefined;
   private editor: Editor | undefined;
   private editorActorName: string | undefined;
@@ -183,6 +186,8 @@ export class FabricDashboard implements Component, Focusable {
   private readonly onActorEvents:
     | ((actorId: string, events: FabricActorHostEvent[]) => void)
     | undefined;
+  private readonly onActorTools: ((actorId: string, tools: string[]) => void) | undefined;
+  private readonly actorDefaultTools: string[];
   private readonly onClearMessages: ((actorId: string) => void) | undefined;
   private readonly onActorInstructions:
     | ((actorId: string, instructions: string) => void)
@@ -229,6 +234,8 @@ export class FabricDashboard implements Component, Focusable {
       onActorModel?: (actorId: string, model: string | undefined) => void;
       onActorThinking?: (actorId: string, thinking: FabricThinking | undefined) => void;
       onActorEvents?: (actorId: string, events: FabricActorHostEvent[]) => void;
+      onActorTools?: (actorId: string, tools: string[]) => void;
+      actorDefaultTools?: string[];
       onClearMessages?: (actorId: string) => void;
       onActorInstructions?: (actorId: string, instructions: string) => void;
       onGlobalInstructions?: (globalActorId: string, instructions: string) => void;
@@ -254,6 +261,8 @@ export class FabricDashboard implements Component, Focusable {
     this.onActorModel = options.onActorModel;
     this.onActorThinking = options.onActorThinking;
     this.onActorEvents = options.onActorEvents;
+    this.onActorTools = options.onActorTools;
+    this.actorDefaultTools = options.actorDefaultTools ?? [];
     this.onClearMessages = options.onClearMessages;
     this.onActorInstructions = options.onActorInstructions;
     this.onGlobalInstructions = options.onGlobalInstructions;
@@ -295,7 +304,8 @@ export class FabricDashboard implements Component, Focusable {
     if (
       (this.mode === "modelPicker" ||
         this.mode === "thinkingPicker" ||
-        this.mode === "eventsPicker") &&
+        this.mode === "eventsPicker" ||
+        this.mode === "toolsPicker") &&
       this.picker
     ) {
       this.picker.handleInput(data);
@@ -406,6 +416,11 @@ export class FabricDashboard implements Component, Focusable {
         const detail = allEntities.find((entity) => entity.id === this.detailId);
         if (detail && detail.kind === "actor" && detail.status !== "stopped") {
           this.openEventsPicker(detail);
+        }
+      } else if (data === "o") {
+        const detail = allEntities.find((entity) => entity.id === this.detailId);
+        if (detail && detail.kind === "actor" && detail.status !== "stopped") {
+          this.openToolsPicker(detail);
         }
       } else if (data === "c") {
         const detail = allEntities.find((entity) => entity.id === this.detailId);
@@ -545,7 +560,7 @@ export class FabricDashboard implements Component, Focusable {
         this.entityIndex = Math.min(Math.max(0, entities.length - 1), this.entityIndex + 1);
       }
     } else if (
-      ["m", "e", "v", "i", "c", "s", "u", "x", "p", "d"].includes(data) &&
+      ["m", "e", "v", "o", "i", "c", "s", "u", "x", "p", "d"].includes(data) &&
       this.pane === "entities"
     ) {
       const selected = entities[this.entityIndex];
@@ -574,6 +589,9 @@ export class FabricDashboard implements Component, Focusable {
         } else if (data === "v" && selected.kind === "actor" && selected.status !== "stopped") {
           this.detailId = selected.id;
           this.openEventsPicker(selected);
+        } else if (data === "o" && selected.kind === "actor" && selected.status !== "stopped") {
+          this.detailId = selected.id;
+          this.openToolsPicker(selected);
         } else if (
           data === "c" &&
           selected.kind === "actor" &&
@@ -677,7 +695,8 @@ export class FabricDashboard implements Component, Focusable {
     if (
       (this.mode === "modelPicker" ||
         this.mode === "thinkingPicker" ||
-        this.mode === "eventsPicker") &&
+        this.mode === "eventsPicker" ||
+        this.mode === "toolsPicker") &&
       this.picker
     ) {
       return this.renderPicker(width);
@@ -889,6 +908,7 @@ export class FabricDashboard implements Component, Focusable {
       (this.modelSource || this.claudeModelSource) && this.onActorModel ? "m model" : undefined,
       this.onActorThinking ? "e thinking" : undefined,
       this.onActorEvents ? "v events" : undefined,
+      this.onActorTools ? "o tools" : undefined,
       this.onActorInstructions ? "i instructions" : undefined,
       this.onClearMessages ? "c clear mailbox" : undefined,
       this.onExportActor ? "x export" : undefined,
@@ -997,6 +1017,24 @@ export class FabricDashboard implements Component, Focusable {
     this.mode = "eventsPicker";
   }
 
+  private openToolsPicker(entity: Entity): void {
+    if (entity.kind !== "actor" || !this.onActorTools) return;
+    const actor = entity.value;
+    this.pickerActorName = actor.name;
+    this.picker = new FabricActorToolSelector({
+      theme: this.theme,
+      currentValue: actor.tools ?? this.actorDefaultTools,
+      headerText: `Tools for actor "${actor.name}". Toggle with space, Enter to apply, Esc to cancel. Pi actors always retain fabric_exec.`,
+      onSelect: (tools) => {
+        this.onActorTools!(actor.id, tools);
+        this.closeModelPicker();
+      },
+      onCancel: () => this.closeModelPicker(),
+    });
+    this.picker.focused = true;
+    this.mode = "toolsPicker";
+  }
+
   private closeModelPicker(): void {
     this.picker = undefined;
     this.pickerActorName = undefined;
@@ -1057,7 +1095,9 @@ export class FabricDashboard implements Component, Focusable {
         ? "thinking"
         : this.mode === "eventsPicker"
           ? "events"
-          : "model";
+          : this.mode === "toolsPicker"
+            ? "tools"
+            : "model";
     const lines = [
       this.topBorder(width, `actor · ${this.pickerActorName ?? ""} · ${kind}`),
     ];
@@ -1065,7 +1105,9 @@ export class FabricDashboard implements Component, Focusable {
     for (const line of inner) lines.push(this.row(width, line));
     lines.push(this.middleBorder(width));
     const filterHint =
-      this.mode === "thinkingPicker" || this.mode === "eventsPicker" ? "" : " · type to filter";
+      this.mode === "thinkingPicker" || this.mode === "eventsPicker" || this.mode === "toolsPicker"
+        ? ""
+        : " · type to filter";
     lines.push(
       this.row(
         width,
@@ -1353,6 +1395,7 @@ export class FabricDashboard implements Component, Focusable {
         this.modelSourceForActor(entity.value) && this.onActorModel ? "m model" : undefined,
         this.onActorThinking ? "e thinking" : undefined,
         this.onActorEvents ? "v events" : undefined,
+        this.onActorTools ? "o tools" : undefined,
         this.onActorInstructions ? "i instructions" : undefined,
         this.onClearMessages ? "c clear mailbox" : undefined,
         this.onExportActor ? "x export" : undefined,
@@ -1866,6 +1909,7 @@ export class FabricDashboard implements Component, Focusable {
         this.modelSourceForActor(entity.value) && this.onActorModel ? "m model" : undefined,
         this.onActorThinking ? "e thinking" : undefined,
         this.onActorEvents ? "v events" : undefined,
+        this.onActorTools ? "o tools" : undefined,
         this.onClearMessages ? "c clear mailbox" : undefined,
         this.onActorInstructions ? "i instructions" : undefined,
         this.onExportActor ? "x export→global" : undefined,
@@ -2105,6 +2149,7 @@ export class FabricDashboard implements Component, Focusable {
           : undefined,
       );
       field("Host events", actor.events.join(", "));
+      field("Tools", actor.tools?.join(", ") ?? `inherited (${this.actorDefaultTools.join(", ")})`);
       field("Topics", actor.topics.join(", "));
       field("Queue", actor.queued);
       field("Last error", actor.lastError);
