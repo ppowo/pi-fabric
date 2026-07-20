@@ -46,8 +46,7 @@ import {
 } from "./budget-ledger.js";
 import type { BudgetLedgerState } from "./budget-ledger.js";
 import { readJsonlPage } from "../log-tail.js";
-
-const STATUS_POLL_MS = 100;
+import { SUBAGENT_STATUS_POLL_INTERVAL_MS } from "./constants.js";
 const NESTED_SNAPSHOT_POLL_MS = 500;
 const TRANSPORT_EXIT_GRACE_MS = 1_000;
 const MAX_NAME_LENGTH = 60;
@@ -55,6 +54,7 @@ const MAX_UI_TEXT_CHARS = 16_000;
 const MAX_UI_ERROR_CHARS = 8_000;
 const MAX_UI_VALUE_CHARS = 64_000;
 const MAX_RETAINED_UI_RUNS = 240;
+const MAX_RETAINED_RUN_HANDLES = 1_000;
 
 interface ManagedSubagent {
   id: string;
@@ -84,6 +84,7 @@ interface ManagedSubagent {
   latestUiRecord?: SubagentRunRecord;
   settled: boolean;
   background: boolean;
+  lastLivenessCheckAt: number;
 }
 
 const terminalStatuses = new Set(["completed", "failed", "stopped", "timed_out"]);
@@ -483,6 +484,7 @@ export class SubagentManager {
         ...(worktree ? { worktree } : {}),
         settled: false,
         background: false,
+        lastLivenessCheckAt: 0,
       };
       if (signal) {
         managed.abortHandler = () => void this.stop(id);
@@ -622,8 +624,8 @@ export class SubagentManager {
       await removeTree(managed.runDirectory);
     }
     this.#runs.delete(id);
-    this.#invalidateUiList();
     this.#pruneRetainedUiRecords();
+    this.#invalidateUiList();
     return { cleaned: cleaned || !fs.existsSync(managed.runDirectory) };
   }
 
@@ -712,8 +714,10 @@ export class SubagentManager {
 
   async #waitForTransportExit(managed: ManagedSubagent): Promise<void> {
     const deadline = Date.now() + TRANSPORT_EXIT_GRACE_MS * 7;
+    const pollIntervalMs =
+      managed.transport.livenessPollIntervalMs ?? SUBAGENT_STATUS_POLL_INTERVAL_MS;
     while (Date.now() < deadline && (await managed.transport.isAlive())) {
-      await delay(STATUS_POLL_MS);
+      await delay(pollIntervalMs);
     }
   }
 
@@ -767,26 +771,32 @@ export class SubagentManager {
         this.#settle(managed, timedOut);
         return;
       }
-      const alive = await managed.transport.isAlive();
-      if (!alive) {
-        firstObservedDeadAt ??= Date.now();
-        if (Date.now() - firstObservedDeadAt >= TRANSPORT_EXIT_GRACE_MS) {
-          const logSummary = summarizeRunLog(managed.runDirectory, 8);
-          const failed = failedRecord(
-            managed,
-            "failed",
-            logSummary
-              ? `Subagent transport exited without a result; last run log: ${logSummary}`
-              : "Subagent transport exited without a result",
-          );
-          writeRecord(managed.statusFile, failed);
-          this.#settle(managed, failed);
-          return;
+      const livenessPollIntervalMs =
+        managed.transport.livenessPollIntervalMs ?? SUBAGENT_STATUS_POLL_INTERVAL_MS;
+      const livenessCheckedAt = Date.now();
+      if (livenessCheckedAt - managed.lastLivenessCheckAt >= livenessPollIntervalMs) {
+        managed.lastLivenessCheckAt = livenessCheckedAt;
+        const alive = await managed.transport.isAlive();
+        if (!alive) {
+          firstObservedDeadAt ??= livenessCheckedAt;
+          if (livenessCheckedAt - firstObservedDeadAt >= TRANSPORT_EXIT_GRACE_MS) {
+            const logSummary = summarizeRunLog(managed.runDirectory, 8);
+            const failed = failedRecord(
+              managed,
+              "failed",
+              logSummary
+                ? `Subagent transport exited without a result; last run log: ${logSummary}`
+                : "Subagent transport exited without a result",
+            );
+            writeRecord(managed.statusFile, failed);
+            this.#settle(managed, failed);
+            return;
+          }
+        } else {
+          firstObservedDeadAt = undefined;
         }
-      } else {
-        firstObservedDeadAt = undefined;
       }
-      await delay(STATUS_POLL_MS);
+      await delay(SUBAGENT_STATUS_POLL_INTERVAL_MS);
     }
   }
 
@@ -824,8 +834,8 @@ export class SubagentManager {
         compactUiRecord(record),
       );
     }
-    this.#invalidateUiList();
     this.#pruneRetainedUiRecords();
+    this.#invalidateUiList();
     managed.resolve?.(result);
     managed.result = undefined;
     managed.resolve = undefined;
@@ -853,7 +863,7 @@ export class SubagentManager {
   #budgetSummary(): FabricBudgetSummary | undefined {
     if (!this.#budget) return undefined;
     const now = Date.now();
-    if (this.#budgetSummaryCache && now - this.#budgetSummaryCache.at < STATUS_POLL_MS) {
+    if (this.#budgetSummaryCache && now - this.#budgetSummaryCache.at < SUBAGENT_STATUS_POLL_INTERVAL_MS) {
       return this.#budgetSummaryCache.value;
     }
     const { cost, tokens } = readBudgetLedger(this.#budget.file);
@@ -884,8 +894,11 @@ export class SubagentManager {
 
   #pruneRetainedUiRecords(): void {
     const settled = [...this.#runs.values()].filter((managed) => managed.settled);
-    if (settled.length <= MAX_RETAINED_UI_RUNS) return;
-    for (const managed of settled.slice(0, -MAX_RETAINED_UI_RUNS)) {
+    const evicted = settled.slice(0, -MAX_RETAINED_RUN_HANDLES);
+    for (const managed of evicted) this.#runs.delete(managed.id);
+    const retained = evicted.length > 0 ? settled.slice(evicted.length) : settled;
+    if (retained.length <= MAX_RETAINED_UI_RUNS) return;
+    for (const managed of retained.slice(0, -MAX_RETAINED_UI_RUNS)) {
       delete managed.latestRecord;
       delete managed.latestUiRecord;
       delete managed.nestedSnapshot;

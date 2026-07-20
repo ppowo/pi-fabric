@@ -2,6 +2,7 @@ import fs from "node:fs";
 import type { FabricLogLine } from "./subagents/types.js";
 
 const READ_CHUNK_BYTES = 64 * 1024;
+const DEFAULT_READ_MAX_BYTES = 8 * 1024 * 1024;
 
 export interface JsonlPage {
   lines: FabricLogLine[];
@@ -60,26 +61,36 @@ export const readJsonlPageFromDescriptor = (
       ? Math.max(0, Math.min(before, size))
       : size;
     const boundedLimit = Math.max(1, Math.trunc(limit));
-    const boundedBytes =
-      maxBytes === undefined ? Number.POSITIVE_INFINITY : Math.max(1, Math.trunc(maxBytes));
-    let buffer = Buffer.alloc(0);
+    const boundedBytes = Math.max(
+      1,
+      Math.trunc(maxBytes ?? DEFAULT_READ_MAX_BYTES),
+    );
+    const chunks: Buffer[] = [];
     let bufferStart = fileEnd;
-    let records: BufferedLine[] = [];
+    let bufferedBytes = 0;
+    let newlineCount = 0;
 
     while (
       bufferStart > 0 &&
-      records.length <= boundedLimit &&
-      buffer.length < boundedBytes
+      newlineCount <= boundedLimit &&
+      bufferedBytes < boundedBytes
     ) {
-      const length = Math.min(READ_CHUNK_BYTES, bufferStart, boundedBytes - buffer.length);
+      const length = Math.min(READ_CHUNK_BYTES, bufferStart, boundedBytes - bufferedBytes);
       const chunkStart = bufferStart - length;
       const chunk = Buffer.allocUnsafe(length);
       const bytesRead = fs.readSync(descriptor, chunk, 0, length, chunkStart);
       if (bytesRead <= 0) break;
-      buffer = Buffer.concat([chunk.subarray(0, bytesRead), buffer]);
+      const captured = chunk.subarray(0, bytesRead);
+      chunks.push(captured);
+      for (const byte of captured) {
+        if (byte === 0x0a) newlineCount += 1;
+      }
+      bufferedBytes += bytesRead;
       bufferStart = chunkStart;
-      records = completeLines(buffer, bufferStart, fileEnd);
     }
+
+    const buffer = Buffer.concat(chunks.reverse(), bufferedBytes);
+    const records = completeLines(buffer, bufferStart, fileEnd);
 
     const selected = records.slice(-boundedLimit);
     const hasMore = selected.length > 0 && (records.length > selected.length || bufferStart > 0);

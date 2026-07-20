@@ -164,6 +164,7 @@ export interface SubagentTransportHandle {
   kind: FabricSubagentTransport;
   sessionId?: string;
   attachCommand?: string;
+  livenessPollIntervalMs?: number;
   isAlive(): Promise<boolean>;
   stop(): Promise<void>;
 }

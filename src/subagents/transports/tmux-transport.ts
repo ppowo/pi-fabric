@@ -3,6 +3,7 @@ import type {
   SubagentTransportHandle,
   SubagentTransportLaunch,
 } from "../types.js";
+import { EXTERNAL_TRANSPORT_LIVENESS_POLL_INTERVAL_MS } from "../constants.js";
 import {
   commandAvailable,
   executeFile,
@@ -31,6 +32,7 @@ export class TmuxTransport implements SubagentTransportAdapter {
     ]);
     return {
       kind: this.kind,
+      livenessPollIntervalMs: EXTERNAL_TRANSPORT_LIVENESS_POLL_INTERVAL_MS,
       sessionId: session,
       attachCommand: `tmux attach-session -t ${session}`,
       async isAlive() {

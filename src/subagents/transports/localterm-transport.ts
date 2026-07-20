@@ -3,6 +3,7 @@ import type {
   SubagentTransportHandle,
   SubagentTransportLaunch,
 } from "../types.js";
+import { EXTERNAL_TRANSPORT_LIVENESS_POLL_INTERVAL_MS } from "../constants.js";
 import {
   commandAvailable,
   executeFile,
@@ -47,6 +48,7 @@ export class LocaltermTransport implements SubagentTransportAdapter {
     }
     return {
       kind: this.kind,
+      livenessPollIntervalMs: EXTERNAL_TRANSPORT_LIVENESS_POLL_INTERVAL_MS,
       sessionId: session.id,
       attachCommand: `localterm session attach ${session.id}`,
       async isAlive() {

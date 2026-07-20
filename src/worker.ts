@@ -29,6 +29,12 @@ const loadClaudeCli = async (): Promise<ClaudeCliModule> => {
 
 const MAX_STDERR_CHARS = 20_000;
 const MAX_TEXT_CHARS = 100_000;
+const MAX_EVENT_LINE_CHARS = 4 * 1024 * 1024;
+const STEER_READ_CHUNK_BYTES = 256 * 1024;
+const MAX_STEER_LINE_BYTES = 64 * 1024;
+const MAX_STEER_COMMANDS_PER_POLL = 256;
+const MAX_CLAUDE_PENDING_INPUTS = 256;
+const MAX_CLAUDE_PENDING_TOOLS = 1_000;
 const KILL_GRACE_MS = 5_000;
 
 const argumentMap = (): Map<string, string> => {
@@ -448,6 +454,11 @@ const main = async (): Promise<void> => {
   let claudeFollowUpMode: "all" | "one-at-a-time" = "one-at-a-time";
   let claudeCanFollowUp = false;
   let claudeResultSeen = false;
+  const enqueueClaudeControl = (queue: string[], message: string): void => {
+    const pendingInputs = claudeSentInputs.length + claudeSteering.length + claudeFollowUps.length;
+    if (pendingInputs >= MAX_CLAUDE_PENDING_INPUTS) return;
+    queue.push(message);
+  };
   let claudeCloseTimer: NodeJS.Timeout | undefined;
 
   const updateClaudeQueue = (): void => {
@@ -538,6 +549,11 @@ const main = async (): Promise<void> => {
           const name = stringField(part.name);
           if (!id || !name || claudeTools.has(id)) continue;
           claudeTools.set(id, name);
+          while (claudeTools.size > MAX_CLAUDE_PENDING_TOOLS) {
+            const oldestToolId = claudeTools.keys().next().value;
+            if (oldestToolId === undefined) break;
+            claudeTools.delete(oldestToolId);
+          }
           record.toolCalls++;
           record.currentTool = name;
           process.stdout.write(`→ ${name}\n`);
@@ -790,6 +806,7 @@ const main = async (): Promise<void> => {
   // swallowed so a late steer never crashes the worker.
   let steerOffset = 0;
   let steerRemainder = Buffer.alloc(0);
+  let skippingOversizedSteerLine = false;
   const pollSteer = (): void => {
     if (!options.steerFile || terminalStatus) return;
     let descriptor: number | undefined;
@@ -803,22 +820,44 @@ const main = async (): Promise<void> => {
       if (size < steerOffset) {
         steerOffset = 0;
         steerRemainder = Buffer.alloc(0);
+        skippingOversizedSteerLine = false;
       }
       if (size <= steerOffset) return;
-      const length = size - steerOffset;
-      const buffer = Buffer.alloc(length);
+      const length = Math.min(size - steerOffset, STEER_READ_CHUNK_BYTES);
+      const buffer = Buffer.allocUnsafe(length);
       const bytesRead = fs.readSync(descriptor, buffer, 0, length, steerOffset);
       steerOffset += bytesRead;
-      const combined = Buffer.concat([steerRemainder, buffer.subarray(0, bytesRead)]);
+      let combined = Buffer.concat([steerRemainder, buffer.subarray(0, bytesRead)]);
+      if (skippingOversizedSteerLine) {
+        const skippedLineEnd = combined.indexOf(0x0a);
+        if (skippedLineEnd < 0) return;
+        combined = combined.subarray(skippedLineEnd + 1);
+        skippingOversizedSteerLine = false;
+      }
       const newline = combined.lastIndexOf(0x0a);
       if (newline < 0) {
-        steerRemainder = combined;
+        if (combined.length > MAX_STEER_LINE_BYTES) {
+          steerRemainder = Buffer.alloc(0);
+          skippingOversizedSteerLine = true;
+        } else {
+          steerRemainder = Buffer.from(combined);
+        }
         return;
       }
-      steerRemainder = Buffer.from(combined.subarray(newline + 1));
+      const remainder = combined.subarray(newline + 1);
+      if (remainder.length > MAX_STEER_LINE_BYTES) {
+        steerRemainder = Buffer.alloc(0);
+        skippingOversizedSteerLine = true;
+      } else {
+        steerRemainder = Buffer.from(remainder);
+      }
+      let processedCommands = 0;
       for (const raw of combined.subarray(0, newline + 1).toString("utf8").split("\n")) {
+        if (processedCommands >= MAX_STEER_COMMANDS_PER_POLL) break;
+        if (Buffer.byteLength(raw, "utf8") > MAX_STEER_LINE_BYTES) continue;
         const line = raw.trim();
         if (!line) continue;
+        processedCommands += 1;
         let command: { type?: string; message?: string; mode?: string; instructions?: string };
         try {
           command = JSON.parse(line);
@@ -830,10 +869,10 @@ const main = async (): Promise<void> => {
             if (claudeCloseTimer) clearTimeout(claudeCloseTimer);
             claudeCloseTimer = undefined;
             if (command.type === "steer" && typeof command.message === "string") {
-              claudeSteering.push(command.message);
+              enqueueClaudeControl(claudeSteering, command.message);
               flushClaudeSteering();
             } else if (command.type === "follow_up" && typeof command.message === "string") {
-              claudeFollowUps.push(command.message);
+              enqueueClaudeControl(claudeFollowUps, command.message);
               if (claudeCanFollowUp && claudeSentInputs.length === 0) flushClaudeFollowUps();
             } else if (
               command.type === "set_steering_mode" &&
@@ -875,7 +914,22 @@ const main = async (): Promise<void> => {
     outputBuffer += outputDecoder.write(chunk);
     while (true) {
       const newline = outputBuffer.indexOf("\n");
-      if (newline < 0) break;
+      if (newline < 0) {
+        if (outputBuffer.length > MAX_EVENT_LINE_CHARS) {
+          terminalStatus = "failed";
+          terminalError = "Subagent emitted an oversized event line";
+          outputBuffer = "";
+          terminateChild(child, "SIGTERM");
+        }
+        break;
+      }
+      if (newline > MAX_EVENT_LINE_CHARS) {
+        terminalStatus = "failed";
+        terminalError = "Subagent emitted an oversized event line";
+        outputBuffer = "";
+        terminateChild(child, "SIGTERM");
+        return;
+      }
       const line = outputBuffer.slice(0, newline).replace(/\r$/, "");
       outputBuffer = outputBuffer.slice(newline + 1);
       processEvent(line);

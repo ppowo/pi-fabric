@@ -5,8 +5,10 @@ import type {
   SubagentTransportHandle,
   SubagentTransportLaunch,
 } from "../types.js";
+import { EXTERNAL_TRANSPORT_LIVENESS_POLL_INTERVAL_MS } from "../constants.js";
 
 const REQUEST_TIMEOUT_MS = 3_000;
+const MAX_RESPONSE_BYTES = 1 * 1024 * 1024;
 
 interface HerdrErrorResponse {
   error?: { code?: string; message?: string };
@@ -94,6 +96,7 @@ export class HerdrTransport implements SubagentTransportAdapter {
 
     return {
       kind: this.kind,
+      livenessPollIntervalMs: EXTERNAL_TRANSPORT_LIVENESS_POLL_INTERVAL_MS,
       sessionId: paneId,
       ...(terminalId ? { attachCommand: `herdr terminal attach ${terminalId}` } : {}),
       isAlive: async () => {
@@ -120,7 +123,8 @@ export class HerdrTransport implements SubagentTransportAdapter {
     const payload = JSON.stringify({ id: `pi-fabric:${randomUUID()}`, ...request });
     return new Promise((resolve, reject) => {
       const socket = net.createConnection(endpointFor(socketPath));
-      let buffer = "";
+      const responseChunks: string[] = [];
+      let responseBytes = 0;
       let settled = false;
       const finish = (error?: Error, value?: unknown): void => {
         if (settled) return;
@@ -138,11 +142,17 @@ export class HerdrTransport implements SubagentTransportAdapter {
       socket.setEncoding("utf8");
       socket.on("connect", () => socket.write(`${payload}\n`));
       socket.on("data", (chunk: string) => {
-        buffer += chunk;
-        const newline = buffer.indexOf("\n");
+        const newline = chunk.indexOf("\n");
+        const captured = newline < 0 ? chunk : chunk.slice(0, newline);
+        responseBytes += Buffer.byteLength(captured, "utf8");
+        if (responseBytes > MAX_RESPONSE_BYTES) {
+          finish(new Error(`Herdr API response exceeds ${MAX_RESPONSE_BYTES} bytes`));
+          return;
+        }
+        responseChunks.push(captured);
         if (newline < 0) return;
         try {
-          const response = JSON.parse(buffer.slice(0, newline)) as HerdrErrorResponse;
+          const response = JSON.parse(responseChunks.join("")) as HerdrErrorResponse;
           finish(responseError(response), response);
         } catch (error) {
           finish(

@@ -562,22 +562,32 @@ const attachAgentToolPreview = (
   }
 };
 
-const pollResult = async <T>(
+const waitForResultWithProgress = <T>(
   result: Promise<T>,
-): Promise<{ done: true; value: T } | { done: false }> => {
-  let progressTimer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      result.then((value) => ({ done: true as const, value })),
-      new Promise<{ done: false }>((resolve) => {
-        progressTimer = setTimeout(() => resolve({ done: false }), AGENT_PROGRESS_INTERVAL_MS);
-        progressTimer.unref?.();
-      }),
-    ]);
-  } finally {
-    if (progressTimer) clearTimeout(progressTimer);
-  }
-};
+  onProgress: () => void,
+): Promise<T> =>
+  new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (complete: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearInterval(progressTimer);
+      complete();
+    };
+    const progressTimer = setInterval(() => {
+      if (settled) return;
+      try {
+        onProgress();
+      } catch (error) {
+        finish(() => reject(error));
+      }
+    }, AGENT_PROGRESS_INTERVAL_MS);
+    progressTimer.unref?.();
+    result.then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
 
 const actorWorker = (
   manager: SubagentManager,
@@ -611,20 +621,10 @@ const waitWithProgress = async (
   const result = manager.wait(id);
   let lastProgressRevision: string | undefined;
   try {
-    while (true) {
-      const settled = await pollResult(result);
-      if (settled.done) {
-        context.activity?.({
-          type: "metrics",
-          tokens: settled.value.usage.input + settled.value.usage.output,
-          toolCalls: settled.value.toolCalls,
-          cost: settled.value.usage.cost,
-        });
-        return settled.value;
-      }
+    const settled = await waitForResultWithProgress(result, () => {
       const status = manager.status(id);
       const revision = agentProgressRevision(status);
-      if (revision === lastProgressRevision) continue;
+      if (revision === lastProgressRevision) return;
       lastProgressRevision = revision;
       attachAgentToolPreview(status, transcripts, context, nestedToolsEnabled);
       const currentTool =
@@ -638,7 +638,14 @@ const waitWithProgress = async (
           cost: status.usage.cost,
         });
       }
-    }
+    });
+    context.activity?.({
+      type: "metrics",
+      tokens: settled.usage.input + settled.usage.output,
+      toolCalls: settled.toolCalls,
+      cost: settled.usage.cost,
+    });
+    return settled;
   } finally {
     try {
       attachAgentToolPreview(manager.status(id), transcripts, context, nestedToolsEnabled);
@@ -658,15 +665,13 @@ const waitWithActorProgress = async (
 ): Promise<FabricActorMessage> => {
   let lastProgressRevision: string | undefined;
   try {
-    while (true) {
-      const settled = await pollResult(result);
-      const worker = actorWorker(manager, actorId, settled.done);
+    return await waitForResultWithProgress(result, () => {
+      const worker = actorWorker(manager, actorId, false);
       const revision = worker ? agentProgressRevision(worker) : "queued";
-      if (worker && (settled.done || revision !== lastProgressRevision)) {
+      if (worker && revision !== lastProgressRevision) {
         attachAgentToolPreview(worker, transcripts, context, nestedToolsEnabled);
       }
-      if (settled.done) return settled.value;
-      if (revision === lastProgressRevision) continue;
+      if (revision === lastProgressRevision) return;
       lastProgressRevision = revision;
       const currentTool =
         worker && "currentTool" in worker && worker.currentTool ? ` · ${worker.currentTool}` : "";
@@ -675,7 +680,7 @@ const waitWithActorProgress = async (
           ? `Actor ${actorId.slice(0, 8)}: ${worker.status}${currentTool}`
           : `Actor ${actorId.slice(0, 8)}: queued`,
       );
-    }
+    });
   } finally {
     const worker = actorWorker(manager, actorId, true);
     if (worker) attachAgentToolPreview(worker, transcripts, context, nestedToolsEnabled);

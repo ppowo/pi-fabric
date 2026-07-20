@@ -3,6 +3,7 @@ import type {
   SubagentTransportHandle,
   SubagentTransportLaunch,
 } from "../types.js";
+import { EXTERNAL_TRANSPORT_LIVENESS_POLL_INTERVAL_MS } from "../constants.js";
 import { commandAvailable, executeFile } from "./process-utils.js";
 
 const sessionName = (id: string): string => `pi-fabric-${id.slice(0, 12)}`;
@@ -23,6 +24,7 @@ export class ScreenTransport implements SubagentTransportAdapter {
     );
     return {
       kind: this.kind,
+      livenessPollIntervalMs: EXTERNAL_TRANSPORT_LIVENESS_POLL_INTERVAL_MS,
       sessionId: session,
       attachCommand: `screen -r ${session}`,
       async isAlive() {

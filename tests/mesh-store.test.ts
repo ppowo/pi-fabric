@@ -118,4 +118,51 @@ describe("MeshStore", () => {
     ).rejects.toThrow("compare-and-swap failed");
     expect(() => store.get("tasks/__proto__")).toThrow("Invalid Fabric mesh key");
   });
+
+  it("compacts oversized event logs and resets stale tail cursors", async () => {
+    const meshRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-mesh-bounded-"));
+    roots.push(meshRoot);
+    const maxEventLogBytes = 2_000;
+    const store = new MeshStore(meshRoot, 512, 100, {
+      maxEventLogBytes,
+      retainedEventLogBytes: 800,
+    });
+    await store.publish({ topic: "team.auth", from: identity, text: "event-0" });
+    await store.publish({ topic: "team.auth", from: identity, text: "event-1" });
+    const staleCursor = store.latestOffset();
+    for (let index = 2; index < 30; index += 1) {
+      await store.publish({ topic: "team.auth", from: identity, text: `event-${index}` });
+    }
+
+    const tail = store.tail(staleCursor, 100);
+    const recent = store.read({ limit: 3 });
+
+    expect(fs.statSync(path.join(meshRoot, "events.jsonl")).size).toBeLessThanOrEqual(
+      maxEventLogBytes,
+    );
+    expect(tail.events.length).toBeGreaterThan(0);
+    expect(tail.events.at(-1)?.text).toBe("event-29");
+    expect(recent.map((event) => event.text)).toEqual(["event-27", "event-28", "event-29"]);
+    expect(tail.nextOffset).toBe(store.latestOffset());
+  });
+
+  it("caps deleted-key version tombstones", async () => {
+    const meshRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-mesh-state-"));
+    roots.push(meshRoot);
+    const store = new MeshStore(meshRoot, 64 * 1024, 100, { maxStateTombstones: 2 });
+    for (const key of ["state/a", "state/b", "state/c"]) {
+      await store.put({ key, value: { ready: true }, identity });
+      await store.delete({ key });
+    }
+
+    const state = JSON.parse(fs.readFileSync(path.join(meshRoot, "state.json"), "utf8")) as {
+      versions: Record<string, number>;
+      tombstoneOrder: string[];
+    };
+    const recreated = await store.put({ key: "state/a", value: { ready: false }, identity });
+
+    expect(state.tombstoneOrder).toEqual(["state/b", "state/c"]);
+    expect(state.versions["state/a"]).toBeUndefined();
+    expect(recreated.version).toBe(1);
+  });
 });
