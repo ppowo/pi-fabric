@@ -6,7 +6,8 @@ import { highlightCode, languageFromPath } from "./highlight.js";
 import { headlineArg } from "../core/call-preview.js";
 import { coreToolTitle, renderCoreToolBody } from "./core-tool-render.js";
 import { isFabricNestedToolPreview, type FabricTranscriptEntry } from "./transcript.js";
-import ts from "typescript";
+import { fabricStringLiterals, fabricWriteBindings, type FabricWriteBinding } from "./fabric-code-parser.js";
+export { fabricWriteBindings, type FabricWriteBinding } from "./fabric-code-parser.js";
 import {
   applyDiffBackground,
   createDiffBackgroundResolver,
@@ -176,18 +177,7 @@ const legacyCommandsFrom = (fabricArgs: unknown): ReadonlyMap<string, string> =>
         ? rawCode.join("\n")
         : undefined;
   if (code) {
-    const source = ts.createSourceFile(
-      "fabric-exec-preview.ts",
-      code,
-      ts.ScriptTarget.Latest,
-      false,
-      ts.ScriptKind.TS,
-    );
-    const visit = (node: ts.Node): void => {
-      if (ts.isStringLiteralLike(node)) remember(node.text);
-      ts.forEachChild(node, visit);
-    };
-    visit(source);
+    for (const literal of fabricStringLiterals(code)) remember(literal);
   }
   legacyCommandCache.set(args, commands);
   return commands;
@@ -215,76 +205,6 @@ export const restoreLegacyBashCommands = (
       args: command ? { ...argsWithoutDigest, command } : argsWithoutDigest,
     };
   });
-};
-
-export interface FabricWriteBinding {
-  path: string;
-  stringKey: string;
-}
-
-const propertyNameText = (name: ts.PropertyName): string | undefined =>
-  ts.isIdentifier(name) || ts.isStringLiteralLike(name) ? name.text : undefined;
-
-const namedStringKey = (expression: ts.Expression): string | undefined => {
-  if (
-    ts.isPropertyAccessExpression(expression) &&
-    ts.isIdentifier(expression.expression) &&
-    expression.expression.text === "π"
-  ) {
-    return expression.name.text;
-  }
-  if (
-    ts.isElementAccessExpression(expression) &&
-    ts.isIdentifier(expression.expression) &&
-    expression.expression.text === "π" &&
-    expression.argumentExpression &&
-    ts.isStringLiteralLike(expression.argumentExpression)
-  ) {
-    return expression.argumentExpression.text;
-  }
-  return undefined;
-};
-
-const literalText = (expression: ts.Expression): string | undefined =>
-  ts.isStringLiteralLike(expression) ? expression.text : undefined;
-
-export const fabricWriteBindings = (code: string): FabricWriteBinding[] => {
-  const source = ts.createSourceFile(
-    "fabric-exec-write-preview.ts",
-    code,
-    ts.ScriptTarget.Latest,
-    false,
-    ts.ScriptKind.TS,
-  );
-  const bindings: FabricWriteBinding[] = [];
-  const visit = (node: ts.Node): void => {
-    if (
-      ts.isCallExpression(node) &&
-      ts.isPropertyAccessExpression(node.expression) &&
-      ts.isIdentifier(node.expression.expression) &&
-      node.expression.expression.text === "pi" &&
-      node.expression.name.text === "write"
-    ) {
-      const args = node.arguments[0];
-      if (args && ts.isObjectLiteralExpression(args)) {
-        let path: string | undefined;
-        let stringKey: string | undefined;
-        for (const property of args.properties) {
-          if (!ts.isPropertyAssignment(property)) continue;
-          const name = propertyNameText(property.name);
-          if (name === "path" || name === "file" || name === "file_path") {
-            path = literalText(property.initializer);
-          } else if (name === "content" || name === "text" || name === "contents") {
-            stringKey = namedStringKey(property.initializer);
-          }
-        }
-        if (path !== undefined && stringKey !== undefined) bindings.push({ path, stringKey });
-      }
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(source);
-  return bindings;
 };
 
 export interface FabricWriteArgumentPreviewInput {

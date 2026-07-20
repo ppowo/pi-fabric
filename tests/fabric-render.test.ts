@@ -106,6 +106,19 @@ return Promise.all([
     ]);
   });
 
+  it("extracts escaped and quoted write bindings without matching comments", () => {
+    const bindings = fabricWriteBindings(`
+// pi.write({ path: "ignored.md", text: π.ignored })
+pi.write({ "path": "docs/quoted\\nname.md", "content": π["quoted"] });
+pi.write({ path: "nested.md", metadata: { content: π.wrong }, text: π.right });
+`);
+
+    expect(bindings).toEqual([
+      { path: "docs/quoted\nname.md", stringKey: "quoted" },
+      { path: "nested.md", stringKey: "right" },
+    ]);
+  });
+
   it("renders a growing single π value during argument composition", () => {
     const streaming = renderFabricWriteArgumentPreview(
       {
