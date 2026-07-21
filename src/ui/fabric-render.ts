@@ -655,6 +655,11 @@ export interface FabricMulticallPartialInput {
   showNestedToolCalls?: boolean | undefined;
 }
 
+export const singleCallProgressLine = (
+  progress: string | undefined,
+  nestedLines: string[],
+): string => progress && nestedLines.length === 0 ? safeTerminalText(progress) : "";
+
 export const compactProgressPreview = (progress: string): string => {
   const lines = safeTerminalText(progress)
     .split("\n")

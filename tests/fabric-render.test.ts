@@ -30,6 +30,7 @@ import {
   restoreFabricCoreToolPreviews,
   restoreFabricWritePreviews,
   restoreLegacyBashCommands,
+  singleCallProgressLine,
 } from "../src/ui/fabric-render.js";
 
 const theme = {
@@ -1208,6 +1209,11 @@ b`, theme)).toBe("");
 
     expect(lines).toHaveLength(10); // header + eight calls + hidden marker
     expect(lines.at(-1)).toContain("4 nested calls hidden");
+  });
+
+  it("omits redundant single-call progress when an agent preview is visible", () => {
+    expect(singleCallProgressLine("Agent reviewer: running", ["› read src/index.ts"])).toBe("");
+    expect(singleCallProgressLine("Agent reviewer: running", [])).toBe("Agent reviewer: running");
   });
 
   it("compacts multiline progress to its latest line", () => {

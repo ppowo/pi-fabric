@@ -327,6 +327,48 @@ describe("agent transcript projection", () => {
     expect(returnedTail.hasNewer).toBe(false);
   });
 
+  it("hydrates tool metadata when a lifecycle crosses the bounded page boundary", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-transcript-"));
+    temporaryDirectories.push(directory);
+    const logFile = path.join(directory, "events.jsonl");
+    const events = [
+      ...Array.from({ length: 39 }, (_, index) => ({
+        type: "message_end",
+        message: { role: "assistant", content: `before-${index}` },
+      })),
+      {
+        type: "tool_execution_start",
+        toolCallId: "split-read",
+        toolName: "read",
+        args: { path: "src/split.ts" },
+      },
+      ...Array.from({ length: 40 }, (_, index) => ({
+        type: "message_end",
+        message: { role: "assistant", content: `after-${index}` },
+      })),
+      {
+        type: "tool_execution_end",
+        toolCallId: "split-read",
+        toolName: "read",
+        result: { output: "split body" },
+        isError: false,
+      },
+    ];
+    fs.writeFileSync(logFile, `${events.map((event) => JSON.stringify(event)).join("\n")}\n`);
+    const reader = new AgentTranscriptReader();
+    const transcript = reader.read({ id: "split", status: "completed", logFile });
+    const tool = transcript.entries.find((entry) => entry.kind === "tool");
+
+    expect(transcript.entries).toHaveLength(40);
+    expect(transcript.hasMore).toBe(true);
+    expect(tool).toMatchObject({
+      id: "split-read",
+      args: { path: "src/split.ts" },
+      result: { output: "split body" },
+      status: "completed",
+    });
+  });
+
   it("tails a live JSONL file and refreshes when it grows", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-transcript-"));
     temporaryDirectories.push(directory);

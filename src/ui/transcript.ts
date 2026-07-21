@@ -3,6 +3,7 @@ import { readJsonlPageFromDescriptor } from "../log-tail.js";
 import type { FabricLogLine } from "../subagents/types.js";
 
 const PAGE_LINES = 40;
+const TOOL_LIFECYCLE_CONTEXT_LINES = PAGE_LINES * 4;
 const MAX_PAGE_BYTES = 512 * 1024;
 const MAX_CACHE_ENTRIES = 32;
 const FORWARD_READ_CHUNK_BYTES = 64 * 1024;
@@ -723,6 +724,85 @@ const parsedEvents = (lines: FabricLogLine[]): Array<Record<string, unknown>> =>
     .map((line) => recordOf(line.parsed) ?? parseRaw(line.raw))
     .filter((event): event is Record<string, unknown> => event !== undefined);
 
+interface ToolLifecycleStart {
+  id: string;
+  event: Record<string, unknown>;
+}
+
+const normalizedToolStarts = (event: Record<string, unknown>): ToolLifecycleStart[] => {
+  if (
+    event.type === "tool_execution_start" &&
+    typeof event.toolCallId === "string"
+  ) {
+    return [{ id: event.toolCallId, event }];
+  }
+
+  const starts: ToolLifecycleStart[] = [];
+  const appendContentStarts = (
+    content: unknown,
+    type: "toolCall" | "tool_use",
+  ): void => {
+    if (!Array.isArray(content)) return;
+    for (const value of content) {
+      const part = recordOf(value);
+      if (part?.type !== type || typeof part.id !== "string") continue;
+      const name = typeof part.name === "string" ? part.name : "tool";
+      starts.push({
+        id: part.id,
+        event: {
+          type: "tool_execution_start",
+          toolCallId: part.id,
+          toolName: name,
+          args: type === "toolCall" ? part.arguments : part.input,
+        },
+      });
+    }
+  };
+
+  if (event.type === "message") {
+    const message = recordOf(event.message);
+    if (message?.role === "assistant") appendContentStarts(message.content, "toolCall");
+  } else if (event.type === "assistant") {
+    const message = recordOf(event.message);
+    if (message?.role === "assistant") appendContentStarts(message.content, "tool_use");
+  }
+  return starts;
+};
+
+const toolLifecycleEndIds = (event: Record<string, unknown>): string[] => {
+  if (event.type === "tool_execution_end" && typeof event.toolCallId === "string") {
+    return [event.toolCallId];
+  }
+  if (event.type === "message") {
+    const message = recordOf(event.message);
+    return message?.role === "toolResult" && typeof message.toolCallId === "string"
+      ? [message.toolCallId]
+      : [];
+  }
+  if (event.type !== "user") return [];
+  const message = recordOf(event.message);
+  if (!Array.isArray(message?.content)) return [];
+  return message.content.flatMap((value) => {
+    const part = recordOf(value);
+    return part?.type === "tool_result" && typeof part.tool_use_id === "string"
+      ? [part.tool_use_id]
+      : [];
+  });
+};
+
+const missingToolStartIds = (events: Array<Record<string, unknown>>): Set<string> => {
+  const active = new Set<string>();
+  const missing = new Set<string>();
+  for (const event of events) {
+    for (const start of normalizedToolStarts(event)) active.add(start.id);
+    for (const id of toolLifecycleEndIds(event)) {
+      if (active.has(id)) active.delete(id);
+      else missing.add(id);
+    }
+  }
+  return missing;
+};
+
 interface ForwardTranscriptPage {
   lines: FabricLogLine[];
   end: number;
@@ -912,6 +992,7 @@ export class AgentTranscriptReader {
       const pageStart = page.lines[0]?.offset;
       if (pageStart === undefined) return false;
       const state = this.#stateForPage(
+        descriptor,
         stat,
         completeEnd,
         page.lines,
@@ -946,6 +1027,7 @@ export class AgentTranscriptReader {
       const page = readForwardPage(descriptor, cached.pageEnd, completeEnd);
       if (page.lines.length === 0 || page.end <= cached.pageEnd) return false;
       const state = this.#stateForPage(
+        descriptor,
         stat,
         completeEnd,
         page.lines,
@@ -1007,6 +1089,7 @@ export class AgentTranscriptReader {
       MAX_PAGE_BYTES,
     );
     return this.#stateForPage(
+      descriptor,
       stat,
       completeEnd,
       page.lines,
@@ -1017,6 +1100,7 @@ export class AgentTranscriptReader {
   }
 
   #stateForPage(
+    descriptor: number,
     stat: fs.Stats,
     completeEnd: number,
     lines: FabricLogLine[],
@@ -1024,8 +1108,29 @@ export class AgentTranscriptReader {
     pageEnd: number,
     hasMore: boolean,
   ): CachedTranscript {
+    const events = parsedEvents(lines);
+    const missingStarts = missingToolStartIds(events);
+    const lifecycleContext: Array<Record<string, unknown>> = [];
+    if (missingStarts.size > 0 && pageStart > 0) {
+      const contextPage = readJsonlPageFromDescriptor(
+        descriptor,
+        TOOL_LIFECYCLE_CONTEXT_LINES,
+        pageStart,
+        stat.size,
+        MAX_PAGE_BYTES,
+      );
+      const contextEvents = parsedEvents(contextPage.lines);
+      for (let index = contextEvents.length - 1; index >= 0 && missingStarts.size > 0; index--) {
+        const starts = normalizedToolStarts(contextEvents[index]!);
+        for (let startIndex = starts.length - 1; startIndex >= 0; startIndex--) {
+          const start = starts[startIndex]!;
+          if (!missingStarts.delete(start.id)) continue;
+          lifecycleContext.unshift(start.event);
+        }
+      }
+    }
     const accumulator = new TranscriptAccumulator();
-    accumulator.append(parsedEvents(lines));
+    accumulator.append([...lifecycleContext, ...events]);
     const transcript = {
       ...accumulator.snapshot(hasMore, stat.mtimeMs, Number.MAX_SAFE_INTEGER),
       hasNewer: pageEnd < completeEnd,

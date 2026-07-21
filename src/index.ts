@@ -50,6 +50,7 @@ import {
   restoreFabricWritePreviews,
   restoreLegacyBashCommands,
   safeTerminalText,
+  singleCallProgressLine,
   type FabricAgentPreview,
   type FabricCallHeadlinePreview,
   type FabricCoreToolPreview,
@@ -376,6 +377,13 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
                   ? theme.fg("error", "✗")
                   : theme.fg("dim", "›");
             let text = `${glyph} ${nestedCallTitle(audit, theme, context?.invalidate, corePreviewContext)}`;
+            const nested = renderNestedAgentToolLines(audit, theme, {
+              expanded,
+              showTools: showNestedToolCalls,
+              core: corePreviewContext,
+              ...(context?.invalidate ? { invalidate: context.invalidate } : {}),
+            });
+            const progressLine = singleCallProgressLine(progress, nested);
             if (audit.success === false && audit.error) {
               text += nl + `  ${theme.fg("error", safeTerminalText(audit.error))}`;
             } else {
@@ -395,16 +403,10 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
                 !coreToolPreviewEnabled(audit, codePreviewSettings)
               ) {
                 text += nl + theme.fg("muted", "╰─ ") + expandHint(theme);
-              } else if (progress) {
-                text += nl + theme.fg("dim", safeTerminalText(progress));
+              } else if (progressLine) {
+                text += nl + theme.fg("dim", progressLine);
               }
             }
-            const nested = renderNestedAgentToolLines(audit, theme, {
-              expanded,
-              showTools: showNestedToolCalls,
-              core: corePreviewContext,
-              ...(context?.invalidate ? { invalidate: context.invalidate } : {}),
-            });
             if (audit.success !== false && nested[0]) {
               const firstBreak = text.indexOf(nl);
               if (firstBreak < 0) text += ` ${nested[0]}`;
