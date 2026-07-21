@@ -68,4 +68,4 @@ const actor = await agents.create({
 return { started: true, actor };
 ```
 
-Reuse updates instructions/events/delivery. Recreate for runner, `responseMode`, or `coalesce`; use dashboard/recreation for model changes. Report ID, warnings, and messages/stop commands; do not wait.
+Reuse updates instructions/events/delivery. Recreate for runner, `responseMode`, or `coalesce`; use dashboard/recreation for model. Report ID/warnings and messages/stop; do not wait.
