@@ -27,4 +27,16 @@ describe("fabric-exec skill provider contracts", () => {
     expect(skill).toContain("mcp.<sanitized_server>.<sanitized_tool>(args)` resolves to");
     expect(skill).toContain("extensions.<tool>(args)` in full code mode resolves to");
   });
+
+  it("keeps detailed execution caveats in the progressive skill", () => {
+    const skill = fs.readFileSync("skills/fabric-exec/SKILL.md", "utf8");
+    const extension = fs.readFileSync("src/index.ts", "utf8");
+
+    expect(skill).toContain("string containing literal `${...}`");
+    expect(skill).toContain("Omit `timeoutMs` for subagents and actors");
+    expect(extension).not.toContain("Shorthands (all accepted)");
+    expect(extension).not.toContain("mcp.fal_ai.get_model_schema");
+    expect(extension).not.toContain("For subagents and actors, omit timeoutMs");
+    expect(extension).not.toContain("FABRIC_TEMPLATE_LITERAL_CAVEAT");
+  });
 });

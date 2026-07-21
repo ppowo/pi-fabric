@@ -101,13 +101,6 @@ const FABRIC_SKILLS_DIR = path.resolve(
   "skills",
 );
 
-// Appended to the system prompt each agent run. Lives in the system prompt
-// (the most cache-stable prefix), not the tool schema — applyFabricMode()
-// re-registers the tool on several lifecycle events, so the system prompt is
-// the more reliable cached surface for persistent guidance.
-const FABRIC_TEMPLATE_LITERAL_CAVEAT =
-  "Caveat: when a fabric_exec program builds a string containing literal `${...}` (shell snippets, tool args, grep patterns), avoid TS template literals — TS interpolates `${var}` into a 'Cannot find name' type error, or substitutes silently if a same-named variable exists. Use a plain quoted string or pass the content via the `strings` param and reference it as `π.key`.";
-
 const countLabel = (count: number, singular: string): string =>
   `${count} ${count === 1 ? singular : `${singular}s`}`;
 
@@ -1000,9 +993,6 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
       ? state.config.schema.mode
       : DEFAULT_FABRIC_CONFIG.schema.mode;
     const effectiveFullCodeMode = fullCodeMode || schemaMode === "enforce";
-    const subagentTimeoutMs = state.initialized
-      ? state.config.subagents.timeoutMs
-      : DEFAULT_FABRIC_CONFIG.subagents.timeoutMs;
     if (!pi.getActiveTools().includes("fabric_exec")) return;
     const skills = event.systemPromptOptions.skills ?? [];
     // Pi omits its entire skill catalog when the active tool set lacks a tool
@@ -1018,15 +1008,13 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
       ? buildSkillReferenceGuidance(event.prompt, skills)
       : undefined;
     const guidance = (effectiveFullCodeMode
-      ? "Pi Fabric full code mode: `fabric_exec` is the only way to call Pi core tools — use them as `pi.*` inside `code`.\nReturns: `pi.read`/`pi.grep`/`pi.find`/`pi.ls` → string; `pi.bash`/`pi.edit`/`pi.write` → `{ok, output, details}` (read `.output`).\nExamples: `pi.read('/x')` · `pi.bash({cmd:'ls'})` · `pi.grep('TODO','src')` · `pi.grep({regex:'TODO', ic:true, ctx:2})` · `pi.find('*.ts','src')` · `pi.edit({path:'/x', old:'a', new:'b'})` · `pi.write({path:'/y', text:'z'})` · `pi.ls('src')`.\nShorthands (all accepted): `cmd`/`shell`→command · `query`/`regex`/`search`→pattern · `file`/`dir`→path · `ic`→ignoreCase · `ctx`→context · `max`→limit · `start`→offset · `old`→oldText · `new`/`replacement`→newText · `text`/`contents`→content · `timeoutMs`→timeout.\n`tools` is discovery + generic calls only (`providers`/`list`/`search`/`describe`/`call`/`models`). Call known MCP tools as `mcp.<sanitized_server>.<sanitized_tool>(args)` (for example `mcp.fal_ai.get_model_schema(...)`), captured tools as `extensions.<tool>(args)`, and stable providers as `memory.*`, `state.*`, `schema.*`, or `compact.*`. Use `tools.call({ref,args})` for computed refs. `pi` is the core tools; `π.<key>` is named strings (not a tool)."
+      ? "Pi Fabric full code mode: `fabric_exec` is the only way to call Pi core tools — use them as `pi.*` inside `code`.\nExamples and returns: `pi.read('/x')`, `pi.grep('TODO','src')` / `pi.grep({regex:'TODO', ic:true, ctx:2})`, `pi.find('*.ts','src')`, and `pi.ls('src')` return strings; `pi.bash({cmd:'ls'})`, `pi.edit({path:'/x', old:'a', new:'b'})`, and `pi.write({path:'/y', text:'z'})` return `{ok, output, details}` (read `.output`).\n`tools` is discovery + generic calls only (`providers`/`list`/`search`/`describe`/`call`/`models`). Call known MCP tools as `mcp.<sanitized_server>.<sanitized_tool>(args)`, captured tools as `extensions.<tool>(args)`, and stable providers as `memory.*`, `state.*`, `schema.*`, or `compact.*`. Use `tools.call({ref,args})` for computed refs. `pi` is the core tools; `π.<key>` is named strings (not a tool)."
       : "Pi Fabric is in orchestration-only mode. Pi core and registered extension tools stay on their native direct execution path; inside fabric_exec, `pi.*` and `extensions.*` are unavailable. Call known actions through `mcp.<sanitized_server>.<sanitized_tool>(args)`, `memory.*`, `state.*`, `schema.*`, `compact.*`, `agents.*`, or `mesh.*`; use `tools.search`/`describe`/`list` for discovery and `tools.call({ref,args})` for computed refs. Other surfaces are opt-in via user-loaded skills.")
-      + `\n\nFor subagents and actors, omit timeoutMs unless requesting longer than the configured ${subagentTimeoutMs}ms default (60 minutes by default). Per-call values below the configured default are ignored.`
       + (schemaMode === "enforce"
         ? "\n\nSchema enforce mode is fixed for this session. Reads remain available, but protected-workspace changes must use schema.hypothesize → schema.verify → schema.commit in the same fabric_exec invocation. Direct pi.edit/write/bash, agents, state/mesh writes, compaction requests, MCP, extensions, and external providers are blocked by the host gate."
         : schemaMode === "audit"
           ? "\n\nSchema audit mode reports actions that enforce mode would block, but preserves their current behavior."
           : "")
-      + "\n\n" + FABRIC_TEMPLATE_LITERAL_CAVEAT
       + (skillReferenceGuidance ? `\n\n${skillReferenceGuidance}` : "");
     return {
       systemPrompt: `${systemPrompt}\n\n${guidance}`,

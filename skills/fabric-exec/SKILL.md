@@ -29,6 +29,8 @@ One type-checked TS program in a fresh executor (isolated QuickJS by default). O
 
 Aliases (normalized to canonical before the host validates args): `cmd`/`shell`/`cmdline`→`command`, `timeoutMs`→`timeout`; `query`/`regex`/`search`→`pattern`; `ic`/`caseInsensitive`→`ignoreCase`; `globPattern`→`glob`; `ctx`→`context`; `max`→`limit`; `file`/`dir`→`path`; `start`→`offset`; `old`→`oldText`; `new`/`replacement`→`newText`; `contents`/`body`/`text`→`content`. Misspelled keys still fail the excess-property type check.
 
+When a program needs a string containing literal `${...}` (shell snippets, tool arguments, or grep patterns), do not use a TypeScript template literal: TypeScript will interpolate it. Use a plain quoted string or pass the content through `strings` and read it from `π.key`.
+
 ## First-class provider calls
 Use direct proxies when the action is known. No-argument actions such as `schema.status()`, `state.get()`, and `compact.status()` take no options object. Provider calls still cross the same registry validation, approval, audit, timeout, and cancellation path as generic calls.
 
@@ -78,3 +80,5 @@ Multi-agent orchestration is opt-in: load `/skill:fabric-workflow`, `/skill:fabr
 `agents.main()` returns the dashboard-owning root Pi session; `agents.peers()` lists other live root sessions in the shared project mesh as `Peer <session-prefix>` targets. Peers support `agents.steer()` and `agents.followUp()` by exact id.
 
 Agent requests and persistent actors accept `runner: "pi" | "claude"`. Pi is the default and is required for `recursive: true`, `rlm.query()`, and actors that must call Fabric or mesh APIs themselves. Claude invokes the official `claude -p` harness; it supports mapped Claude Code tools and host-managed persistent actors, but not recursive/direct Fabric APIs. Use `agents.models({ runner: "claude" })` for runtime-enumerated `claude/<value>` model keys.
+
+Omit `timeoutMs` for subagents and actors unless requesting longer than the configured `subagents.timeoutMs` (60 minutes by default). Per-call values below the configured default are ignored.
