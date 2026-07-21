@@ -1,5 +1,8 @@
 import fs from "node:fs";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { GUEST_TYPE_DECLARATIONS } from "../src/runtime/guest-types.js";
+import { typeCheckFabricCode } from "../src/runtime/type-checker.js";
 
 const stableProviderActions = {
   memory: ["recall", "expand", "sessions"],
@@ -47,7 +50,7 @@ describe("fabric-exec skill provider contracts", () => {
     );
     expect(setup).toContain("agents.create({");
     expect(setup).toContain("agents.setDeliveryPolicy({");
-    expect(setup).toContain("pass an empty string when unset");
+    expect(setup).toContain("empty string when unset");
 
     const profiles = {
       "fabric-advisor": "../fabric-ambient/references/setup.md",
@@ -69,5 +72,62 @@ describe("fabric-exec skill provider contracts", () => {
       .toContain("request credentials");
     expect(fs.readFileSync("skills/fabric-ambient/SKILL.md", "utf8"))
       .toContain("request credentials");
+  });
+
+  it("type-checks every TypeScript-fenced skill program", () => {
+    const skillFiles = fs.readdirSync("skills", { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => path.join("skills", entry.name, "SKILL.md"))
+      .filter((file) => fs.existsSync(file));
+    skillFiles.push("skills/fabric-ambient/references/setup.md");
+
+    for (const file of skillFiles) {
+      const markdown = fs.readFileSync(file, "utf8");
+      const blocks = [...markdown.matchAll(/```ts\n([\s\S]*?)\n```/g)];
+      for (const [index, match] of blocks.entries()) {
+        const code = match[1]!;
+        const result = typeCheckFabricCode(code, GUEST_TYPE_DECLARATIONS);
+        expect(result.errors, `${file} TypeScript block ${index + 1}`).toEqual([]);
+        for (const key of code.matchAll(/π\.([a-zA-Z_][a-zA-Z0-9_]*)/g)) {
+          expect(markdown, `${file} does not document strings.${key[1]}`)
+            .toContain(`strings.${key[1]}`);
+        }
+      }
+    }
+  });
+
+  it("resolves every relative Markdown reference in a skill", () => {
+    for (const entry of fs.readdirSync("skills", { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const file = path.join("skills", entry.name, "SKILL.md");
+      if (!fs.existsSync(file)) continue;
+      const markdown = fs.readFileSync(file, "utf8");
+      for (const match of markdown.matchAll(/`((?:\.\.?\/)+[^`]+\.md)`/g)) {
+        const resolved = path.resolve(path.dirname(file), match[1]!);
+        expect(fs.existsSync(resolved), `${file} -> ${match[1]}`).toBe(true);
+      }
+    }
+  });
+
+  it("retains each specialized skill's execution invariants", () => {
+    const required: Record<string, string[]> = {
+      "fabric-advisor": ["agent_settled", "tool_error", "`strings.triggerTurn`: `false`", "action\":\"silent"],
+      "fabric-ambient": ["supervisor", "advisor", "triggerTurn=true", "triggerTurn=false"],
+      "fabric-council": ["council.run", "synthesize: true", "material disagreement"],
+      "fabric-exec": ["read, describe, retry", "tools.describe", "timeoutMs", "literal `${...}`"],
+      "fabric-fusion": ["1–8 model panel", "tools.models()", "agents.models", "blind_spots", "non-recursive"],
+      "fabric-rlm": ["strings.task", "rlm.query", "best-effort whole-tree spend guard", "budget.remaining()", "not inherited"],
+      "fabric-schema": ["one same-`fabric_exec`", "Evidence is not proof", "quarantined", "not transactional"],
+      "fabric-supervisor": ["agent_settled", "tool_error", "`strings.triggerTurn`: `true`", "Goal verified complete"],
+      "fabric-swarm": ["ifVersion: 0", "observed version", "CAS-unblock dependents", "\"blocked\"", "agents.tell"],
+      "fabric-workflow": ["parallel(thunks", "pipeline(items", "worktree: true", "verifier"],
+    };
+
+    for (const [name, signals] of Object.entries(required)) {
+      const skill = fs.readFileSync(`skills/${name}/SKILL.md`, "utf8");
+      for (const signal of signals) {
+        expect(skill, `${name} lost signal: ${signal}`).toContain(signal);
+      }
+    }
   });
 });

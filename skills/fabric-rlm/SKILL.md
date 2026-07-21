@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # Fabric Recursive Decomposition
 
-Use recursion for context size, not mere difficulty. If the relevant material fits one context, work directly. Otherwise use one `fabric_exec` program to size up → orient → delegate bounded chunks → combine.
+Use recursion for context size, not mere difficulty. If the relevant material fits one context, work directly. Otherwise pass the root task as `strings.task` and use one `fabric_exec` program to size up → orient → delegate bounded chunks → combine.
 
 `rlm.query()` is `agents.run({ runner: "pi", recursive: true })`: each child gets a fresh context and may recurse up to `subagents.maxDepth`. Use plain `agent()` for leaves that do not need recursion.
 
@@ -54,6 +54,6 @@ Guardrails:
 
 - Size scope before spawning; deeper children should make fewer calls and act more directly.
 - Partition edit ownership by path or use `worktree: true`; concurrent children must not edit the same files.
-- `maxDepth`, `maxPerExecution`, `budgetUsd`, and top-level token/agent budgets bound the tree. Concurrent children can slightly overshoot a best-effort spend check.
-- Initial approval delegates only agent risk; network, execution, and write approvals are not inherited.
-- Stop spawning when a returned budget summary is low. Redirect a valuable drifting child with `agents.steer` rather than discarding its context.
+- `subagents.maxDepth` bounds each branch. The shared `subagents.budgetUsd` ledger is a best-effort whole-tree spend guard, not a hard cap; concurrent branches can overshoot its pre-spawn check. `maxPerExecution` and top-level `agentBudget` cap calls only in the current process.
+- `budget.remaining()` reports the current execution's token budget from completed usage; it does not expose agent-call or USD budget. Concurrent fan-out can overshoot that observation, so dispatch sequentially or in checked batches when the token ceiling matters.
+- Initial approval delegates only agent risk; network, execution, and write approvals are not inherited. Redirect a valuable drifting child with `agents.steer` rather than discarding its context.

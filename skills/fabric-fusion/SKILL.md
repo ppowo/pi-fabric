@@ -8,7 +8,7 @@ disable-model-invocation: true
 
 Use one `fabric_exec` call for a 1–8 model panel followed by one judge. The judge compares rather than merges responses; return its structured analysis so the caller writes the final answer. Use fusion for model-diverse research or critique, not tactical work or a lookup.
 
-Pass every key through `strings`: `task`; `panel` as JSON `Array<{ model, label? }>`; and optional `judge`, `tools`, `thinking` as empty strings when unset. Labels are attribution only. Tools default to `read`, `grep`, `find`, `ls`, and `bash`; thinking defaults to configured subagent thinking.
+Pass every key: `strings.task`; JSON `strings.panel` as `Array<{ model, label? }>`; and optional `strings.judge`, `strings.tools`, and `strings.thinking` as empty strings when unset. Labels are attribution only. Tools default to `read`, `grep`, `find`, `ls`, and `bash`; thinking defaults to configured subagent thinking.
 
 ```ts
 type FusionAnalysis = {

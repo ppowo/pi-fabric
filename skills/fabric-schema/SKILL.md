@@ -55,9 +55,9 @@ return schema.commit({
 
 Any missing, stale, failed, timed-out, cancelled, or workspace-changing evidence voids the plan. Never invent trusted-command shell text or arguments: names resolve to static host configuration.
 
-The certificate is random, single-use, invocation-bound, and tied to the hypothesis, state head/version, workspace fingerprint, and generation. Do not return it for later use. If stopping after verification, call:
+The certificate is random, single-use, invocation-bound, and tied to the hypothesis, state head/version, workspace fingerprint, and generation. Do not return it for later use. If stopping after verification, call this with the values from that verification:
 
-```ts
+```text
 await schema.abort({
   hypothesisId: hypothesis.hypothesisId,
   certificate: verification.certificate,
@@ -91,4 +91,4 @@ const verification = await state.verify();
 if (!verification.certified) return { void: true, transition, verification };
 ```
 
-This is workflow discipline, not enforcement. See `docs/schema-enforcement.md` for the guarantee and recovery model, and `docs/state-layer.md` for the labeled timeline.
+This is workflow discipline, not enforcement. See `../../docs/schema-enforcement.md` for the guarantee and recovery model, and `../../docs/state-layer.md` for the labeled timeline.

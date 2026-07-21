@@ -14,12 +14,17 @@ Build from Fabric primitives; do not install a messenger or swarm extension.
 
 Choose a short run key and topic such as `team.auth-migration`. Store tasks under `runs/<run>/tasks/<id>` with `ifVersion: 0`; include `title`, `status`, `owner`, `dependencies`, `progress`, and `result`.
 
-Actor instructions must require workers to read and CAS-claim a task, stop after a failed claim, publish progress, CAS-update blocked/completed state, direct questions with `mesh.publish({ topic, to, ... })`, respect path ownership, and emit directives only for blockers or final results.
+Actor instructions must require workers to verify every dependency task is complete, claim only `ready` work with `ifVersion` equal to the observed version, stop after a failed claim, publish progress, update blocked/completed state with the version returned by the preceding successful read/write, CAS-unblock dependents only after all their dependencies complete, direct questions with `mesh.publish({ topic, to, ... })`, respect path ownership, and emit directives only for blockers or final results.
 
 ```ts
 const run = π.run;
 const topic = `team.${run}`;
-const tasks = JSON.parse(π.tasks) as Array<{ id: string; title: string; detail: string }>;
+const tasks = JSON.parse(π.tasks) as Array<{
+  id: string;
+  title: string;
+  detail: string;
+  dependencies?: string[];
+}>;
 const roles = JSON.parse(π.roles) as Array<{ name: string; instructions: string }>;
 
 await workflow.configure({
@@ -30,7 +35,14 @@ await phase("Seed tasks", { total: tasks.length });
 for (const task of tasks) {
   await mesh.put({
     key: `runs/${run}/tasks/${task.id}`,
-    value: { ...task, status: "ready", owner: null, progress: [], result: null },
+    value: {
+      ...task,
+      dependencies: task.dependencies ?? [],
+      status: (task.dependencies?.length ?? 0) > 0 ? "blocked" : "ready",
+      owner: null,
+      progress: [],
+      result: null,
+    },
     ifVersion: 0,
   });
 }
@@ -65,4 +77,4 @@ await mesh.publish({
 return { run, topic, actors, taskPrefix: `runs/${run}/tasks/` };
 ```
 
-Pass tasks and role instructions through `strings`. Keep coordination pull-based: inspect topic history, task state, and mailboxes at decision points rather than polling continuously inside one execution. Partition file ownership. Use `agents.steer` only for a running one-shot worker; persistent actors receive `tell`/`ask` mail.
+Pass the run key as `strings.run`, tasks as JSON `strings.tasks`, and role instructions as JSON `strings.roles`. Keep coordination pull-based: inspect topic history, task state, and mailboxes at decision points rather than polling continuously inside one execution. Partition file ownership. Use `agents.steer` only for a running one-shot worker; persistent actors receive `tell`/`ask` mail.
