@@ -6,6 +6,7 @@
 // file named by FAKE_PI_STEER_LOG so tests can assert the worker forwarded them,
 // and emits queue_update events so the worker surfaces pendingMessages.
 import fs from "node:fs";
+import readline from "node:readline";
 
 const send = (event) => process.stdout.write(JSON.stringify(event) + "\n");
 const recordPath = process.env.FAKE_PI_STEER_LOG;
@@ -14,15 +15,14 @@ const record = (entry) => {
 };
 
 let prompted = false;
-process.stdin.on("data", (chunk) => {
-  for (const raw of chunk.toString("utf8").split("\n")) {
-    const line = raw.trim();
-    if (!line) continue;
+const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+input.on("line", (line) => {
+    if (!line.trim()) return;
     let command;
     try {
       command = JSON.parse(line);
     } catch {
-      continue;
+      return;
     }
     if (command.type === "prompt" && !prompted) {
       prompted = true;
@@ -63,7 +63,6 @@ process.stdin.on("data", (chunk) => {
       });
       send({ type: "response", id: command.id, command: "compact", success: true });
     }
-  }
 });
 process.stdin.on("end", () => setTimeout(() => process.exit(0), 5));
 process.stdin.resume();

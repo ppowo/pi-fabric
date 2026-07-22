@@ -8,11 +8,15 @@ type AsyncFunctionConstructor = new (...args: string[]) => AsyncCallable;
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as AsyncFunctionConstructor;
 
-function markdownProgram(file: string): string {
-  const markdown = fs.readFileSync(file, "utf8");
-  const match = markdown.match(/```ts\n([\s\S]*?)\n```/);
+function extractMarkdownProgram(markdown: string, file: string): string {
+  const normalized = markdown.replace(/\r\n?/g, "\n");
+  const match = normalized.match(/```ts\n([\s\S]*?)\n```/);
   if (!match) throw new Error(`No TypeScript program in ${file}`);
   return match[1]!;
+}
+
+function markdownProgram(file: string): string {
+  return extractMarkdownProgram(fs.readFileSync(file, "utf8"), file);
 }
 
 async function runProgram(file: string, context: Context): Promise<Record<string, unknown>> {
@@ -38,6 +42,11 @@ const parallel = async (thunks: Array<() => Promise<unknown>>) => Promise.all(
 );
 
 describe("expensive skill program behavior", () => {
+  it("extracts TypeScript programs from CRLF Markdown", () => {
+    expect(extractMarkdownProgram("before\r\n```ts\r\nreturn 42;\r\n```\r\n", "fixture.md"))
+      .toBe("return 42;");
+  });
+
   it("keeps successful council roles without returning raw reports after synthesis", async () => {
     const calls: string[] = [];
     const result = await runSkill("fabric-council", {

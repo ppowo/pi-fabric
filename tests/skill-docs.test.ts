@@ -167,8 +167,10 @@ describe("fabric-exec skill provider contracts", () => {
 
   it("packs every skill and required progressive reference", () => {
     const packed = JSON.parse(execFileSync(
-      "npm",
-      ["pack", "--ignore-scripts", "--dry-run", "--json"],
+      process.platform === "win32" ? process.env.ComSpec ?? "cmd.exe" : "npm",
+      process.platform === "win32"
+        ? ["/d", "/s", "/c", "npm", "pack", "--ignore-scripts", "--dry-run", "--json"]
+        : ["pack", "--ignore-scripts", "--dry-run", "--json"],
       { cwd: process.cwd(), encoding: "utf8" },
     )) as Array<{ files: Array<{ path: string }> }>;
     const files = new Set(packed[0]!.files.map((entry) => entry.path));

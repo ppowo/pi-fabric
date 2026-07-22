@@ -71,6 +71,7 @@
   },
   "dependencies": {
     "@jitl/quickjs-singlefile-mjs-release-sync": "^0.32.0",
+    "cross-spawn": "^7.0.6",
     "diff": "^8.0.4",
     "mcporter": "^0.12.3",
     "pi-code-previews": "^0.1.36",
@@ -87,6 +88,7 @@
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.80.6",
     "@earendil-works/pi-tui": "0.80.6",
+    "@types/cross-spawn": "^6.0.6",
     "@types/node": "^25.0.0",
     "knip": "^6.26.0",
     "vitest": "^4.1.0"

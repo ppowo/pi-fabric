@@ -147,8 +147,10 @@ describe("memory cache V5", () => {
     expect(digest).not.toHaveProperty("goalLine");
     expect(digest.vocabulary as string[]).toContain("rarelexeme_000");
     expect(directorySize(indexDir)).toBeLessThan(10 * 1024 * 1024);
-    expect(fs.statSync(indexDir).mode & 0o777).toBe(0o700);
-    expect(fs.statSync(digestPathForSession(oldest, indexDir)).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") {
+      expect(fs.statSync(indexDir).mode & 0o777).toBe(0o700);
+      expect(fs.statSync(digestPathForSession(oldest, indexDir)).mode & 0o777).toBe(0o600);
+    }
   }, 30_000);
 
   it("paginates no-query browsing without a pre-pagination session cap while query coverage is complete", async () => {

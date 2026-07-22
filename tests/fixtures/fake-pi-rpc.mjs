@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import readline from "node:readline";
+
 const send = (event) => {
   process.stdout.write(`${JSON.stringify(event)}\n`);
 };
@@ -40,11 +42,11 @@ const finishAttempt = (message, willRetry) => {
 };
 
 let started = false;
-process.stdin.on("data", (chunk) => {
-  if (started) return;
+const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+input.on("line", (line) => {
+  if (started || !line.trim()) return;
   started = true;
-  const line = chunk.toString("utf8").split("\n").find((value) => value.trim());
-  const command = line ? JSON.parse(line) : {};
+  const command = JSON.parse(line);
   const task = typeof command.message === "string" ? command.message : "";
 
   send({ type: "response", command: "prompt", success: true });

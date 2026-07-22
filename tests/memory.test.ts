@@ -197,7 +197,9 @@ describe("memory discovery", () => {
   };
 
   it("encodeCwdDir matches pi's encoding shape", () => {
-    expect(encodeCwdDir("/home/user/project")).toBe("--home-user-project--");
+    const cwd = path.resolve(path.sep, "home", "user", "project");
+    const encoded = cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-");
+    expect(encodeCwdDir(cwd)).toBe(`--${encoded}--`);
   });
 
   it("project scope lists all sessions for the cwd dir", () => {

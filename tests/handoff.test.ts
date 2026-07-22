@@ -120,7 +120,9 @@ describe("trajectory handoff sessions", () => {
     expect(JSON.stringify(messages)).not.toContain("fabric_nested_");
     expect(source.getLeafId()).toBe(activeEntryId);
     expect(source.buildSessionContext().messages.at(-1)?.role).toBe("assistant");
-    expect(fs.statSync(sessionFile).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") {
+      expect(fs.statSync(sessionFile).mode & 0o777).toBe(0o600);
+    }
   });
 
   it("materializes an in-memory source with the complete outer boundary", () => {

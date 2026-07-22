@@ -1,6 +1,18 @@
+import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import path from "node:path";
+import crossSpawn from "cross-spawn";
 import type { FabricThinking } from "../thinking.js";
+
+const NODE_SCRIPT_EXTENSIONS = new Set([".js", ".cjs", ".mjs", ".ts", ".cts", ".mts"]);
+
+const spawnCli = (
+  command: string,
+  args: readonly string[],
+  options: SpawnOptions,
+): ChildProcess => NODE_SCRIPT_EXTENSIONS.has(path.extname(command).toLowerCase())
+  ? crossSpawn(process.execPath, [command, ...args], options)
+  : crossSpawn(command, [...args], options);
 
 const MODEL_DISCOVERY_TIMEOUT_MS = 10_000;
 const MODEL_DISCOVERY_MAX_CHARS = 2_000_000;
@@ -152,7 +164,7 @@ export const discoverClaudeModels = async (
 ): Promise<ClaudeModelInfo[]> =>
   new Promise<ClaudeModelInfo[]>((resolve, reject) => {
     const requestId = `fabric-models-${randomUUID()}`;
-    const child = spawn(
+    const child = spawnCli(
       binary,
       [
         "-p",

@@ -154,7 +154,7 @@ export const snapshotWorkspace = (cwdInput: string, excludedRoots: string[] = []
       exclusions,
     );
   }
-  if (fs.realpathSync(topLevel) !== cwd) {
+  if (path.relative(cwd, fs.realpathSync(topLevel)) !== "") {
     throw new Error("Schema enforce mode requires cwd to be the Git worktree root");
   }
   let head: string | null = null;

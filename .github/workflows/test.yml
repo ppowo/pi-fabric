@@ -24,6 +24,9 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Type check
         run: pnpm typecheck
+      - name: Test Windows type-checker regression
+        if: runner.os == 'Windows'
+        run: pnpm exec vitest run tests/type-checker.test.ts
       - name: Test
         run: pnpm test
       - name: Lint (dead code)

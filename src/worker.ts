@@ -2,7 +2,8 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess, SpawnOptions } from "node:child_process";
+import crossSpawn from "cross-spawn";
 import { StringDecoder } from "node:string_decoder";
 import { Value } from "typebox/value";
 import type {
@@ -11,6 +12,16 @@ import type {
   SubagentUsage,
   SubagentWorkerOptions,
 } from "./subagents/types.js";
+
+const NODE_SCRIPT_EXTENSIONS = new Set([".js", ".cjs", ".mjs", ".ts", ".cts", ".mts"]);
+
+const spawnCli = (
+  command: string,
+  args: readonly string[],
+  options: SpawnOptions,
+): ChildProcess => NODE_SCRIPT_EXTENSIONS.has(path.extname(command).toLowerCase())
+  ? crossSpawn(process.execPath, [command, ...args], options)
+  : crossSpawn(command, [...args], options);
 
 type ClaudeCliModule = typeof import("./subagents/claude-cli.js");
 type CompactControlModule = typeof import("./subagents/compact-control.js");
@@ -365,7 +376,7 @@ const main = async (): Promise<void> => {
       : piArguments;
   const childBinary = options.runner === "claude" ? options.claudeBinary : options.piBinary;
 
-  const child = spawn(childBinary, childArguments, {
+  const child = spawnCli(childBinary, childArguments, {
     cwd: options.cwd,
     detached: process.platform !== "win32",
     env: {
