@@ -141,9 +141,9 @@ export const snapshotWorkspace = (cwdInput: string, excludedRoots: string[] = []
       }
     })
     .filter((root) => isInside(cwd, root));
-  let topLevel: string;
+  let worktreePrefix: string;
   try {
-    topLevel = git(cwd, ["rev-parse", "--path-format=absolute", "--show-toplevel"])
+    worktreePrefix = git(cwd, ["rev-parse", "--show-prefix"])
       .toString("utf8")
       .trim();
   } catch {
@@ -154,7 +154,7 @@ export const snapshotWorkspace = (cwdInput: string, excludedRoots: string[] = []
       exclusions,
     );
   }
-  if (path.relative(cwd, fs.realpathSync(topLevel)) !== "") {
+  if (worktreePrefix !== "") {
     throw new Error("Schema enforce mode requires cwd to be the Git worktree root");
   }
   let head: string | null = null;
