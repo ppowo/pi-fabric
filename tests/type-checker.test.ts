@@ -1,8 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { GUEST_TYPE_DECLARATIONS, guestTypeDeclarations } from "../src/runtime/guest-types.js";
-import { typeCheckFabricCode } from "../src/runtime/type-checker.js";
+import {
+  normalizeTypeScriptPath,
+  typeCheckFabricCode,
+} from "../src/runtime/type-checker.js";
 
 describe("Fabric guest type checker", () => {
+  it("normalizes Windows paths for TypeScript compiler host comparisons", () => {
+    expect(normalizeTypeScriptPath("C:\\work\\__pi_fabric_guest_1.ts")).toBe(
+      "C:/work/__pi_fabric_guest_1.ts",
+    );
+  });
+
   it("accepts typed Fabric code with top-level return", () => {
     const result = typeCheckFabricCode(
       'const text = await pi.read({ path: "README.md" });\nreturn text.length;',

@@ -39,6 +39,9 @@ const TYPE_CORRECTNESS_CODES = new Set<number>([
 
 let nextCheckerId = 0;
 
+export const normalizeTypeScriptPath = (fileName: string): string =>
+  fileName.replaceAll("\\", "/");
+
 class FabricTypeChecker {
   readonly #guestFile: string;
   readonly #declarationFile: string;
@@ -52,8 +55,10 @@ class FabricTypeChecker {
 
   constructor(readonly declarations: string) {
     const id = ++nextCheckerId;
-    this.#guestFile = path.resolve(`/__pi_fabric_guest_${id}.ts`);
-    this.#declarationFile = path.resolve(`/__pi_fabric_globals_${id}.d.ts`);
+    this.#guestFile = normalizeTypeScriptPath(path.resolve(`/__pi_fabric_guest_${id}.ts`));
+    this.#declarationFile = normalizeTypeScriptPath(
+      path.resolve(`/__pi_fabric_globals_${id}.d.ts`),
+    );
     this.#sourceFile = ts.createSourceFile(
       this.#guestFile,
       "",
@@ -66,20 +71,26 @@ class FabricTypeChecker {
       ts.ScriptTarget.ES2022,
       true,
     );
+    const isGuestFile = (fileName: string): boolean =>
+      this.#baseHost.getCanonicalFileName(normalizeTypeScriptPath(fileName)) ===
+      this.#baseHost.getCanonicalFileName(this.#guestFile);
+    const isDeclarationFile = (fileName: string): boolean =>
+      this.#baseHost.getCanonicalFileName(normalizeTypeScriptPath(fileName)) ===
+      this.#baseHost.getCanonicalFileName(this.#declarationFile);
     this.#host = {
       ...this.#baseHost,
       fileExists: (fileName) =>
-        fileName === this.#guestFile ||
-        fileName === this.#declarationFile ||
+        isGuestFile(fileName) ||
+        isDeclarationFile(fileName) ||
         this.#baseHost.fileExists(fileName),
       readFile: (fileName) => {
-        if (fileName === this.#guestFile) return this.#sourceText;
-        if (fileName === this.#declarationFile) return this.declarations;
+        if (isGuestFile(fileName)) return this.#sourceText;
+        if (isDeclarationFile(fileName)) return this.declarations;
         return this.#baseHost.readFile(fileName);
       },
       getSourceFile: (fileName, languageVersion, onError, shouldCreateNewSourceFile) => {
-        if (fileName === this.#guestFile) return this.#sourceFile;
-        if (fileName === this.#declarationFile) return this.#declarationSource;
+        if (isGuestFile(fileName)) return this.#sourceFile;
+        if (isDeclarationFile(fileName)) return this.#declarationSource;
         const cached = this.#stableFiles.get(fileName);
         if (cached) return cached;
         const source = this.#baseHost.getSourceFile(
