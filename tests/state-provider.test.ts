@@ -269,7 +269,7 @@ describe("StateStore", () => {
         from: "unchecked",
         to: "still-unchecked",
         summary: "long evidence times out",
-        evidence: ["while :; do :; done"],
+        evidence: [`"${process.execPath}" -e "setTimeout(() => {}, 60_000)"`],
       },
       identity,
     );

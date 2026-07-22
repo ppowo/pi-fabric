@@ -999,6 +999,11 @@ export class ActorManager {
 
   #startMeshMonitor(): void {
     if (!this.meshConfig.enabled || this.#closing) return;
+    if (process.platform === "win32") {
+      this.#startPollTimer(this.meshConfig.actorPollMs);
+      this.#scheduleMeshPoll();
+      return;
+    }
     try {
       const watcher = fs.watch(this.mesh.root, { persistent: false }, (_event, filename) => {
         if (filename !== null && path.basename(filename.toString()) !== "events.jsonl") return;
