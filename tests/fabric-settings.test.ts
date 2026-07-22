@@ -1,15 +1,21 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { describe, expect, it, vi } from "vitest";
+import type { CapturedToolCatalog } from "../src/capture/catalog.js";
 import { DEFAULT_FABRIC_CONFIG } from "../src/config.js";
-import type { Theme } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it } from "vitest";
+import type { FabricState } from "../src/fabric-state.js";
+import type { ModelSource } from "../src/ui/model-picker.js";
 import {
   buildFabricSettingsItems,
   executorMemoryLimitOptions,
   FabricSettingsComponent,
+  openFabricSettings,
   parseBudgetValue,
   parseFormattedNumericValue,
   populateClaudeModelSource,
 } from "../src/ui/settings.js";
-import type { ModelSource } from "../src/ui/model-picker.js";
 
 const theme = {
   fg: (_color: string, text: string) => text,
@@ -98,6 +104,7 @@ describe("FabricSettingsComponent", () => {
       "Executor",
       "Approvals",
       "MCP",
+      "Prewalk",
       "Subagents",
       "Capture",
       "UI",
@@ -106,7 +113,7 @@ describe("FabricSettingsComponent", () => {
     ]) {
       expect(lines).toContain(label);
     }
-    expect(items.length).toBe(9);
+    expect(items.length).toBe(10);
   });
 
   it("marks submenu rows with a drill-in marker and leaves inline toggles plain", () => {
@@ -114,6 +121,7 @@ describe("FabricSettingsComponent", () => {
     const labels = items.map((item) => item.label);
     // Top-level sections open a submenu.
     expect(labels).toContain("Executor ›");
+    expect(labels).toContain("Prewalk ›");
     expect(labels).toContain("Subagents ›");
     // Full code mode cycles values inline; no drill-in marker.
     expect(labels).toContain("Full code mode");
@@ -280,6 +288,105 @@ describe("FabricSettingsComponent", () => {
     expect(lines).toContain("High");
   });
 
+  it("persists a Prewalk model selection and reopens with its checkmark", () => {
+    const applied: Array<{ id: string; value: unknown }> = [];
+    const items = buildFabricSettingsItems(
+      theme,
+      structuredClone(DEFAULT_FABRIC_CONFIG),
+      (id, value) => applied.push({ id, value }),
+      { keepVisibleCandidates: ["fabric_exec"], modelSource: fakeModelSource },
+    );
+    const prewalk = items.find((item) => item.id === "prewalk")!;
+    expect(prewalk.currentValue).toBe("Ask each time");
+    const section = prewalk.submenu!("", () => {}) as any;
+    const list = section.settingsList as any;
+    list.selectedIndex = list.items.findIndex(
+      (item: { id: string }) => item.id === "prewalk.model",
+    );
+
+    list.activateItem();
+    list.submenuComponent.handleInput("\x1b[B");
+    list.submenuComponent.handleInput("\r");
+
+    expect(applied.at(-1)).toEqual({
+      id: "prewalk.model",
+      value: "anthropic/claude-sonnet-4-5",
+    });
+    expect(list.items[list.selectedIndex].currentValue).toBe(
+      "anthropic/claude-sonnet-4-5",
+    );
+
+    list.activateItem();
+    const reopened = list.submenuComponent.render(100).join("\n");
+    const modelLine = reopened
+      .split("\n")
+      .find((line: string) => line.includes("claude-sonnet-4-5"));
+    const unsetLine = reopened
+      .split("\n")
+      .find(
+        (line: string) =>
+          line.includes("Ask each time") && !line.includes("Pick Ask each time"),
+      );
+    expect(modelLine).toContain("✓");
+    expect(unsetLine).not.toContain("✓");
+
+    list.submenuComponent.handleInput("\x1b[A");
+    list.submenuComponent.handleInput("\r");
+    expect(applied.at(-1)).toEqual({ id: "prewalk.model", value: "" });
+    expect(list.items[list.selectedIndex].currentValue).toBe("Ask each time");
+
+    list.activateItem();
+    const cleared = list.submenuComponent.render(100).join("\n");
+    const clearedUnsetLine = cleared
+      .split("\n")
+      .find(
+        (line: string) =>
+          line.includes("Ask each time") && !line.includes("Pick Ask each time"),
+      );
+    expect(clearedUnsetLine).toContain("✓");
+  });
+
+  it("exposes a dedicated prewalk executor model picker", () => {
+    const config = {
+      ...DEFAULT_FABRIC_CONFIG,
+      prewalk: { model: "anthropic/claude-sonnet-4-5" },
+    };
+    const items = buildFabricSettingsItems(theme, config, () => {}, {
+      keepVisibleCandidates: ["fabric_exec"],
+      modelSource: fakeModelSource,
+    });
+    const prewalk = items.find((item) => item.id === "prewalk")!;
+    const lines = prewalk.submenu!("", () => {}).render(100).join("\n");
+
+    expect(lines).toContain("Executor model ›");
+    expect(lines).toContain("anthropic/claude-sonnet-4-5");
+  });
+
+  it("reopens the shared subagent model picker at its live selection", () => {
+    const items = buildItems();
+    const subagents = items.find((item) => item.id === "subagents")!;
+    const section = subagents.submenu!("", () => {}) as any;
+    const list = section.settingsList as any;
+    list.selectedIndex = list.items.findIndex(
+      (item: { id: string }) => item.id === "subagents.model",
+    );
+
+    list.activateItem();
+    list.submenuComponent.handleInput("\x1b[B");
+    list.submenuComponent.handleInput("\r");
+    list.activateItem();
+
+    const reopened = list.submenuComponent.render(100).join("\n");
+    const modelLine = reopened
+      .split("\n")
+      .find((line: string) => line.includes("claude-sonnet-4-5"));
+    const inheritLine = reopened
+      .split("\n")
+      .find((line: string) => line.includes("Inherit"));
+    expect(modelLine).toContain("✓");
+    expect(inheritLine).not.toContain("✓");
+  });
+
   it("surfaces the default model in the Subagents section as Inherit by default", () => {
     const items = buildItems();
     const subagents = items.find((item) => item.id === "subagents");
@@ -342,5 +449,76 @@ describe("FabricSettingsComponent", () => {
     const lines = subagents.submenu!("", () => {}).render(80).join("\n");
     expect(lines).toContain("Token limit");
     expect(lines).toContain("500k");
+  });
+
+  it("persists a picked Prewalk model through the real settings dialog flow", async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-settings-model-"));
+    try {
+      const config = structuredClone(DEFAULT_FABRIC_CONFIG);
+      const applyFabricMode = vi.fn();
+      const state = {
+        config,
+        ensure: vi.fn().mockResolvedValue(undefined),
+        reloadConfig: vi.fn(() => {
+          const saved = JSON.parse(
+            fs.readFileSync(path.join(cwd, ".pi", "fabric.json"), "utf8"),
+          ) as { prewalk?: { model?: string } };
+          config.prewalk = saved.prewalk?.model
+            ? { model: saved.prewalk.model }
+            : {};
+        }),
+        subagents: { claudeModels: vi.fn().mockResolvedValue([]) },
+      } as unknown as FabricState;
+      let rootList: any;
+      let nestedList: any;
+      const notify = vi.fn();
+      const context = {
+        mode: "tui",
+        cwd,
+        isProjectTrusted: () => true,
+        modelRegistry: { getAvailable: () => fakeModelSource.models },
+        ui: {
+          notify,
+          custom: vi.fn(async (factory) => {
+            const component = factory({}, theme, {}, () => {}) as FabricSettingsComponent;
+            rootList = component.settingsList;
+            rootList.selectedIndex = rootList.items.findIndex(
+              (item: { id: string }) => item.id === "prewalk",
+            );
+            rootList.activateItem();
+            nestedList = rootList.submenuComponent.settingsList;
+            nestedList.selectedIndex = nestedList.items.findIndex(
+              (item: { id: string }) => item.id === "prewalk.model",
+            );
+            nestedList.activateItem();
+            nestedList.submenuComponent.handleInput("\x1b[B");
+            nestedList.submenuComponent.handleInput("\r");
+          }),
+        },
+      } as unknown as ExtensionContext;
+
+      await openFabricSettings(context, {
+        state,
+        applyFabricMode,
+        capturedTools: { list: () => [] } as unknown as CapturedToolCatalog,
+      });
+
+      expect(
+        JSON.parse(fs.readFileSync(path.join(cwd, ".pi", "fabric.json"), "utf8")),
+      ).toMatchObject({
+        prewalk: { model: "anthropic/claude-sonnet-4-5" },
+      });
+      expect(config.prewalk.model).toBe("anthropic/claude-sonnet-4-5");
+      expect(
+        rootList.items.find((item: { id: string }) => item.id === "prewalk").currentValue,
+      ).toBe("anthropic/claude-sonnet-4-5");
+      expect(nestedList.items[nestedList.selectedIndex].currentValue).toBe(
+        "anthropic/claude-sonnet-4-5",
+      );
+      expect(applyFabricMode).toHaveBeenCalledOnce();
+      expect(notify).toHaveBeenCalledWith("Fabric settings saved.", "info");
+    } finally {
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
   });
 });

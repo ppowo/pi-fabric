@@ -7,6 +7,7 @@ import {
 describe("isBlockingOrchestrationRef", () => {
   it("classifies only host calls that wait for child agent turns", () => {
     expect(isBlockingOrchestrationRef("agents.run")).toBe(true);
+    expect(isBlockingOrchestrationRef("agents.handoff")).toBe(false);
     expect(isBlockingOrchestrationRef("agents.wait")).toBe(true);
     expect(isBlockingOrchestrationRef("agents.ask")).toBe(true);
     expect(isBlockingOrchestrationRef("agents.spawn")).toBe(false);
@@ -33,6 +34,7 @@ describe("codeUsesOrchestration", () => {
 
   it("detects direct blocking agents calls", () => {
     expect(codeUsesOrchestration('await agents.run({ task: "x" });')).toBe(true);
+    expect(codeUsesOrchestration('await agents.handoff({ model: "p/m" });')).toBe(false);
     expect(codeUsesOrchestration('await agents.wait({ id: h.id });')).toBe(true);
     expect(codeUsesOrchestration('await agents.ask({ id, message: "go" });')).toBe(true);
   });

@@ -98,8 +98,17 @@ if (task.includes("HANG")) {
     fs.writeFileSync(logFile, events.map((event) => JSON.stringify(event)).join("\n") + "\n");
   }
 
-  // Append a session transcript so the actor's readLog(type: "session") works.
-  if (sessionFile) {
+  // Append a lightweight actor transcript only when this is not already a
+  // native Pi session. Handoff fixtures pass a real branched JSONL file; raw
+  // role records would corrupt its id/parentId tree.
+  let nativePiSession = false;
+  if (sessionFile && fs.existsSync(sessionFile)) {
+    try {
+      const first = fs.readFileSync(sessionFile, "utf8").split("\n", 1)[0];
+      nativePiSession = JSON.parse(first).type === "session";
+    } catch {}
+  }
+  if (sessionFile && !nativePiSession) {
     fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
     const turns = [
       { role: "user", content: task },

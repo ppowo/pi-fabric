@@ -48,7 +48,27 @@ export const GUEST_SETUP = `
 (() => {
 const __fabricBridge = globalThis.__fabricHostCall;
 delete globalThis.__fabricHostCall;
-const __call = (ref, args) => __fabricBridge(ref, args ?? {});
+const __successfulCalls = [];
+const __resolvedCallRef = (ref, args) =>
+  ref === "fabric.$call" && args && typeof args.ref === "string" ? args.ref : ref;
+const __recordSuccessfulCall = (ref, args) => {
+  __successfulCalls.push(Object.freeze({ ref: __resolvedCallRef(ref, args) }));
+};
+const __handoffFacts = () => {
+  const calls = Object.freeze(__successfulCalls.slice());
+  const count = (ref) => {
+    if (ref === undefined) return calls.length;
+    const refs = new Set(Array.isArray(ref) ? ref : [ref]);
+    return calls.reduce((total, call) => total + (refs.has(call.ref) ? 1 : 0), 0);
+  };
+  return Object.freeze({ calls, count });
+};
+const __call = async (ref, args) => {
+  const normalizedArgs = args ?? {};
+  const value = await __fabricBridge(ref, normalizedArgs);
+  __recordSuccessfulCall(ref, normalizedArgs);
+  return value;
+};
 const __piToolNames = ["read","bash","edit","write","grep","find","ls"];
 const __toolsBase = {
   providers: () => __call("fabric.$providers", {}),
@@ -202,8 +222,30 @@ globalThis.memory = __providerProxy("memory");
 globalThis.state = __providerProxy("state");
 globalThis.schema = __providerProxy("schema");
 globalThis.compact = __providerProxy("compact");
+const __handoff = async (args = {}) => {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    throw new TypeError("agents.handoff expects an options object");
+  }
+  const request = { ...args };
+  const when = request.when;
+  delete request.when;
+  if (when !== undefined) {
+    if (typeof when !== "function") {
+      throw new TypeError("agents.handoff when must be a pure predicate function");
+    }
+    const decision = when(__handoffFacts());
+    if (decision && typeof decision.then === "function") {
+      throw new TypeError("agents.handoff when must return a boolean synchronously");
+    }
+    if (decision !== true) {
+      throw new Error("agents.handoff predicate returned false; no agent was started");
+    }
+  }
+  return __call("agents.handoff", request);
+};
 globalThis.agents = Object.freeze({
   run: (args) => __call("agents.run", args),
+  handoff: __handoff,
   spawn: (args) => __call("agents.spawn", args),
   wait: (args) => __call("agents.wait", args),
   status: (args) => __call("agents.status", args),
@@ -221,6 +263,8 @@ globalThis.agents = Object.freeze({
   setSteeringMode: (args) => __call("agents.setSteeringMode", args),
   setFollowUpMode: (args) => __call("agents.setFollowUpMode", args),
   actorStatus: (args) => __call("agents.actorStatus", args),
+  setModel: (args) => __call("agents.setModel", args),
+  setThinking: (args) => __call("agents.setThinking", args),
   setEvents: (args) => __call("agents.setEvents", args),
   setInstructions: (args) => __call("agents.setInstructions", args),
   actors: () => __call("agents.actors", {}),

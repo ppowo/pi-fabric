@@ -37,6 +37,33 @@ const handle = await agents.spawn({ task: "Map the persistence layer.", transpor
 return await agents.wait({ id: handle.id });
 ```
 
+## Trajectory handoff
+
+`agents.handoff({ model, task?, when?, ... })` schedules a blocking Pi-to-Pi trajectory handoff at the end of the current outer `fabric_exec`. Inside the guest it returns a deferred marker immediately, so calls after it still run. Once the complete program and all outer result middleware finish, Fabric forks the native assistant `fabric_exec` call plus its exact native `toolResult`, starts the explicit `provider/id` target in the same workspace, and waits before Main can infer again. Do not expect child output inside the same guest program; Main receives it as the final outer tool result.
+
+`when` is guest-only and must be a pure synchronous predicate over immutable successful-call facts. It is deleted before the host validates the request:
+
+```ts
+await pi.edit({ path: "src/guard.ts", edits: [{ oldText, newText }] });
+await agents.handoff({
+  model: "anthropic/claude-haiku-4-5",
+  task: "Continue from this completed Fabric invocation.",
+  when: ({ count }) => count("pi.edit") >= 1,
+});
+await pi.bash({ command: "pnpm test guard" });
+return "Frontier invocation complete";
+```
+
+Facts include every successful resolved bridge call completed before `agents.handoff()`, from `pi.*`, `extensions.*`, `mcp.*`, external providers, and generic `tools.call()`. Use `count()` for all calls, `count(ref)` for one, or `count([ref, ...])` for a set. Computed calls are recorded under their target ref rather than `fabric.$call`; failed calls do not count. A false or asynchronous predicate starts no child and errors clearly. Omit `when` for unconditional scheduling.
+
+The guest result is `{ scheduled: true, status: "deferred", boundary: "fabric_exec_end" }`; the final outer tool result is `{ handedOff, completed, status, agent, implementation, error? }`. `model` is required and handoff is always Pi-backed. It also accepts `name`, `transport`, `thinking`, `tools`, `timeoutMs`, `extensions`, `recursive`, and `schema`; it deliberately omits `worktree` so implementation remains in the caller's workspace. Do not run handoff in a parallel branch that keeps mutating the same files.
+
+## Automatic prewalk
+
+`/fabric prewalk [task]` arms one automatic handoff when a Fabric invocation contains a successful `pi.edit`, `pi.write`, or `schema.commit`. With a task it submits the task immediately; without one it captures the next user input. The executor is the dedicated `prewalk.model` setting under `/fabric settings`, or an interactive model choice when unset.
+
+Prewalk injects no system-prompt guidance and does not ask Main to call a handoff API. A trigger marks the current outer invocation but does not stop it: all later sequential and parallel nested calls finish normally. The host claims after execution settles, forks the finalized native `fabric_exec` call/result pair, spawns, and waits. The terminating result suppresses Main's automatic post-tool inference. If the captured task settles without a trigger, the arm is cancelled rather than leaking into the next task. Use `/fabric prewalk --status` or `/fabric prewalk --off`. Prewalk requires enabled subagents and full code mode, and is disabled by Schema enforce mode.
+
 Use `/fabric agents` to list children and `/fabric attach <id>` for the attach command. Abort signals propagate to the transport and selected child process. Claude runs use official `claude -p` stream JSON with `dontAsk`, `--tools`, and `--allowedTools`; `extensions: false` adds Claude safe mode. One-shot Claude sessions use `--no-session-persistence`. Claude cannot use `recursive: true`, `fabric_exec`, or direct mesh APIs.
 
 ## Steering running agents
@@ -76,8 +103,8 @@ Prefer `agents.steer` over `agents.stop` + `agents.spawn` when the child has use
 `args` is a `FabricActorRequest`. `delivery` defaults to `mailbox`; `steer`/`followUp` require an explicit `triggerTurn: true | false`, while `mailbox`/`nextTurn` reject `triggerTurn: true`.
 
 - `runner` is fixed at creation. Omitted uses `subagents.runner`. Pi actors are recursively Fabric-equipped; Claude actors retain Claude context and use Claude Code tools, while mailbox/event delivery and coordination remain host-managed (no `fabric_exec` or direct `mesh.*` inside Claude).
-- `model` follows the selected runner's key format. Omitted uses that runner's configured/default model. The dashboard can change an actor model override for its next activation; `tell`/`ask` payloads do not change it.
-- `thinking` is the reasoning effort forwarded to the actor's runs (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`). Omitted inherits `subagents.thinking` (default `medium`), clamped to the model's supported levels. Change it later with `e` from the dashboard actor detail, or by recreating the actor.
+- `model` follows the selected runner's key format. Omitted uses that runner's configured/default model. `agents.setModel({ id, model? })` changes or clears the override for the next activation without replacing the actor session; `tell`/`ask` payloads do not change it.
+- `thinking` is the reasoning effort forwarded to the actor's runs (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`). Omitted inherits `subagents.thinking` (default `medium`), clamped to the model's supported levels. Change it later with `agents.setThinking({ id, thinking? })` or `e` from the dashboard actor detail; omitting `thinking` clears the override.
 - `events` is a subset of `input`, `turn_end`, `agent_settled`, `tool_error`, `session_compact` (host events to subscribe to).
 - `topics` lists durable mesh topics to subscribe to (see `mesh.md`).
 - `responseMode` is `text` (every non-empty response becomes an outbox message) or `directive` (validated `{ action, message?, data? }` where `action` is `silent`, `message`, or `stop`; the actor decides whether to intervene).
@@ -104,6 +131,7 @@ Mailbox:
 - `agents.ask({ id, message, data? })` returns a `FabricActorMessage` (blocking exchange).
 - `agents.tell({ id, message, data? })` returns `{ queued, messageId }` (fire and forget).
 - `agents.actorStatus({ id })` and `agents.actors()` return actor info.
+- `agents.setModel({ id, model? })` and `agents.setThinking({ id, thinking? })` migrate the next activation while preserving the actor's runner session.
 - `agents.setTools({ id, tools, scope? })` replaces the persisted tool allowlist for a project actor (default) or global template.
 - `agents.setDeliveryPolicy({ id, delivery, triggerTurn, scope? })` replaces the explicit project/global continuation policy without recreating the actor. In the dashboard, press `y` on an actor/template for the same control.
 - `agents.messages({ id, limit? })` returns message history.

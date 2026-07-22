@@ -76,6 +76,8 @@ Advanced workflow skills are user-invoked; never load them autonomously. When th
 
 `agents.main()` returns the dashboard-owning root Pi session; `agents.peers()` lists other live root sessions in the shared project mesh as `Peer <session-prefix>` targets. Peers support `agents.steer()` and `agents.followUp()` by exact id.
 
+For an explicit implementation handoff, `agents.handoff({ model, task?, when? })` schedules a Pi child at the completed outer `fabric_exec` boundary; later calls in the same program still run, and Main blocks only after the finalized native outer result is ready. `when` is a guest-only pure synchronous predicate over immutable earlier successful-call facts from any resolved Fabric provider and is stripped before the host call. `/fabric prewalk [task]` is the prompt-free automatic Fabric-boundary path. See `references/agents.md`.
+
 Agent requests and persistent actors accept `runner: "pi" | "claude"`. Pi is the default and is required for `recursive: true`, `rlm.query()`, and actors that must call Fabric or mesh APIs themselves. Claude invokes the official `claude -p` harness; it supports mapped Claude Code tools and host-managed persistent actors, but not recursive/direct Fabric APIs. Use `agents.models({ runner: "claude" })` for runtime-enumerated `claude/<value>` model keys.
 
 Omit `timeoutMs` for subagents and actors unless requesting longer than the configured `subagents.timeoutMs` (60 minutes by default). Per-call values below the configured default are ignored.

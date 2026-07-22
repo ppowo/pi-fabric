@@ -42,4 +42,98 @@ describe("/fabric command", () => {
     expect(state.ensure).toHaveBeenCalledWith(context);
     expect(fabricUi.openDashboard).toHaveBeenCalledWith(context);
   });
+
+  it("arms prewalk with the configured executor and submits an inline task", async () => {
+    let handler: ((argumentsText: string, context: ExtensionContext) => Promise<void>) | undefined;
+    const sendUserMessage = vi.fn();
+    const pi = {
+      sendUserMessage,
+      registerCommand: vi.fn((_name: string, definition: { handler: typeof handler }) => {
+        handler = definition.handler;
+      }),
+    } as unknown as ExtensionAPI;
+    const arm = vi.fn();
+    const state = {
+      ensure: vi.fn().mockResolvedValue(undefined),
+      config: {
+        fullCodeMode: true,
+        schema: { mode: "off" },
+        prewalk: { model: "anthropic/executor" },
+        subagents: { enabled: true },
+      },
+      prewalk: { arm, status: vi.fn(), cancel: vi.fn() },
+    } as unknown as FabricState;
+    const context = {
+      sessionManager: { getSessionId: () => "session-1" },
+      ui: { setStatus: vi.fn(), notify: vi.fn() },
+    } as unknown as ExtensionContext;
+
+    registerFabricCommand(pi, {
+      state,
+      fabricUi: {} as FabricUiController,
+      capturedTools: {} as CapturedToolCatalog,
+      applyFabricMode: vi.fn(),
+      suspendToolCapture: vi.fn(),
+    });
+    await handler!("prewalk Implement the token guard", context);
+
+    expect(arm).toHaveBeenCalledWith({
+      model: "anthropic/executor",
+      sessionId: "session-1",
+      task: "Implement the token guard",
+    });
+    expect(sendUserMessage).toHaveBeenCalledWith("Implement the token guard");
+  });
+
+  it("uses the model picker when prewalk has no configured executor", async () => {
+    let handler: ((argumentsText: string, context: ExtensionContext) => Promise<void>) | undefined;
+    const pi = {
+      sendUserMessage: vi.fn(),
+      registerCommand: vi.fn((_name: string, definition: { handler: typeof handler }) => {
+        handler = definition.handler;
+      }),
+    } as unknown as ExtensionAPI;
+    const arm = vi.fn();
+    const select = vi.fn().mockResolvedValue("openai/executor");
+    const state = {
+      ensure: vi.fn().mockResolvedValue(undefined),
+      config: {
+        fullCodeMode: true,
+        schema: { mode: "off" },
+        prewalk: {},
+        subagents: { enabled: true },
+      },
+      prewalk: { arm, status: vi.fn(), cancel: vi.fn() },
+    } as unknown as FabricState;
+    const context = {
+      hasUI: true,
+      modelRegistry: {
+        getAvailable: () => [
+          { provider: "openai", id: "executor" },
+          { provider: "anthropic", id: "other" },
+        ],
+      },
+      sessionManager: { getSessionId: () => "session-1" },
+      ui: { select, setStatus: vi.fn(), notify: vi.fn() },
+    } as unknown as ExtensionContext;
+
+    registerFabricCommand(pi, {
+      state,
+      fabricUi: {} as FabricUiController,
+      capturedTools: {} as CapturedToolCatalog,
+      applyFabricMode: vi.fn(),
+      suspendToolCapture: vi.fn(),
+    });
+    await handler!("prewalk", context);
+
+    expect(select).toHaveBeenCalledWith("Prewalk executor model", [
+      "anthropic/other",
+      "openai/executor",
+    ]);
+    expect(arm).toHaveBeenCalledWith({
+      model: "openai/executor",
+      sessionId: "session-1",
+    });
+  });
+
 });

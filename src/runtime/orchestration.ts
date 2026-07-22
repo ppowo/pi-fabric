@@ -11,10 +11,10 @@ const BLOCKING_ORCHESTRATION_REFS = new Set([
 export const isBlockingOrchestrationRef = (ref: string): boolean =>
   BLOCKING_ORCHESTRATION_REFS.has(ref);
 
-// Match the documented direct entry points as call sites (a trailing "("),
-// tolerating a single-level generic argument such as
-// agent<{ items: string[] }>(...). Read-only and non-blocking agents.* calls
-// are intentionally excluded because they do not wait for a child turn.
+// Match blocking guest entry points as call sites (a trailing "("), and
+// tolerate a single-level generic such as agent<{ items: string[] }>(...).
+// agents.handoff is excluded because it only schedules work at the completed
+// outer fabric_exec boundary.
 const ORCHESTRATION_RE =
   /\b(?:workflow\.agent|agents\.(?:run|wait|ask)|council\.run|rlm\.query)\s*\(|(?<!\.)\bagent\s*(?:<[^<>]*>)?\s*\(/;
 

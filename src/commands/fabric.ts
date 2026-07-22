@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import type { CapturedToolCatalog } from "../capture/catalog.js";
 import type { FabricActorHostEvent } from "../actors/types.js";
@@ -59,15 +59,55 @@ const summarizeLogLine = (entry: unknown): string => {
   return truncateMiddle(JSON.stringify(record), 160);
 };
 
+const resolvePrewalkModel = async (
+  state: FabricState,
+  context: ExtensionContext,
+): Promise<string | undefined> => {
+  const configured = state.config.prewalk.model?.trim();
+  if (configured) {
+    if (configured.includes("/")) return configured;
+    context.ui.notify(
+      "prewalk.model must use provider/model form.",
+      "error",
+    );
+    return undefined;
+  }
+  let models: Array<{ provider: string; id: string; name?: string }> = [];
+  try {
+    models = context.modelRegistry.getAvailable();
+  } catch {
+    models = [];
+  }
+  const keys = models
+    .map((model) => `${model.provider}/${model.id}`)
+    .sort((left, right) => left.localeCompare(right));
+  if (keys.length === 0) {
+    context.ui.notify(
+      "Prewalk needs an explicit Pi executor model. Configure prewalk.model in /fabric settings.",
+      "error",
+    );
+    return undefined;
+  }
+  if (!context.hasUI) {
+    context.ui.notify(
+      "Prewalk needs prewalk.model in non-interactive mode.",
+      "error",
+    );
+    return undefined;
+  }
+  return context.ui.select("Prewalk executor model", keys);
+};
+
 export function registerFabricCommand(pi: ExtensionAPI, deps: FabricCommandDeps): void {
   const { state, fabricUi, capturedTools, applyFabricMode, suspendToolCapture } = deps;
   pi.registerCommand("fabric", {
-    description: "Open the Fabric dashboard; inspect, reload, or manage agents and actors",
+    description: "Open Fabric, arm prewalk, reload, or manage agents and actors",
     getArgumentCompletions: (argumentPrefix: string): AutocompleteItem[] | null => {
       const subcommands = [
         "status",
         "dashboard",
         "settings",
+        "prewalk",
         "reload",
         "providers",
         "agents",
@@ -183,6 +223,53 @@ export function registerFabricCommand(pi: ExtensionAPI, deps: FabricCommandDeps)
       }
       if (command === "settings") {
         await openFabricSettings(context, { state, applyFabricMode, capturedTools });
+        return;
+      }
+      if (command === "prewalk") {
+        const option = argumentsList[0];
+        if (option === "--off" || option === "--cancel") {
+          state.prewalk.cancel();
+          context.ui.setStatus("fabric-prewalk", undefined);
+          context.ui.notify("Fabric prewalk cancelled", "info");
+          return;
+        }
+        if (option === "--status") {
+          const status = state.prewalk.status();
+          context.ui.notify(
+            status.state === "idle"
+              ? "Fabric prewalk is idle"
+              : `Fabric prewalk ${status.state} → ${status.model}${status.task ? `\nTask: ${status.task}` : ""}`,
+            "info",
+          );
+          return;
+        }
+        if (
+          !state.config.fullCodeMode ||
+          state.config.schema.mode === "enforce" ||
+          !state.config.subagents.enabled
+        ) {
+          context.ui.notify(
+            "Fabric prewalk requires enabled subagents, full code mode, and Schema enforce mode disabled.",
+            "error",
+          );
+          return;
+        }
+        const model = await resolvePrewalkModel(state, context);
+        if (!model) return;
+        const task = argumentsText.trim().slice(command.length).trim();
+        state.prewalk.arm({
+          model,
+          sessionId: context.sessionManager.getSessionId(),
+          ...(task ? { task } : {}),
+        });
+        context.ui.setStatus("fabric-prewalk", `armed → ${model}`);
+        context.ui.notify(
+          task
+            ? `Fabric prewalk armed for the next matching Fabric boundary; starting task with executor ${model}`
+            : `Fabric prewalk armed for the next task; executor ${model}`,
+          "info",
+        );
+        if (task) pi.sendUserMessage(task);
         return;
       }
       if (command === "dashboard" || command === "ui") {
@@ -534,7 +621,7 @@ export function registerFabricCommand(pi: ExtensionAPI, deps: FabricCommandDeps)
       }
       if (command !== "status") {
         context.ui.notify(
-          "Usage: /fabric [status|dashboard|reload|providers|agents|actors|global|import <name> [as <new>]|export <id> [--overwrite]|messages <id>|clear-messages <id>|events <id> [event...]|log <id>|export-log <id>|attach <id>|stop <id>|remove <id>|kill <id>]",
+          "Usage: /fabric [status|dashboard|prewalk [task]|prewalk --off|reload|providers|agents|actors|global|import <name> [as <new>]|export <id> [--overwrite]|messages <id>|clear-messages <id>|events <id> [event...]|log <id>|export-log <id>|attach <id>|stop <id>|remove <id>|kill <id>]",
           "warning",
         );
         return;
@@ -554,6 +641,12 @@ export function registerFabricCommand(pi: ExtensionAPI, deps: FabricCommandDeps)
               : config.subagents.model || "inherit"
           }`,
           `subagent limits: concurrency ${config.subagents.maxConcurrent}, per execution ${config.subagents.maxPerExecution}, depth ${config.subagents.maxDepth}`,
+          (() => {
+            const prewalk = state.prewalk.status();
+            return prewalk.state === "idle"
+              ? `prewalk: idle · model ${config.prewalk.model || "Ask each time"}`
+              : `prewalk: ${prewalk.state} → ${prewalk.model}`;
+          })(),
           config.fullCodeMode && config.capture.enabled
             ? `captured tools: ${capturedTools.size} · model visibility: ${config.capture.hideFromModel ? "hidden" : "visible"}`
             : "captured tools: disabled (native registry preserved)",

@@ -64,11 +64,13 @@ const CORE_RISK_TOOLS = ["read", "grep", "find", "edit", "write", "bash"] as con
 const CORE_DEFAULT_TOOL_CANDIDATES = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const BUDGET_VALUES = [0, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10];
 const TOKEN_VALUES = [0, 50_000, 100_000, 250_000, 500_000, 1_000_000, 2_000_000];
+const PREWALK_MODEL_UNSET_LABEL = "Ask each time";
 const ROOT_ITEM_IDS = [
   "fullCodeMode",
   "executor",
   "approvals",
   "mcp",
+  "prewalk",
   "subagents",
   "capture",
   "ui",
@@ -201,10 +203,14 @@ const coerceValue = (id: string, value: string, config: FabricConfig): unknown =
   if (typeof current === "boolean") return value === "true";
   if (typeof current === "number") return parseFormattedNumericValue(value);
   // The model picker stores the canonical "provider/id" string, or "Inherit"
-  // for no override; persist an empty string so normalizeFabricConfig drops it
-  // and the subagent inherits the host's default model.
-  if (id === "subagents.model" || id === "subagents.claude.model") {
-    return value === INHERIT_VALUE ? "" : value;
+  // for no override; persist an empty string so normalizeFabricConfig drops it.
+  // Subagents inherit; prewalk asks interactively when it is armed.
+  if (
+    id === "prewalk.model" ||
+    id === "subagents.model" ||
+    id === "subagents.claude.model"
+  ) {
+    return value === INHERIT_VALUE || value === PREWALK_MODEL_UNSET_LABEL ? "" : value;
   }
   if (id === "subagents.thinking") {
     return THINKING_LEVELS.find((level) => thinkingLabel(level) === value) ?? value;
@@ -238,6 +244,8 @@ const summaryFor = (id: string, config: FabricConfig): string => {
       return config.approvals.execute;
     case "mcp":
       return config.mcp.enabled ? "enabled" : "disabled";
+    case "prewalk":
+      return config.prewalk.model || PREWALK_MODEL_UNSET_LABEL;
     case "subagents":
       return `${config.subagents.runner}/${config.subagents.transport}`;
     case "capture":
@@ -377,23 +385,22 @@ class SelectSubmenu extends Container {
   }
 }
 
-const thinkingSubmenu = (
-  theme: Theme,
-  currentValue: string,
-): SettingsSubmenu => (_currentValue, done) => {
+const thinkingSubmenu = (theme: Theme): SettingsSubmenu => (currentValue, done) => {
+  const canonicalCurrent =
+    THINKING_LEVELS.find((level) => thinkingLabel(level) === currentValue) ?? currentValue;
   const options: SelectItem[] = THINKING_LEVELS.map((level) => ({
     value: level,
     label: thinkingLabel(level),
   }));
-  if (!options.some((option) => option.value === currentValue)) {
-    options.unshift({ value: currentValue, label: currentValue });
+  if (!options.some((option) => option.value === canonicalCurrent)) {
+    options.unshift({ value: canonicalCurrent, label: currentValue });
   }
   return new SelectSubmenu(
     theme,
     "Default thinking",
     "Reasoning effort forwarded to spawned subagents and actors when a call does not specify one. The level is clamped to each model's supported levels (next highest if unsupported).",
     options,
-    currentValue,
+    canonicalCurrent,
     (value) => done(options.find((option) => option.value === value)?.label ?? value),
     () => done(),
   );
@@ -402,18 +409,32 @@ const thinkingSubmenu = (
 const modelPickerSubmenu = (
   theme: Theme,
   source: ModelSource,
-  currentValue: string,
-  options: { headerText?: string; inheritName?: string } = {},
-): SettingsSubmenu => (_currentValue, done) =>
-  new FabricModelSelector({
+  options: {
+    headerText?: string;
+    inheritLabel?: string;
+    inheritName?: string;
+  } = {},
+): SettingsSubmenu => (currentValue, done) => {
+  const canonicalCurrent =
+    options.inheritLabel && currentValue === options.inheritLabel
+      ? INHERIT_VALUE
+      : currentValue;
+  return new FabricModelSelector({
     theme,
     source,
-    currentValue,
-    onSelect: (value) => done(value),
+    currentValue: canonicalCurrent,
+    onSelect: (value) =>
+      done(
+        value === INHERIT_VALUE && options.inheritLabel
+          ? options.inheritLabel
+          : value,
+      ),
     onCancel: () => done(),
     ...(options.headerText ? { headerText: options.headerText } : {}),
+    ...(options.inheritLabel ? { inheritLabel: options.inheritLabel } : {}),
     ...(options.inheritName ? { inheritName: options.inheritName } : {}),
   });
+};
 
 class SectionSubmenu extends Container {
   readonly settingsList: SettingsList;
@@ -684,6 +705,36 @@ export const buildFabricSettingsItems = (
         persist,
       ),
     }),
+    setting("prewalk", "Prewalk", summaryFor("prewalk", config), {
+      description: "Trajectory handoff at the completed outer fabric_exec boundary.",
+      submenu: sectionSubmenu(
+        theme,
+        "Prewalk",
+        "Automatic handoff at the completed outer fabric_exec boundary.",
+        [
+          setting(
+            "prewalk.model",
+            "Executor model",
+            config.prewalk.model || PREWALK_MODEL_UNSET_LABEL,
+            {
+              description:
+                "Pi provider/model used by /fabric prewalk. Ask each time opens the model picker when arming and is unavailable in non-interactive mode.",
+              submenu: modelPickerSubmenu(
+                theme,
+                options.modelSource,
+                {
+                  headerText:
+                    "Executor model for automatic /fabric prewalk handoffs. Pick Ask each time to open the model picker for every prewalk.",
+                  inheritLabel: PREWALK_MODEL_UNSET_LABEL,
+                  inheritName: "Open the model picker whenever prewalk is armed",
+                },
+              ),
+            },
+          ),
+        ],
+        persist,
+      ),
+    }),
     setting("subagents", "Subagents", summaryFor("subagents", config), {
       description: "One-shot child agents spawned from inside fabric_exec.",
       submenu: sectionSubmenu(
@@ -709,7 +760,6 @@ export const buildFabricSettingsItems = (
             submenu: modelPickerSubmenu(
               theme,
               options.modelSource,
-              config.subagents.model || INHERIT_VALUE,
             ),
           }),
           setting(
@@ -722,7 +772,6 @@ export const buildFabricSettingsItems = (
               submenu: modelPickerSubmenu(
                 theme,
                 options.claudeModelSource ?? { models: [], lastUsed: {} },
-                config.subagents.claude.model || INHERIT_VALUE,
                 {
                   headerText:
                     "Default model for Claude-backed Fabric agents and actors. Pick Inherit to use Claude Code's runtime default.",
@@ -734,7 +783,7 @@ export const buildFabricSettingsItems = (
           setting("subagents.thinking", "Default thinking", thinkingLabel(config.subagents.thinking), {
             description:
               "Reasoning effort forwarded to spawned subagents and actors when a call does not specify one. Clamped to each model's supported levels (next highest if unsupported).",
-            submenu: thinkingSubmenu(theme, config.subagents.thinking),
+            submenu: thinkingSubmenu(theme),
           }),
           setting("subagents.maxConcurrent", "Max concurrent", String(config.subagents.maxConcurrent), {
             description: "Maximum number of subagents that may run at the same time.",

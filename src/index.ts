@@ -13,6 +13,7 @@ import {
 import { CapturedToolCatalog } from "./capture/catalog.js";
 import { installRegisteredToolCapture } from "./capture/interceptor.js";
 import { registerFabricCommand } from "./commands/fabric.js";
+import type { PendingFabricHandoff } from "./prewalk/handoff.js";
 import {
   DEFAULT_FABRIC_CONFIG,
   effectiveToolCaptureConfig,
@@ -28,6 +29,7 @@ import { buildSkillReferenceGuidance } from "./core/skill-references.js";
 import { FabricState } from "./fabric-state.js";
 import { piHostCompatibilityWarning } from "./host-compatibility.js";
 import { FABRIC_PROVIDER_REGISTER_EVENT, type FabricMediaBlock, type FabricProviderRegistration } from "./protocol.js";
+import type { SubagentToolResultMessage } from "./subagents/types.js";
 import { FabricUiController } from "./ui/controller.js";
 import {
   captureFabricAgentPreviews,
@@ -133,6 +135,7 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
   );
   const capturedTools = new CapturedToolCatalog();
   const state = new FabricState(pi, capturedTools);
+  const pendingHandoffs = new Map<string, PendingFabricHandoff>();
   const toolOwnership = new FabricToolOwnership(pi);
   const fabricUi = new FabricUiController(state, codePreviewSettings);
 
@@ -721,6 +724,18 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
 
         const selectedResultFormat =
           params.resultFormat ?? state.config.executor.resultFormat;
+        const pendingHandoff = state.claimHandoff(
+          result,
+          context.sessionManager.getSessionId(),
+          selectedResultFormat,
+        );
+        if (pendingHandoff) {
+          pendingHandoffs.set(toolCallId, pendingHandoff);
+          context.ui.setStatus(
+            "fabric-prewalk",
+            `waiting for fabric_exec boundary → ${String(pendingHandoff.args.model ?? "executor")}`,
+          );
+        }
         const formattedValue = formatFabricValue(result.value, selectedResultFormat);
         const sections = [...result.logs];
         const logPrefix = result.logs.join("\n\n");
@@ -769,11 +784,12 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
           state.config.executor.maxOutputChars,
         );
         const terminate =
-          result.success &&
-          typeof result.value === "object" &&
-          result.value !== null &&
-          "terminate" in result.value &&
-          result.value.terminate === true;
+          pendingHandoff !== undefined ||
+          (result.success &&
+            typeof result.value === "object" &&
+            result.value !== null &&
+            "terminate" in result.value &&
+            result.value.terminate === true);
         // A nested `pi.read` of an image returns image content blocks that
         // normalizeResult stripped (the sandbox holds text only). The provider
         // handed them out-of-band to each call audit; re-attach them here so
@@ -926,6 +942,7 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
   };
 
   pi.on("session_start", async (_event, context) => {
+    pendingHandoffs.clear();
     fabricUi.stop();
     suspendToolCapture();
     if (!compatibilityWarningShown) {
@@ -959,6 +976,7 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
 
   pi.on("session_shutdown", async () => {
     try {
+      pendingHandoffs.clear();
       uninstallHaltOnEscape();
       fabricUi.stop();
       suspendToolCapture();
@@ -973,7 +991,12 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
   // Tool ownership changes only at session or mode transitions; lifecycle hooks
   // forward host events without churning an explicitly selected active set.
   pi.on("input", async (event, context) => {
-    if (state.initialized) state.dispatchHostEvent("input", event, context);
+    if (!state.initialized) return;
+    state.prewalk.observeTask(
+      context.sessionManager.getSessionId(),
+      event.text,
+    );
+    state.dispatchHostEvent("input", event, context);
   });
 
   pi.on("turn_end", async (event, context) => {
@@ -983,6 +1006,9 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
   pi.on("agent_settled", async (event, context) => {
     if (!state.initialized) return;
     state.dispatchHostEvent("agent_settled", event, context);
+    if (state.prewalk.settleTask(context.sessionManager.getSessionId())) {
+      context.ui.setStatus("fabric-prewalk", undefined);
+    }
     // Keep the completed widget mounted until a newer Fabric run replaces it.
     // Removing rows at settle would pull the editor and latest chat content upward.
     // Pi's compact API is callback-based. Await the controller's Promise here
@@ -994,10 +1020,46 @@ export default async function piFabric(pi: ExtensionAPI): Promise<void> {
   pi.on("tool_call", (event) => fabricToolLifecycle.toolCall(event));
 
   // Pi 0.80.6 intentionally ignores `isError` returned by custom-tool
-  // execute(). Patch only finalized, outer Fabric results through the official
-  // result middleware; live partials and nested Fabric lifecycle events never
-  // enter this branch.
+  // execute(). Repair the finalized outer result through official middleware.
   pi.on("tool_result", (event) => fabricToolLifecycle.toolResult(event));
+
+  // message_end runs after all tool-result middleware and tool_execution_end but
+  // before Pi persists the native toolResult or starts another model turn. That
+  // is the complete outer fabric_exec boundary: fork the exact message, wait for
+  // the child, then replace what Main sees while terminate prevents inference.
+  pi.on("message_end", async (event, context) => {
+    if (event.message.role !== "toolResult") return undefined;
+    const pending = pendingHandoffs.get(event.message.toolCallId);
+    if (!pending || event.message.toolName !== "fabric_exec") return undefined;
+    pendingHandoffs.delete(event.message.toolCallId);
+
+    const outerToolResult = event.message as SubagentToolResultMessage;
+    const handoff = await state.runHandoffAtBoundary(
+      pending,
+      outerToolResult,
+      context,
+    );
+    const formatted = formatFabricValue(handoff, pending.resultFormat);
+    const output = truncateMiddle(
+      formatted.text || "(no output)",
+      state.config.executor.maxOutputChars,
+    );
+    const details =
+      typeof event.message.details === "object" &&
+      event.message.details !== null &&
+      !Array.isArray(event.message.details) &&
+      "success" in event.message.details
+        ? { ...event.message.details, success: handoff.completed === true }
+        : event.message.details;
+    return {
+      message: {
+        ...event.message,
+        content: [{ type: "text", text: output }],
+        details,
+        isError: handoff.completed !== true,
+      },
+    };
+  });
 
   pi.on("tool_execution_end", async (event, context) => {
     if (state.initialized && event.isError) {

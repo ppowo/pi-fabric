@@ -83,6 +83,7 @@ export interface FabricExecutionResult {
   elapsedMs: number;
   typeErrors?: FabricTypeError[];
   error?: string;
+  handoffRequest?: Record<string, unknown>;
 }
 
 interface FabricExecutionPartial {
@@ -151,6 +152,7 @@ export class FabricExecutionService {
       { kind: "parallel" | "pipeline"; operation: FabricExecutionTraceOperationHandle }
     >();
     let agentCalls = 0;
+    let handoffRequest: Record<string, unknown> | undefined;
     const maxAgentCalls = Math.max(
       1,
       Math.min(
@@ -159,7 +161,12 @@ export class FabricExecutionService {
       ),
     );
     const guardAgentCall = (ref: string): void => {
-      if (ref !== "agents.run" && ref !== "agents.spawn" && ref !== "agents.create") return;
+      if (
+        ref !== "agents.run" &&
+        ref !== "agents.handoff" &&
+        ref !== "agents.spawn" &&
+        ref !== "agents.create"
+      ) return;
       agentCalls++;
       if (agentCalls > maxAgentCalls) {
         throw new Error(`Fabric agent budget exhausted (${maxAgentCalls} per execution)`);
@@ -308,8 +315,28 @@ export class FabricExecutionService {
       }
       return this.registry.invoke(ref, args, {
         ...callContext,
+        ...(ref === "agents.handoff"
+          ? {
+              deferHandoff(request: Record<string, unknown>) {
+                if (handoffRequest) {
+                  throw new Error(
+                    "Only one agents.handoff request is allowed per fabric_exec invocation",
+                  );
+                }
+                handoffRequest = structuredClone(request);
+                return {
+                  scheduled: true,
+                  status: "deferred",
+                  boundary: "fabric_exec_end",
+                };
+              },
+            }
+          : {}),
         ...(this.authorizer
-          ? { authorize: (action) => this.authorizer!.authorize(action.ref, options.parentToolCallId) }
+          ? {
+              authorize: (action) =>
+                this.authorizer!.authorize(action.ref, options.parentToolCallId),
+            }
           : {}),
         approve: async (action) => {
           if (action.ref === "schema.commit") {
@@ -570,6 +597,7 @@ export class FabricExecutionService {
       trace: traceRecorder.seal(runOutcome, phases, sandboxResult.error),
       elapsedMs: performance.now() - startedAt,
       ...(sandboxResult.error ? { error: sandboxResult.error } : {}),
+      ...(handoffRequest ? { handoffRequest } : {}),
     };
   }
 }

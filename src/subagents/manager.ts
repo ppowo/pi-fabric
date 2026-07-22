@@ -38,6 +38,7 @@ import type {
   SubagentTransportLaunch,
 } from "./types.js";
 import { WorktreeManager } from "./worktree-manager.js";
+import { writeHandoffSession } from "./handoff.js";
 import {
   activeBudgetState,
   appendBudgetLedger,
@@ -397,6 +398,12 @@ export class SubagentManager {
         "Claude runner does not support recursive Fabric. Use a Pi runner for recursive: true, or omit recursive for Claude Code tools.",
       );
     }
+    if (request.sessionSeed && runner !== "pi") {
+      throw new Error("Trajectory handoff sessions are only supported by the Pi runner");
+    }
+    if (request.sessionSeed && request.sessionFile) {
+      throw new Error("A subagent request cannot combine sessionSeed with sessionFile");
+    }
     const tools = this.#childTools(request, runner);
     if (runner === "claude") mapClaudeTools(tools);
     const model =
@@ -445,6 +452,13 @@ export class SubagentManager {
     }
 
     try {
+      const sessionFile = request.sessionSeed
+        ? writeHandoffSession(
+            request.sessionSeed,
+            agentCwd,
+            path.join(runDirectory, "handoff-session"),
+          )
+        : request.sessionFile;
       const adapter = await this.#resolveTransport(request.transport ?? this.config.transport);
       const timeoutMs = effectiveSubagentTimeoutMs(
         this.config.timeoutMs,
@@ -494,7 +508,7 @@ export class SubagentManager {
         ...(model ? ["--model", model] : []),
         ...(thinking ? ["--thinking", thinking] : []),
         ...(request.systemPrompt ? ["--system-prompt", request.systemPrompt] : []),
-        ...(request.sessionFile ? ["--session-file", request.sessionFile] : []),
+        ...(sessionFile ? ["--session-file", sessionFile] : []),
         ...(request.actorId ? ["--actor-id", request.actorId] : []),
         ...(request.actorName ? ["--actor-name", request.actorName] : []),
         ...(request.meshRoot ? ["--mesh-root", request.meshRoot] : []),

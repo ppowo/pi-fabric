@@ -1,3 +1,7 @@
+import type {
+  SessionEntry,
+  SessionMessageEntry,
+} from "@earendil-works/pi-coding-agent";
 import type { FabricAgentRunner, FabricSubagentTransport } from "../config.js";
 import type { FabricThinking } from "../thinking.js";
 
@@ -8,6 +12,22 @@ export type SubagentRunStatus =
   | "failed"
   | "stopped"
   | "timed_out";
+
+export type SubagentToolResultMessage = Extract<
+  SessionMessageEntry["message"],
+  { role: "toolResult" }
+>;
+
+export interface SubagentSessionSeed {
+  sourceSessionId: string;
+  sourceSessionFile?: string;
+  sourceBranchLeafId: string;
+  /** Present only when the source session is in memory and must be materialized. */
+  sourceBranch?: SessionEntry[];
+  sourceModel?: { provider: string; modelId: string };
+  sourceThinkingLevel?: string;
+  outerToolResult: SubagentToolResultMessage;
+}
 
 export interface SubagentRunRequest {
   task: string;
@@ -28,6 +48,8 @@ export interface SubagentRunRequest {
   actorName?: string;
   meshRoot?: string;
   runnerSessionId?: string;
+  /** Host-created Pi branch seed ending with the native outer fabric_exec result. */
+  sessionSeed?: SubagentSessionSeed;
 }
 
 export interface SubagentUsage {

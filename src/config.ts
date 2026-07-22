@@ -50,6 +50,10 @@ interface FabricClaudeRunnerConfig {
   model?: string;
 }
 
+interface FabricPrewalkConfig {
+  model?: string;
+}
+
 export interface FabricSubagentConfig {
   enabled: boolean;
   runner: FabricAgentRunner;
@@ -147,6 +151,7 @@ export interface FabricConfig {
   executor: FabricExecutorConfig;
   approvals: FabricApprovalConfig;
   mcp: FabricMcpConfig;
+  prewalk: FabricPrewalkConfig;
   subagents: FabricSubagentConfig;
   capture: FabricToolCaptureConfig;
   ui: FabricUiConfig;
@@ -193,6 +198,7 @@ export const DEFAULT_FABRIC_CONFIG: FabricConfig = {
     allowDynamicServers: true,
     callTimeoutMs: 120_000,
   },
+  prewalk: {},
   subagents: {
     enabled: true,
     runner: "pi",
@@ -401,6 +407,7 @@ export const normalizeFabricConfig = (input: Record<string, unknown>): FabricCon
   const executor = objectValue(input.executor);
   const approvals = objectValue(input.approvals);
   const mcp = objectValue(input.mcp);
+  const prewalk = objectValue(input.prewalk);
   const subagents = objectValue(input.subagents);
   const claude = objectValue(subagents.claude);
   const capture = objectValue(input.capture);
@@ -423,6 +430,7 @@ export const normalizeFabricConfig = (input: Record<string, unknown>): FabricCon
   const configPath = stringValue(mcp.configPath);
   const meshRoot = stringValue(mesh.root);
   const memoryIndexDir = stringValue(memory.indexDir);
+  const prewalkModel = stringValue(prewalk.model);
   const subagentModel = stringValue(subagents.model);
   const claudeBinary = stringValue(claude.binary);
   const claudeModel = stringValue(claude.model);
@@ -514,6 +522,9 @@ export const normalizeFabricConfig = (input: Record<string, unknown>): FabricCon
         1_000,
         900_000,
       ),
+    },
+    prewalk: {
+      ...(prewalkModel ? { model: prewalkModel } : {}),
     },
     subagents: {
       enabled: booleanValue(subagents.enabled, DEFAULT_FABRIC_CONFIG.subagents.enabled),

@@ -86,6 +86,13 @@ describe("Fabric configuration", () => {
     expect(invalid.executor.runtime).toBe("quickjs");
   });
 
+  it("normalizes a dedicated prewalk executor model", () => {
+    expect(
+      normalizeFabricConfig({ prewalk: { model: "anthropic/executor" } }).prewalk,
+    ).toEqual({ model: "anthropic/executor" });
+    expect(normalizeFabricConfig({ prewalk: { model: "   " } }).prewalk).toEqual({});
+  });
+
   it("forces QuickJS in Schema enforce mode", () => {
     const config = normalizeFabricConfig({
       executor: { runtime: "node-process", memoryLimitBytes: Number.MAX_SAFE_INTEGER },
@@ -386,6 +393,25 @@ describe("Fabric configuration", () => {
     expect(fs.existsSync(path.join(cwd, ".pi", "fabric.json"))).toBe(false);
     const saved = JSON.parse(fs.readFileSync(path.join(agentDir, "fabric.json"), "utf8"));
     expect(saved).toEqual({ executor: { timeoutMs: 30_000 } });
+  });
+
+  it("persists and clears the dedicated prewalk model", () => {
+    const root = temporaryDirectory();
+    const cwd = path.join(root, "project");
+    const agentDir = path.join(root, "agent");
+    fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
+    fs.mkdirSync(agentDir, { recursive: true });
+    const location = { cwd, agentDir, projectTrusted: true };
+
+    saveFabricConfig(location, {
+      prewalk: { model: "anthropic/claude-sonnet-4-5" },
+    });
+    expect(loadFabricConfig(location).prewalk.model).toBe(
+      "anthropic/claude-sonnet-4-5",
+    );
+
+    saveFabricConfig(location, { prewalk: { model: "" } });
+    expect(loadFabricConfig(location).prewalk).toEqual({});
   });
 
   it("saves array overrides by replacing the array while preserving siblings", () => {

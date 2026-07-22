@@ -881,6 +881,8 @@ return true;
     const recorder = new FabricExecutionTraceRecorder();
     for (const ref of [
       "agents.compact",
+      "agents.setModel",
+      "agents.setThinking",
       "agents.setTools",
       "agents.setDeliveryPolicy",
       "agents.clearMessages",
@@ -892,7 +894,7 @@ return true;
 
     const trace = recorder.seal("succeeded", []);
     expect(trace.operations.map((operation) => operation.args)).toEqual(
-      Array(6).fill({ id: "actor-reviewer" }),
+      Array(8).fill({ id: "actor-reviewer" }),
     );
     expect(JSON.stringify(trace)).not.toContain("secret");
   });

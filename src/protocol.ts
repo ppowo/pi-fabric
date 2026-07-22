@@ -80,6 +80,8 @@ export interface FabricInvocationContext {
   extensionContext: ExtensionContext;
   update(message: string): void;
   activity?(update: FabricInvocationActivityUpdate): void;
+  /** Host-supplied inside fabric_exec so agents.handoff schedules the outer-call boundary. */
+  deferHandoff?(args: Record<string, unknown>): Record<string, unknown>;
   // Out-of-band image content blocks a provider (currently only pi.read of an
   // image file) wants attached to the call audit, so the single-call render can
   // re-attach them to the fabric_exec result content for pi core's kitty image

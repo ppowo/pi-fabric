@@ -21,7 +21,11 @@ import {
   effectiveSubagentTimeoutMs,
   SubagentManager,
 } from "../subagents/manager.js";
-import type { SubagentRunRequest } from "../subagents/types.js";
+import type {
+  SubagentRunRequest,
+  SubagentRunResult,
+  SubagentSessionSeed,
+} from "../subagents/types.js";
 import { isFabricThinking } from "../thinking.js";
 import { AgentTranscriptReader, recentTranscriptTools } from "../ui/transcript.js";
 
@@ -64,6 +68,30 @@ const runSchema = {
   additionalProperties: false,
 };
 
+const handoffSchema = {
+  type: "object",
+  properties: {
+    task: {
+      type: "string",
+      description: "Optional instructions for the executor in addition to the inherited trajectory",
+    },
+    name: runProperties.name,
+    transport: runProperties.transport,
+    model: {
+      ...runProperties.model,
+      description: "Explicit Pi provider/id target that will continue the inherited trajectory",
+    },
+    thinking: runProperties.thinking,
+    tools: runProperties.tools,
+    timeoutMs: runProperties.timeoutMs,
+    extensions: runProperties.extensions,
+    recursive: runProperties.recursive,
+    schema: runProperties.schema,
+  },
+  required: ["model"],
+  additionalProperties: false,
+};
+
 const idSchema = {
   type: "object",
   properties: { id: { type: "string" } },
@@ -85,6 +113,13 @@ const descriptors: FabricActionDescriptor[] = [
     name: "run",
     description: "Run a child agent through Pi or Claude Code and wait for its final result",
     inputSchema: runSchema,
+    risk: "agent",
+  },
+  {
+    name: "handoff",
+    description:
+      "Schedule a Pi trajectory handoff after the current outer fabric_exec result, then wait for implementation at that boundary",
+    inputSchema: handoffSchema,
     risk: "agent",
   },
   {
@@ -338,6 +373,30 @@ const descriptors: FabricActionDescriptor[] = [
     risk: "read",
   },
   {
+    name: "setModel",
+    description:
+      "Change or clear a persistent actor's model override for its next activation without discarding its session trajectory",
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string" }, model: { type: "string" } },
+      required: ["id"],
+      additionalProperties: false,
+    },
+    risk: "agent",
+  },
+  {
+    name: "setThinking",
+    description:
+      "Change or clear a persistent actor's reasoning effort for its next activation",
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string" }, thinking: runProperties.thinking },
+      required: ["id"],
+      additionalProperties: false,
+    },
+    risk: "agent",
+  },
+  {
     name: "setTools",
     description:
       "Replace a persistent actor's tool allowlist. Takes effect on its next queued message; an empty list disables optional tools.",
@@ -547,6 +606,39 @@ const runRequest = (
   };
 };
 
+const handoffTask = (args: Record<string, unknown>): string => {
+  const task = typeof args.task === "string" ? args.task.trim() : "";
+  const lines = [
+    "Continue and complete the current user task from the inherited conversation trajectory and current workspace.",
+    "The caller has handed implementation to you and is blocked awaiting this run. Do the remaining work; do not merely advise the caller or restate the plan.",
+    "Treat the inherited conversation, completed outer Fabric result, and current workspace as grounded context. Inspect again only where the workspace or a failed check makes it necessary.",
+    "Keep the change scoped, run the relevant full test module or equivalent verification, and report the implementation plus checks honestly.",
+  ];
+  if (task) lines.push("Additional continuation task:", task);
+  return lines.join("\n\n");
+};
+
+const compactHandoffResult = (
+  result: SubagentRunResult,
+): Record<string, unknown> => ({
+  handedOff: true,
+  completed: result.status === "completed",
+  status: result.status,
+  agent: {
+    id: result.id,
+    name: result.name,
+    runner: result.runner,
+    transport: result.transport,
+    ...(result.model ? { model: result.model } : {}),
+    ...(result.thinking ? { thinking: result.thinking } : {}),
+    turns: result.turns,
+    toolCalls: result.toolCalls,
+    usage: result.usage,
+  },
+  implementation: result.value ?? result.text,
+  ...(result.error ? { error: result.error } : {}),
+});
+
 const actorRequest = (
   args: Record<string, unknown>,
   context: FabricInvocationContext,
@@ -697,7 +789,7 @@ const waitWithProgress = async (
   id: string,
   context: FabricInvocationContext,
   nestedToolsEnabled: () => boolean,
-): Promise<unknown> => {
+): Promise<SubagentRunResult> => {
   const result = manager.wait(id);
   let lastProgressRevision: string | undefined;
   try {
@@ -806,6 +898,68 @@ export class AgentsProvider implements FabricProvider {
     return descriptors.find((descriptor) => descriptor.name === actionName);
   }
 
+  async handoff(
+    args: Record<string, unknown>,
+    context: FabricInvocationContext,
+  ): Promise<Record<string, unknown>> {
+    const model = typeof args.model === "string" ? args.model.trim() : "";
+    if (!model) throw new Error("agents.handoff requires an explicit Pi target model");
+    if (!context.deferHandoff) {
+      throw new Error(
+        "agents.handoff must be scheduled from inside fabric_exec and completed at its outer result boundary",
+      );
+    }
+    return context.deferHandoff({ ...args, model });
+  }
+
+  async executeHandoff(
+    args: Record<string, unknown>,
+    context: FabricInvocationContext,
+    sessionSeed: SubagentSessionSeed,
+  ): Promise<Record<string, unknown>> {
+    const model = typeof args.model === "string" ? args.model.trim() : "";
+    if (!model) throw new Error("agents.handoff requires an explicit Pi target model");
+    const request = runRequest(
+      {
+        ...args,
+        task: handoffTask(args),
+        name:
+          typeof args.name === "string" && args.name.trim()
+            ? args.name
+            : "Trajectory handoff",
+        runner: "pi",
+        model,
+      },
+      context,
+      this.manager,
+    );
+    request.runner = "pi";
+    request.sessionSeed = sessionSeed;
+    const handle = await this.manager.spawn(request, context.signal);
+    context.activity?.({
+      type: "entity",
+      id: handle.id,
+      kind: "agent",
+      name: handle.name,
+    });
+    context.update(
+      `Trajectory handed off to ${handle.name} (${model}); caller is waiting for implementation`,
+    );
+    const completed = await waitWithProgress(
+      this.manager,
+      this.#transcripts,
+      handle.id,
+      context,
+      this.nestedToolsEnabled,
+    );
+    context.update(
+      completed.status === "completed"
+        ? `Handoff ${handle.name} completed implementation`
+        : `Handoff ${handle.name} ended with ${completed.status}`,
+    );
+    return compactHandoffResult(completed);
+  }
+
   async invoke(
     actionName: string,
     args: Record<string, unknown>,
@@ -834,6 +988,8 @@ export class AgentsProvider implements FabricProvider {
           this.nestedToolsEnabled,
         );
       }
+      case "handoff":
+        return this.handoff(args, context);
       case "spawn": {
         const handle = await this.manager.spawn(
           runRequest(args, context, this.manager),
@@ -973,6 +1129,16 @@ export class AgentsProvider implements FabricProvider {
         return this.actorManager.messages(
           String(args.id),
           typeof args.limit === "number" ? args.limit : 50,
+        );
+      case "setModel":
+        return this.actorManager.setModel(
+          String(args.id),
+          typeof args.model === "string" ? args.model : undefined,
+        );
+      case "setThinking":
+        return this.actorManager.setThinking(
+          String(args.id),
+          typeof args.thinking === "string" ? args.thinking : undefined,
         );
       case "setTools": {
         const tools = stringArray(args.tools) ?? [];

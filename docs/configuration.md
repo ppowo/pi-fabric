@@ -52,6 +52,7 @@ Pi Fabric reads configuration from two JSON files. Project values override globa
     "allowDynamicServers": true,
     "callTimeoutMs": 120000
   },
+  "prewalk": {},
   "subagents": {
     "enabled": true,
     "runner": "pi",
@@ -95,6 +96,20 @@ Pi Fabric reads configuration from two JSON files. Project values override globa
   }
 }
 ```
+
+## Prewalk executor
+
+`prewalk.model` is the optional Pi `provider/model` used by `/fabric prewalk`. Set it under `/fabric settings` → **Prewalk** or in JSON:
+
+```json
+{
+  "prewalk": {
+    "model": "anthropic/claude-haiku-4-5"
+  }
+}
+```
+
+The settings UI labels the unset state **Ask each time**. In that state, interactive sessions choose a model while arming prewalk; non-interactive sessions reject the command. This setting is independent of `subagents.model` so ordinary children and the automatic handoff executor can use different models.
 
 ## Result formatting
 

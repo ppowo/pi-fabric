@@ -45,6 +45,54 @@ const handle = await agents.spawn({
 return await agents.wait({ id: handle.id });
 ```
 
+### Trajectory-preserving handoff
+
+A handoff is a blocking Pi-to-Pi delegation over a real fork of the caller's active session branch, rather than a fresh worker that receives only a task string. One complete `fabric_exec` invocation is the atomic frontier unit. An explicit `agents.handoff()` call records a deferred request inside the guest; it does not spawn a child or stop the program at that line. Sequential and parallel calls after the request continue normally.
+
+After the complete Fabric program returns, Pi finalizes the native outer `fabric_exec` tool result. At that `message_end` boundary, Fabric forks through the original assistant entry containing the native `fabric_exec` call and appends that exact finalized native `toolResult` to the child branch. It then starts the selected executor in the same workspace and waits before Pi can perform another Main inference. The child therefore sees exactly the outer call and frontier result finalized before handoff replacement, including the Fabric source, output, and persisted trace; nested calls are not rewritten into synthetic assistant turns. An in-memory source is materialized into the same native Pi session format.
+
+Fabric adds no handoff-specific count or size limit. Normal `fabric_exec` output and trace projection limits still apply before the boundary. Handoff fails closed if the active outer turn cannot be identified or belongs to an incomplete parallel top-level tool batch.
+
+```ts
+await pi.edit({ path: "src/guard.ts", edits: [{ oldText, newText }] });
+await agents.handoff({
+  model: "anthropic/claude-haiku-4-5",
+  task: "Continue from this completed Fabric invocation.",
+  when: ({ count }) => count("pi.edit") >= 1,
+});
+await pi.bash({ command: "pnpm test guard" });
+return "Frontier Fabric invocation completed";
+```
+
+`when` is an optional pure synchronous predicate evaluated inside the Fabric guest. It receives immutable `{ calls, count(ref?) }` facts for every successful resolved bridge call completed earlier in that `fabric_exec` program, including `pi.*`, `extensions.*`, `mcp.*`, external providers, and computed `tools.call()` refs. `count()` counts all calls; `count("pi.edit")` counts one ref; `count(["pi.edit", "schema.commit"])` counts a set. Generic calls are recorded under their resolved target rather than `fabric.$call`, and failed calls do not count. A false predicate starts no child and fails clearly; the function itself never crosses the host bridge. Omit `when` for unconditional scheduling.
+
+Inside the guest, `agents.handoff()` resolves to `{ scheduled: true, status: "deferred", boundary: "fabric_exec_end" }`; child output cannot be consumed by later code in that same Fabric invocation. At the outer boundary, Main's tool result is replaced with the compact completion `{ handedOff, completed, status, agent, implementation, error? }`. `model` is required, the target runner is Pi, and `worktree` is intentionally unavailable because implementation must remain visible in the caller's workspace. Optional fields are `task`, `name`, `transport`, `thinking`, `tools`, `timeoutMs`, `extensions`, `recursive`, and `schema`. The source session is not switched or historically rewritten.
+
+### Automatic Fabric-boundary prewalk
+
+`/fabric prewalk` is Fabric's automatic, prompt-free adaptation of Can Bölük's [Prewalk research](https://stencil.so/blog/prewalk), whose public in-place implementation ships in [oh-my-pi's `AgentSession`](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/session/agent-session.ts). Stencil and OMP use a todo-gated first edit/write as the exact model-switch boundary. Fabric intentionally uses a coarser atomic unit: the first successful monitored mutation marks the current outer `fabric_exec` for handoff, but every remaining call in that Fabric program still runs before the executor starts. This preserves Fabric's programmable multi-call transaction at the cost of literal one-edit equivalence. The published Prewalk benchmark results therefore describe the original mechanism, not this adaptation.
+
+```text
+/fabric prewalk
+/fabric prewalk Implement the token guard and run its tests
+/fabric prewalk --status
+/fabric prewalk --off
+```
+
+With a task, Fabric arms prewalk and submits that task to Main immediately. Without one, it captures the next user input as the task. The dedicated `prewalk.model` setting is the executor; set it under `/fabric settings` → **Prewalk**. When unset in an interactive session, Fabric asks the user to choose a Pi model while arming. Non-interactive sessions must configure `prewalk.model` first.
+
+Prewalk adds no system-prompt instructions. The host watches resolved Fabric actions for at least one successful `pi.edit`, `pi.write`, or `schema.commit`. A match makes that outer invocation eligible, but it does not abort, serialize, or suppress any later nested call. The complete sequential or parallel program runs with ordinary Fabric semantics, and the handoff is claimed only after execution settles.
+
+The host then issues a static handoff call without asking Main to invoke it:
+
+1. Claims and disarms the one-shot prewalk after the Fabric program settles.
+2. Lets Pi finalize all outer `tool_result` middleware.
+3. Forks the native assistant `fabric_exec` call plus its exact native result.
+4. Spawns the selected executor in the shared workspace and waits.
+5. Replaces Main's visible tool result with the executor completion.
+
+The outer tool is already marked `terminate: true` when the request is staged, so Main performs no automatic post-tool inference. A handoff failure is likewise terminal for that outer invocation and is returned as its failed result. If the captured task settles without a monitored trigger, prewalk disarms instead of leaking into the next task; an arm with no captured task keeps waiting for the next user input. An explicit successful `agents.handoff()` suppresses the automatic duplicate. Prewalk currently requires enabled subagents and full code mode, and is unavailable in Schema enforce mode.
+
 `runner` is `"pi"` or `"claude"` and defaults to `subagents.runner` (`"pi"`). Pi children use `subagents.model` or inherit the parent model unless `model` is specified. Claude children use `subagents.claude.model` or Claude Code's own runtime default. Their tool allowlist defaults to `subagents.defaultTools`. Reasoning effort defaults to `subagents.thinking` (`medium`); Pi clamps it to model support, while Claude forwards it through `--effort` (`off`/`minimal` map to `low`).
 
 ### Claude Code runner
@@ -184,7 +232,7 @@ await agents.setDeliveryPolicy({
 });
 ```
 
-Pass `scope: "global"` to update a reusable template. In the dashboard, press `y` on an actor or template to choose among mailbox, passive/active steer, passive/active follow-up, and next-turn delivery. Use `agents.ask()` for a blocking exchange, `agents.tell()` for fire-and-forget mail, `agents.messages()` for history, and `agents.remove()` for cleanup.
+Pass `scope: "global"` to update a reusable template. In the dashboard, press `y` on an actor or template to choose among mailbox, passive/active steer, passive/active follow-up, and next-turn delivery. Use `agents.setModel({ id, model? })` and `agents.setThinking({ id, thinking? })` to migrate a persistent actor for its next activation without replacing its Pi/Claude runner session; omit the override to return to configured defaults. Use `agents.ask()` for a blocking exchange, `agents.tell()` for fire-and-forget mail, `agents.messages()` for history, and `agents.remove()` for cleanup.
 
 ## Paged agent logs
 

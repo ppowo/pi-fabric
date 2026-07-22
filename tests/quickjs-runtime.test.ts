@@ -502,6 +502,154 @@ await Promise.all([
     expect(calls).toEqual(["a", "b"]);
   });
 
+
+  it("gates handoff with a pure predicate over successful call facts", async () => {
+    const calls: Array<{ ref: string; args: Record<string, unknown> }> = [];
+    const result = await new QuickJsRuntime().execute(
+      `
+await pi.edit({ path: "src/guard.ts", old: "false", new: "true" });
+return agents.handoff({
+  model: "anthropic/executor",
+  task: "Finish and verify the guard",
+  when: ({ count, calls }) =>
+    count("pi.edit") === 1 && calls[0]?.ref === "pi.edit",
+});
+`,
+      async (ref, args) => {
+        calls.push({ ref, args });
+        if (ref === "pi.edit") return { ok: true };
+        if (ref === "agents.handoff") {
+          return {
+            scheduled: true,
+            status: "deferred",
+            boundary: "fabric_exec_end",
+          };
+        }
+        throw new Error(`Unexpected call: ${ref}`);
+      },
+      options,
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.value).toMatchObject({
+      scheduled: true,
+      status: "deferred",
+      boundary: "fabric_exec_end",
+    });
+    expect(calls.map((call) => call.ref)).toEqual(["pi.edit", "agents.handoff"]);
+    expect(calls[1]?.args).toEqual({
+      model: "anthropic/executor",
+      task: "Finish and verify the guard",
+    });
+  });
+
+  it("counts successful calls across Pi, extensions, MCP, and computed providers", async () => {
+    const calls: string[] = [];
+    const result = await new QuickJsRuntime().execute(
+      `
+await pi.read({ path: "a.txt" });
+await extensions.format({ path: "a.txt" });
+await mcp.docs.lookup({ query: "handoff" });
+await tools.call({ ref: "external.inspect", args: { id: "a" } });
+return agents.handoff({
+  model: "anthropic/executor",
+  when: ({ count, calls }) =>
+    count() === 4 &&
+    count(["pi.read", "extensions.format", "mcp.docs.lookup", "external.inspect"]) === 4 &&
+    calls.map((call) => call.ref).join(",") ===
+      "pi.read,extensions.format,mcp.docs.lookup,external.inspect",
+});
+`,
+      async (ref) => {
+        calls.push(ref);
+        if (ref === "agents.handoff") {
+          return { scheduled: true, status: "deferred", boundary: "fabric_exec_end" };
+        }
+        return { ok: true };
+      },
+      options,
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(calls).toEqual([
+      "pi.read",
+      "extensions.format",
+      "mcp.docs.lookup",
+      "fabric.$call",
+      "agents.handoff",
+    ]);
+  });
+
+  it("does not call the host when the handoff predicate returns false", async () => {
+    const calls: string[] = [];
+    const result = await new QuickJsRuntime().execute(
+      `return agents.handoff({
+  model: "anthropic/executor",
+  when: ({ count }) => count("pi.edit") > 0,
+});`,
+      async (ref) => {
+        calls.push(ref);
+        return undefined;
+      },
+      options,
+    );
+
+    expect(result.error).toContain("predicate returned false");
+    expect(calls).toEqual([]);
+  });
+
+  it("does not count failed mutation calls in handoff facts", async () => {
+    const result = await new QuickJsRuntime().execute(
+      `
+try { await pi.edit({ path: "missing.ts", old: "a", new: "b" }); } catch {}
+return agents.handoff({
+  model: "anthropic/executor",
+  when: ({ count }) => count("pi.edit") === 1,
+});
+`,
+      async (ref) => {
+        if (ref === "pi.edit") throw new Error("edit failed");
+        throw new Error("handoff should not run");
+      },
+      options,
+    );
+
+    expect(result.error).toContain("predicate returned false");
+  });
+
+  it("rejects asynchronous handoff predicates", async () => {
+    const result = await new QuickJsRuntime().execute(
+      `return agents.handoff({
+  model: "anthropic/executor",
+  when: async () => true,
+});`,
+      async () => undefined,
+      options,
+    );
+
+    expect(result.error).toContain("must return a boolean synchronously");
+  });
+
+  it("keeps immediate boundary scheduling available without a predicate", async () => {
+    let args: Record<string, unknown> | undefined;
+    const result = await new QuickJsRuntime().execute(
+      'return agents.handoff({ model: "anthropic/executor", task: "Continue" });',
+      async (ref, value) => {
+        if (ref !== "agents.handoff") throw new Error(`Unexpected call: ${ref}`);
+        args = value;
+        return {
+          scheduled: true,
+          status: "deferred",
+          boundary: "fabric_exec_end",
+        };
+      },
+      options,
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(args).toEqual({ model: "anthropic/executor", task: "Continue" });
+  });
+
   it("routes agents.main and Main steering through the agents provider", async () => {
     const calls: string[] = [];
     const result = await new QuickJsRuntime().execute(

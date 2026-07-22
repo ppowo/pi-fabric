@@ -8,13 +8,24 @@ import { buildActorContext } from "./actors/context.js";
 import { actorDeliveryNotice } from "./actors/delivery-policy.js";
 import type { FabricActorHostEvent } from "./actors/types.js";
 import { CapturedToolCatalog } from "./capture/catalog.js";
-import { loadFabricConfig, type FabricConfig } from "./config.js";
+import {
+  loadFabricConfig,
+  type FabricConfig,
+  type FabricResultFormat,
+} from "./config.js";
 import { ActionRegistry } from "./core/action-registry.js";
 import { CompactController, type CompactLastCommit, type CompactPendingIntent } from "./core/compact-controller.js";
 import { FabricToolResultProxy } from "./core/tool-result-proxy.js";
-import { FabricExecutionService } from "./execution-service.js";
+import { FabricExecutionService, type FabricExecutionResult } from "./execution-service.js";
 import { MeshStore, type MeshIdentity } from "./mesh/store.js";
 import { PeerSessionRegistry, type FabricPeerInfo } from "./peer-session.js";
+import { PrewalkController } from "./prewalk/controller.js";
+import {
+  claimFabricHandoff,
+  runFabricHandoffAtBoundary,
+  type PendingFabricHandoff,
+} from "./prewalk/handoff.js";
+import type { SubagentToolResultMessage } from "./subagents/types.js";
 import {
   MainAgentController,
   resolveFabricIdentity,
@@ -63,6 +74,7 @@ export class FabricState {
   #cwd: string | undefined;
   readonly #externalProviders = new Map<string, FabricProvider>();
   readonly activity = new FabricActivityStore();
+  readonly prewalk = new PrewalkController();
   #widgetDismissedAt = 0;
 
   constructor(
@@ -151,6 +163,8 @@ export class FabricState {
 
   async initialize(context: ExtensionContext): Promise<void> {
     await this.#closeInternal();
+    this.prewalk.cancel();
+    context.ui.setStatus("fabric-prewalk", undefined);
     this.activity.reset();
     this.#cwd = context.cwd;
     const projectTrusted = context.isProjectTrusted();
@@ -370,6 +384,29 @@ export class FabricState {
     deepAssign(this.#config as unknown as Record<string, unknown>, next as unknown as Record<string, unknown>);
   }
 
+  claimHandoff(
+    execution: FabricExecutionResult,
+    sessionId: string,
+    resultFormat: FabricResultFormat,
+  ): PendingFabricHandoff | undefined {
+    return claimFabricHandoff(this.prewalk, execution, sessionId, resultFormat);
+  }
+
+  async runHandoffAtBoundary(
+    pending: PendingFabricHandoff,
+    outerToolResult: SubagentToolResultMessage,
+    context: ExtensionContext,
+  ): Promise<Record<string, unknown>> {
+    if (!this.#agentsProvider) throw new Error("Pi Fabric has not initialized");
+    return runFabricHandoffAtBoundary(
+      this.prewalk,
+      this.#agentsProvider,
+      pending,
+      outerToolResult,
+      context,
+    );
+  }
+
   dispatchHostEvent(
     event: FabricActorHostEvent,
     payload: unknown,
@@ -468,6 +505,7 @@ export class FabricState {
     this.activity.reset();
     this.#widgetDismissedAt = 0;
     this.#externalProviders.clear();
+    this.prewalk.cancel();
   }
 
   // Publish a best-effort mesh event to the durable `fabric.compact` topic so
@@ -514,6 +552,9 @@ const deepAssign = (
   target: Record<string, unknown>,
   source: Record<string, unknown>,
 ): void => {
+  for (const key of Object.keys(target)) {
+    if (!(key in source)) delete target[key];
+  }
   for (const [key, value] of Object.entries(source)) {
     const targetValue = target[key];
     if (isPlainObject(value) && isPlainObject(targetValue)) {

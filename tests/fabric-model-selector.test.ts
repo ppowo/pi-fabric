@@ -149,6 +149,25 @@ describe("FabricModelSelector", () => {
     expect(text).not.toContain("Use the host session's default model");
   });
 
+  it("supports a custom unset-row label without changing its sentinel value", () => {
+    let selected: string | undefined;
+    const component = new FabricModelSelector({
+      theme,
+      source,
+      currentValue: INHERIT_VALUE,
+      inheritLabel: "Ask each time",
+      onSelect: (value) => {
+        selected = value;
+      },
+      onCancel: () => {},
+    });
+
+    const text = render(component);
+    expect(text).toContain("Ask each time ✓");
+    component.handleInput("\r");
+    expect(selected).toBe(INHERIT_VALUE);
+  });
+
   it("defaults to the global wording when headerText/inheritName are omitted", () => {
     const component = new FabricModelSelector({
       theme,

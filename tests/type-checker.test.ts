@@ -26,6 +26,23 @@ return { mcpResult, review };
     expect(result.errors).toEqual([]);
   });
 
+  it("accepts immediate and predicate-gated trajectory handoff", () => {
+    const result = typeCheckFabricCode(
+      `
+await pi.edit({ path: "src/a.ts", old: "a", new: "b" });
+const migrated = await agents.setModel({ id: "reviewer", model: "anthropic/executor" });
+return agents.handoff({
+  model: "anthropic/executor",
+  task: migrated.name,
+  when: ({ count, calls }) =>
+    count(["pi.edit", "mcp.docs.lookup"]) >= 1 && calls[0]?.ref === "pi.edit",
+});
+`,
+      GUEST_TYPE_DECLARATIONS,
+    );
+    expect(result.errors).toEqual([]);
+  });
+
   it("accepts typed first-class Fabric provider calls", () => {
     const result = typeCheckFabricCode(
       `

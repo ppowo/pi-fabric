@@ -33,7 +33,9 @@ export interface FabricModelSelectorOptions {
   onCancel: () => void;
   /** Header line above the search input. Defaults to the global-default wording. */
   headerText?: string;
-  /** Description shown for the Inherit row's footer name. Defaults to the host-default wording. */
+  /** Label shown for the unset/default row. Defaults to Inherit. */
+  inheritLabel?: string;
+  /** Description shown for the unset/default row's footer name. */
   inheritName?: string;
 }
 
@@ -42,7 +44,7 @@ export interface FabricModelSelectorOptions {
  * (search input, list with `[provider]` badges and a ✓ on
  * the current row, scroll indicator, and a "Model Name:" footer) but it writes
  * the Fabric default-model setting instead of the host's default model, and
- * pins an "Inherit" row on top. Order respects pi-model-sort (most recently
+ * pins an unset/default row on top. Order respects pi-model-sort (most recently
  * used first); search filters by fuzzy match and re-sorts by recency, matching
  * pi-model-sort's patched /model behavior.
  */
@@ -59,6 +61,7 @@ export class FabricModelSelector extends Container implements Focusable {
   private readonly onSelectCallback: (value: string) => void;
   private readonly onCancelCallback: () => void;
   private readonly headerText: string;
+  private readonly inheritLabel: string;
   private readonly inheritName: string;
   private _focused = false;
 
@@ -73,6 +76,7 @@ export class FabricModelSelector extends Container implements Focusable {
     this.headerText =
       options.headerText ??
       "Default model for Fabric subagents and actors. Pick Inherit to use the host session's model.";
+    this.inheritLabel = options.inheritLabel ?? INHERIT_VALUE;
     this.inheritName = options.inheritName ?? "Use the host session's default model";
 
     this.allEntries = this.buildEntries(options.source.models);
@@ -141,7 +145,7 @@ export class FabricModelSelector extends Container implements Focusable {
     const sorted = sortByLastUsed(models, this.lastUsed, this.currentKey);
     const inherit: ModelEntry = {
       value: INHERIT_VALUE,
-      id: "Inherit",
+      id: this.inheritLabel,
       provider: "",
       name: this.inheritName,
       isModel: false,

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import { ActorManager } from "../src/actors/manager.js";
 import { GlobalActorRegistry } from "../src/actors/global-registry.js";
@@ -11,11 +11,21 @@ import { MeshStore, type MeshIdentity } from "../src/mesh/store.js";
 import type { FabricPeerInfo } from "../src/peer-session.js";
 import type { FabricInvocationContext } from "../src/protocol.js";
 import { AgentsProvider } from "../src/providers/agents-provider.js";
+import { snapshotHandoffSession } from "../src/subagents/handoff.js";
 import { SubagentManager } from "../src/subagents/manager.js";
 
 const roots: string[] = [];
 const actorManagers: ActorManager[] = [];
 const subagentManagers: SubagentManager[] = [];
+
+const usage = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 0,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
 
 const context: FabricInvocationContext = {
   cwd: process.cwd(),
@@ -133,6 +143,155 @@ describe("AgentsProvider runner support", () => {
 
     await expect(provider.invoke("peers", {}, context)).resolves.toEqual([peer]);
     expect((await provider.describe("peers", context))?.risk).toBe("read");
+  });
+
+  it("defers explicit handoff until the finalized outer Fabric result", async () => {
+    const { provider, root } = setup();
+    const source = SessionManager.create(process.cwd(), path.join(root, "source-session"));
+    source.appendMessage({
+      role: "user",
+      content: "Implement the rare token guard 43117",
+      timestamp: 1,
+    });
+    source.appendMessage({
+      role: "assistant",
+      content: [
+        { type: "text", text: "I found the guard and am completing the full program." },
+        {
+          type: "toolCall",
+          id: context.parentToolCallId,
+          name: "fabric_exec",
+          arguments: {
+            code: "await pi.read(...); await pi.edit(...); await pi.edit(...); return 'verified';",
+          },
+        },
+      ],
+      api: "anthropic",
+      provider: "anthropic",
+      model: "frontier",
+      usage,
+      stopReason: "toolUse",
+      timestamp: 2,
+    });
+    const updates: string[] = [];
+    let deferredRequest: Record<string, unknown> | undefined;
+    const handoffContext: FabricInvocationContext = {
+      ...context,
+      extensionContext: {
+        sessionManager: source,
+        model: { provider: "anthropic", id: "frontier" },
+      } as unknown as ExtensionContext,
+      update(message) {
+        updates.push(message);
+      },
+      deferHandoff(args) {
+        deferredRequest = structuredClone(args);
+        return {
+          scheduled: true,
+          status: "deferred",
+          boundary: "fabric_exec_end",
+        };
+      },
+    };
+    const args = {
+      model: "anthropic/executor",
+      task: "Finish the implementation and verify it.",
+      transport: "process",
+    };
+
+    await expect(provider.invoke("handoff", args, handoffContext)).resolves.toMatchObject({
+      status: "deferred",
+      boundary: "fabric_exec_end",
+    });
+    expect(deferredRequest).toEqual(args);
+    expect(fs.existsSync(path.join(root, "runs"))).toBe(false);
+
+    const outerToolResult = {
+      role: "toolResult" as const,
+      toolCallId: context.parentToolCallId,
+      toolName: "fabric_exec",
+      content: [{ type: "text" as const, text: "verified after every nested call" }],
+      details: { success: true },
+      isError: false,
+      timestamp: 3,
+    };
+    const seed = snapshotHandoffSession(
+      source,
+      { provider: "anthropic", id: "frontier" },
+      outerToolResult,
+      context.parentToolCallId,
+    );
+    const result = (await provider.executeHandoff(
+      deferredRequest!,
+      handoffContext,
+      seed,
+    )) as {
+      handedOff: boolean;
+      completed: boolean;
+      status: string;
+      implementation: string;
+      agent: { id: string; model: string };
+    };
+
+    expect(result).toMatchObject({
+      handedOff: true,
+      completed: true,
+      status: "completed",
+      implementation: "fake worker complete",
+      agent: { model: "anthropic/executor" },
+    });
+    expect(updates).toContainEqual(expect.stringContaining("caller is waiting"));
+    expect(updates).toContainEqual(expect.stringContaining("completed implementation"));
+    const task = fs.readFileSync(
+      path.join(root, "runs", result.agent.id, "task.txt"),
+      "utf8",
+    );
+    expect(task).toContain("inherited conversation trajectory");
+    expect(task).toContain("Finish the implementation and verify it.");
+    const handoffDirectory = path.join(root, "runs", result.agent.id, "handoff-session");
+    const [sessionName] = fs.readdirSync(handoffDirectory);
+    const seededSession = SessionManager.open(path.join(handoffDirectory, sessionName!));
+    const seededMessages = seededSession.buildSessionContext().messages;
+    expect(JSON.stringify(seededMessages)).toContain("Implement the rare token guard 43117");
+    expect(seededMessages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "toolResult",
+    ]);
+    expect(seededMessages[1]).toMatchObject({
+      role: "assistant",
+      content: expect.arrayContaining([
+        expect.objectContaining({
+          type: "toolCall",
+          name: "fabric_exec",
+          id: context.parentToolCallId,
+        }),
+      ]),
+    });
+    expect(seededMessages[2]).toEqual(outerToolResult);
+    expect(seededSession.getEntries().some((entry) => entry.type === "custom_message")).toBe(false);
+  });
+
+  it("requires an explicit target model for handoff", async () => {
+    const { provider, root } = setup();
+    const source = SessionManager.inMemory(root);
+    const handoffContext = {
+      ...context,
+      extensionContext: { sessionManager: source } as unknown as ExtensionContext,
+    };
+    await expect(provider.invoke("handoff", {}, handoffContext)).rejects.toThrow(
+      /requires an explicit Pi target model/,
+    );
+    const descriptor = await provider.describe("handoff", handoffContext);
+    expect(descriptor?.risk).toBe("agent");
+    const schema = descriptor?.inputSchema as {
+      required: string[];
+      properties: Record<string, unknown>;
+    };
+    expect(schema.required).toEqual(["model"]);
+    expect(schema.properties).toHaveProperty("task");
+    expect(schema.properties).not.toHaveProperty("when");
+    expect(schema.properties).not.toHaveProperty("checkpoint");
   });
 
   it("attaches a structured child-tool preview to blocking agent runs", async () => {
@@ -332,6 +491,33 @@ describe("AgentsProvider global actors", () => {
       name: string;
     };
     expect(replaced.name).toBe("reviewer");
+  });
+
+  it("migrates a persistent actor model and thinking without replacing its session", async () => {
+    const { provider, actors } = setup();
+    const actor = (await provider.invoke("create", createRequest, context)) as {
+      id: string;
+      sessionFile?: string;
+    };
+    const sessionFile = actors.status(actor.id).sessionFile;
+
+    await provider.invoke(
+      "setModel",
+      { id: actor.id, model: "anthropic/executor" },
+      context,
+    );
+    await provider.invoke("setThinking", { id: actor.id, thinking: "low" }, context);
+    expect(actors.status(actor.id)).toMatchObject({
+      model: "anthropic/executor",
+      thinking: "low",
+      sessionFile,
+    });
+
+    await provider.invoke("setModel", { id: actor.id }, context);
+    await provider.invoke("setThinking", { id: actor.id }, context);
+    expect(actors.status(actor.id)).not.toHaveProperty("model");
+    expect(actors.status(actor.id)).not.toHaveProperty("thinking");
+    expect(actors.status(actor.id).sessionFile).toBe(sessionFile);
   });
 
   it("updates tool allowlists for project actors and global templates", async () => {

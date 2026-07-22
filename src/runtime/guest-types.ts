@@ -28,6 +28,32 @@ interface FabricAgentRequest {
   worktree?: boolean;
   schema?: Record<string, unknown>;
 }
+interface FabricHandoffCall {
+  readonly ref: string;
+}
+interface FabricHandoffFacts {
+  readonly calls: readonly FabricHandoffCall[];
+  count(ref?: string | readonly string[]): number;
+}
+type FabricHandoffPredicate = (facts: Readonly<FabricHandoffFacts>) => boolean;
+interface FabricHandoffRequest {
+  model: string;
+  task?: string;
+  when?: FabricHandoffPredicate;
+  name?: string;
+  transport?: FabricTransport;
+  thinking?: FabricThinking;
+  tools?: string[];
+  timeoutMs?: number;
+  extensions?: boolean;
+  recursive?: boolean;
+  schema?: Record<string, unknown>;
+}
+interface FabricHandoffResult {
+  scheduled: true;
+  status: "deferred";
+  boundary: "fabric_exec_end";
+}
 interface FabricMainAgentInfo {
   id: string;
   name: "Main";
@@ -246,6 +272,7 @@ interface FabricActorMessage {
 }
 interface FabricAgentsApi {
   run(args: FabricAgentRequest): Promise<FabricAgentResult>;
+  handoff(args: FabricHandoffRequest): Promise<FabricHandoffResult>;
   spawn(args: FabricAgentRequest): Promise<FabricAgentHandle>;
   wait(args: { id: string }): Promise<FabricAgentResult>;
   status(args: { id: string }): Promise<FabricAgentResult | FabricAgentHandle | FabricMainAgentInfo>;
@@ -256,6 +283,8 @@ interface FabricAgentsApi {
   stop(args: { id: string }): Promise<FabricAgentResult>;
   cleanup(args: { id: string; deleteBranch?: boolean }): Promise<{ cleaned: boolean }>;
   create(args: FabricActorRequest): Promise<FabricActorInfo>;
+  setModel(args: { id: string; model?: string }): Promise<FabricActorInfo>;
+  setThinking(args: { id: string; thinking?: FabricThinking }): Promise<FabricActorInfo>;
   setTools(args: { id: string; tools: string[]; scope?: "project" | "global" }): Promise<FabricActorInfo>;
   setEvents(args: { id: string; events: FabricActorHostEvent[] }): Promise<FabricActorInfo>;
   setDeliveryPolicy(args: {

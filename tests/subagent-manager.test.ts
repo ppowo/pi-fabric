@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { DEFAULT_FABRIC_CONFIG } from "../src/config.js";
+import { snapshotHandoffSession } from "../src/subagents/handoff.js";
 import {
   effectiveSubagentTimeoutMs,
   SubagentManager,
@@ -11,6 +13,51 @@ import type { SubagentRunRecord, SubagentRunResult } from "../src/subagents/type
 
 const managers: SubagentManager[] = [];
 const roots: string[] = [];
+const handoffSeed = (fact = "Rare handoff fact 43117") => {
+  const source = SessionManager.inMemory();
+  source.appendMessage({ role: "user", content: fact, timestamp: 1 });
+  source.appendModelChange("anthropic", "frontier");
+  source.appendThinkingLevelChange("high");
+  source.appendMessage({
+    role: "assistant",
+    content: [
+      { type: "text", text: "Ready to continue from the fork." },
+      {
+        type: "toolCall",
+        id: "outer-manager-handoff",
+        name: "fabric_exec",
+        arguments: { code: "return agents.handoff(...)" },
+      },
+    ],
+    api: "anthropic",
+    provider: "anthropic",
+    model: "frontier",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "toolUse",
+    timestamp: 2,
+  });
+  return snapshotHandoffSession(
+    source,
+    { provider: "anthropic", id: "frontier" },
+    {
+      role: "toolResult",
+      toolCallId: "outer-manager-handoff",
+      toolName: "fabric_exec",
+      content: [{ type: "text", text: "Manager boundary complete" }],
+      details: { success: true },
+      isError: false,
+      timestamp: 3,
+    },
+    "outer-manager-handoff",
+  );
+};
 const fabricEnvKeys = [
   "PI_FABRIC_DEPTH",
   "PI_FABRIC_BUDGET",
@@ -90,6 +137,70 @@ describe("SubagentManager", () => {
     expect(manager.list()).toHaveLength(1);
     fs.rmSync(path.join(manager.runDirectory(result.id)!, "status.json"));
     expect(manager.status(result.id).status).toBe("completed");
+  });
+
+  it("materializes a private Pi session for a trajectory handoff seed", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-manager-"));
+    roots.push(root);
+    const manager = new SubagentManager(process.cwd(), DEFAULT_FABRIC_CONFIG.subagents, {
+      workerPath: path.resolve("tests/fixtures/fake-worker.mjs"),
+      runRoot: root,
+    });
+    managers.push(manager);
+    const handle = await manager.spawn({
+      task: "HANG while the handoff session is inspected",
+      runner: "pi",
+      transport: "process",
+      model: "anthropic/executor",
+      sessionSeed: handoffSeed(),
+    });
+    const handoffDirectory = path.join(manager.runDirectory(handle.id)!, "handoff-session");
+    const [sessionName] = fs.readdirSync(handoffDirectory);
+    expect(sessionName).toBeDefined();
+    const session = SessionManager.open(path.join(handoffDirectory, sessionName!));
+    expect(session.buildSessionContext()).toMatchObject({
+      messages: [
+        { role: "user", content: "Rare handoff fact 43117" },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "Ready to continue from the fork." },
+            { type: "toolCall", id: "outer-manager-handoff", name: "fabric_exec" },
+          ],
+        },
+        {
+          role: "toolResult",
+          toolCallId: "outer-manager-handoff",
+          toolName: "fabric_exec",
+          content: [{ type: "text", text: "Manager boundary complete" }],
+        },
+      ],
+      model: { provider: "anthropic", modelId: "frontier" },
+      thinkingLevel: "high",
+    });
+    await manager.stop(handle.id);
+  });
+
+  it("rejects trajectory seeds for the Claude runner and conflicting session files", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fabric-manager-"));
+    roots.push(root);
+    const manager = new SubagentManager(process.cwd(), DEFAULT_FABRIC_CONFIG.subagents, {
+      workerPath: path.resolve("tests/fixtures/fake-worker.mjs"),
+      runRoot: root,
+    });
+    managers.push(manager);
+    const sessionSeed = handoffSeed("Invalid seed");
+    await expect(
+      manager.spawn({ task: "invalid", runner: "claude", sessionSeed }),
+    ).rejects.toThrow(/only supported by the Pi runner/);
+    await expect(
+      manager.spawn({
+        task: "invalid",
+        runner: "pi",
+        sessionSeed,
+        sessionFile: path.join(root, "existing.jsonl"),
+      }),
+    ).rejects.toThrow(/cannot combine sessionSeed with sessionFile/);
   });
 
   it("coalesces concurrent Pi model preparation by provider", async () => {
